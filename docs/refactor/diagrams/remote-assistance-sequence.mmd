@@ -1,0 +1,30 @@
+sequenceDiagram
+  actor Family as 家属端
+  participant API as NestJS
+  participant Redis
+  participant Device as 陪伴设备
+  participant LiveKit
+
+  Family->>API: 创建 Remote Assistance Session
+  API->>API: 校验 Member/Care Authority/Policy/Consent
+  API->>Redis: SET NX media-owner:{bindingId}
+  Redis-->>API: 租约成功
+  API-->>Device: remote-session.invited
+  Device->>Device: 响铃或预授权倒计时
+  Device->>API: accept / decline
+  API-->>Family: remote-session.accepted
+  Family->>API: 请求短时 Join Ticket
+  Device->>API: 请求短时 Join Ticket
+  API-->>Family: 家属 LiveKit Token
+  API-->>Device: 设备 LiveKit Token
+  Family->>LiveKit: 加入房间
+  Device->>Device: MediaSessionCoordinator 释放 MiniCPM-o
+  Device->>LiveKit: 加入并发布摄像头/麦克风
+  LiveKit->>API: Webhook: 双方加入及轨道发布
+  API-->>Family: session ACTIVE
+  Family->>API: 结束会话
+  API->>LiveKit: 移除参与者/删除房间
+  API->>Redis: 释放媒体租约
+  API-->>Device: remote-session.ended
+  Device->>Device: 释放媒体；提示是否恢复 AI 陪伴
+

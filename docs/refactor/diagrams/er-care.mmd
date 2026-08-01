@@ -1,0 +1,27 @@
+erDiagram
+  HOUSEHOLD ||--o{ CARE_RECIPIENT : contains
+  CARE_RECIPIENT ||--o{ MEMORY : owns
+  MEMORY ||--o{ MEMORY_REVISION : versions
+  MEMORY ||--o{ MEMORY_TAG : tagged
+  TAG ||--o{ MEMORY_TAG : applies
+  ASSET ||--o{ MEMORY_ASSET : linked
+  MEMORY ||--o{ MEMORY_ASSET : contains
+  ASSET ||--o{ RECIPIENT_ASSET : linked
+  CARE_RECIPIENT ||--o{ RECIPIENT_ASSET : contains
+
+  CARE_RECIPIENT ||--o{ MEDICATION : owns
+  MEDICATION ||--o{ MEDICATION_ASSET : illustrates
+  ASSET ||--o{ MEDICATION_ASSET : linked
+  CARE_RECIPIENT ||--o{ ROUTINE : owns
+  MEDICATION o|--o{ ROUTINE : informs
+  ROUTINE ||--o{ ROUTINE_SCHEDULE : schedules
+  ROUTINE_SCHEDULE ||--o{ ROUTINE_OCCURRENCE : materializes
+  ROUTINE_OCCURRENCE ||--o{ ROUTINE_CONFIRMATION : confirms
+  ROUTINE_OCCURRENCE ||--o{ CARE_EVENT : produces
+
+  CARE_RECIPIENT ||--o{ CARE_EVENT : receives
+  CARE_EVENT ||--o| FAMILY_TASK : opens
+  FAMILY_TASK ||--o{ FAMILY_TASK_ACTION : changes
+  ASSET ||--o{ CARE_EVENT_ASSET : evidences
+  CARE_EVENT ||--o{ CARE_EVENT_ASSET : contains
+

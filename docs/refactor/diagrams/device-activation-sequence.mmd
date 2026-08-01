@@ -1,0 +1,21 @@
+sequenceDiagram
+  actor Family as 家属端
+  participant API as NestJS
+  participant DB as MySQL
+  participant Device as 陪伴设备
+
+  Device->>API: 注册安装公钥
+  API-->>Device: deviceId + serverNonce
+  Family->>API: 创建 Activation Challenge
+  API->>DB: 保存 secret/code 哈希及 5 分钟期限
+  API-->>Family: 二维码 + 动态码（只展示一次）
+  Device->>API: publicId + secret/code + 公钥签名 Claim
+  API->>DB: 标记 CLAIMED，记录设备摘要
+  API-->>Family: activation.claimed
+  Family->>API: 重新验证并批准设备
+  API->>DB: 事务：Challenge CONSUMED + Binding + Credential hash + Outbox
+  API-->>Device: activation.approved
+  Device->>API: 证明持有设备私钥并兑换凭据
+  API-->>Device: 范围受限 Device Credential
+  Device->>Device: 清除家属 User Session，进入陪伴模式
+

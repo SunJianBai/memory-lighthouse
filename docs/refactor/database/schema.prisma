@@ -1,0 +1,1295 @@
+// Target data-model draft for the refactored server.
+// IDs are application-generated ULIDs. Status columns intentionally remain strings
+// so state additions do not require MySQL ENUM rewrites.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider     = "mysql"
+  relationMode = "foreignKeys"
+}
+
+model User {
+  id           String    @id @db.Char(26)
+  display_name String    @db.VarChar(100)
+  status       String    @db.VarChar(32)
+  locale       String    @default("zh-CN") @db.VarChar(16)
+  timezone     String    @default("Asia/Shanghai") @db.VarChar(64)
+  created_at   DateTime  @default(now()) @db.DateTime(3)
+  updated_at   DateTime  @updatedAt @db.DateTime(3)
+  deleted_at   DateTime? @db.DateTime(3)
+  version      Int       @default(0)
+
+  login_identities          LoginIdentity[]
+  password_credential       PasswordCredential?
+  sessions                  UserSession[]
+  one_time_tokens           OneTimeToken[]
+  platform_role_assignments PlatformRoleAssignment[]
+  household_memberships     HouseholdMember[]
+  notification_endpoints    NotificationEndpoint[]
+
+  @@index([status, created_at])
+  @@map("users")
+}
+
+model LoginIdentity {
+  id               String    @id @db.Char(26)
+  user_id          String    @db.Char(26)
+  type             String    @db.VarChar(16)
+  value            String    @db.VarChar(320)
+  normalized_value String    @db.VarChar(320)
+  verified_at      DateTime? @db.DateTime(3)
+  is_primary       Boolean   @default(false)
+  created_at       DateTime  @default(now()) @db.DateTime(3)
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([type, normalized_value])
+  @@index([user_id])
+  @@map("login_identities")
+}
+
+model PasswordCredential {
+  user_id        String   @id @db.Char(26)
+  password_hash  Bytes    @db.VarBinary(255)
+  algorithm      String   @db.VarChar(32)
+  params_version Int      @default(1)
+  changed_at     DateTime @db.DateTime(3)
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("password_credentials")
+}
+
+model UserSession {
+  id                     String    @id @db.Char(26)
+  user_id                String    @db.Char(26)
+  device_id              String?   @db.Char(26)
+  refresh_token_hash     Bytes     @unique @db.Binary(32)
+  token_family_id        String    @db.Char(26)
+  client_type            String    @db.VarChar(16)
+  issued_at              DateTime  @db.DateTime(3)
+  expires_at             DateTime  @db.DateTime(3)
+  last_used_at           DateTime? @db.DateTime(3)
+  rotated_at             DateTime? @db.DateTime(3)
+  revoked_at             DateTime? @db.DateTime(3)
+  replaced_by_session_id String?   @db.Char(26)
+  ip_hash                Bytes?    @db.Binary(32)
+  user_agent             String?   @db.VarChar(512)
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, revoked_at, expires_at])
+  @@index([token_family_id])
+  @@map("user_sessions")
+}
+
+model OneTimeToken {
+  id            String    @id @db.Char(26)
+  user_id       String    @db.Char(26)
+  identity_id   String?   @db.Char(26)
+  purpose       String    @db.VarChar(32)
+  token_hash    Bytes     @unique @db.Binary(32)
+  expires_at    DateTime  @db.DateTime(3)
+  consumed_at   DateTime? @db.DateTime(3)
+  attempt_count Int       @default(0)
+  created_at    DateTime  @default(now()) @db.DateTime(3)
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, purpose, expires_at])
+  @@map("one_time_tokens")
+}
+
+model Role {
+  id          String   @id @db.Char(26)
+  scope       String   @db.VarChar(16)
+  code        String   @db.VarChar(64)
+  name        String   @db.VarChar(100)
+  description String?  @db.VarChar(500)
+  created_at  DateTime @default(now()) @db.DateTime(3)
+
+  role_permissions       RolePermission[]
+  platform_assignments   PlatformRoleAssignment[]
+  household_member_roles HouseholdMemberRole[]
+
+  @@unique([scope, code])
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @db.Char(26)
+  code        String   @unique @db.VarChar(100)
+  description String?  @db.VarChar(500)
+  created_at  DateTime @default(now()) @db.DateTime(3)
+
+  role_permissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  role_id       String @db.Char(26)
+  permission_id String @db.Char(26)
+
+  role       Role       @relation(fields: [role_id], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permission_id], references: [id], onDelete: Cascade)
+
+  @@id([role_id, permission_id])
+  @@map("role_permissions")
+}
+
+model PlatformRoleAssignment {
+  user_id        String   @db.Char(26)
+  role_id        String   @db.Char(26)
+  assigned_by_id String?  @db.Char(26)
+  assigned_at    DateTime @default(now()) @db.DateTime(3)
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [role_id], references: [id], onDelete: Restrict)
+
+  @@id([user_id, role_id])
+  @@map("platform_role_assignments")
+}
+
+model Household {
+  id                 String   @id @db.Char(26)
+  name               String   @db.VarChar(100)
+  timezone           String   @default("Asia/Shanghai") @db.VarChar(64)
+  status             String   @db.VarChar(32)
+  created_by_user_id String   @db.Char(26)
+  created_at         DateTime @default(now()) @db.DateTime(3)
+  updated_at         DateTime @updatedAt @db.DateTime(3)
+  version            Int      @default(0)
+
+  members            HouseholdMember[]
+  invitations        HouseholdInvitation[]
+  care_recipients    CareRecipient[]
+  memories           Memory[]
+  assets             Asset[]
+  medications        Medication[]
+  routines           Routine[]
+  occurrences        RoutineOccurrence[]
+  care_events        CareEvent[]
+  family_tasks       FamilyTask[]
+  companion_sessions CompanionSession[]
+  remote_sessions    RemoteAssistanceSession[]
+  notifications      Notification[]
+  inspection_grants  InspectionGrant[]
+
+  @@index([status, created_at])
+  @@map("households")
+}
+
+model HouseholdMember {
+  id                   String    @id @db.Char(26)
+  household_id         String    @db.Char(26)
+  user_id              String    @db.Char(26)
+  status               String    @db.VarChar(32)
+  invited_by_member_id String?   @db.Char(26)
+  joined_at            DateTime? @db.DateTime(3)
+  left_at              DateTime? @db.DateTime(3)
+  created_at           DateTime  @default(now()) @db.DateTime(3)
+  updated_at           DateTime  @updatedAt @db.DateTime(3)
+  version              Int       @default(0)
+
+  household          Household                  @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  user               User                       @relation(fields: [user_id], references: [id], onDelete: Restrict)
+  roles              HouseholdMemberRole[]
+  recipient_members  RecipientMember[]
+  issued_invitations HouseholdInvitation[]
+  policy_memberships RemoteAccessPolicyMember[]
+
+  @@unique([household_id, user_id])
+  @@index([user_id, status])
+  @@map("household_members")
+}
+
+model HouseholdMemberRole {
+  member_id String @db.Char(26)
+  role_id   String @db.Char(26)
+
+  member HouseholdMember @relation(fields: [member_id], references: [id], onDelete: Cascade)
+  role   Role            @relation(fields: [role_id], references: [id], onDelete: Restrict)
+
+  @@id([member_id, role_id])
+  @@map("household_member_roles")
+}
+
+model HouseholdInvitation {
+  id                      String    @id @db.Char(26)
+  household_id            String    @db.Char(26)
+  target_email_normalized String    @db.VarChar(320)
+  role_id                 String    @db.Char(26)
+  token_hash              Bytes     @unique @db.Binary(32)
+  issued_by_member_id     String    @db.Char(26)
+  expires_at              DateTime  @db.DateTime(3)
+  accepted_at             DateTime? @db.DateTime(3)
+  revoked_at              DateTime? @db.DateTime(3)
+  created_at              DateTime  @default(now()) @db.DateTime(3)
+
+  household Household       @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  issuer    HouseholdMember @relation(fields: [issued_by_member_id], references: [id], onDelete: Restrict)
+
+  @@index([household_id, expires_at])
+  @@map("household_invitations")
+}
+
+model CareRecipient {
+  id                             String    @id @db.Char(26)
+  household_id                   String    @db.Char(26)
+  linked_user_id                 String?   @db.Char(26)
+  name                           String    @db.VarChar(100)
+  preferred_name                 String    @db.VarChar(100)
+  birth_date                     DateTime? @db.Date
+  timezone                       String    @default("Asia/Shanghai") @db.VarChar(64)
+  home_label                     String?   @db.VarChar(100)
+  communication_notes_ciphertext Bytes?    @db.LongBlob
+  communication_notes_nonce      Bytes?    @db.VarBinary(24)
+  encryption_key_id              String?   @db.VarChar(64)
+  status                         String    @db.VarChar(32)
+  created_at                     DateTime  @default(now()) @db.DateTime(3)
+  updated_at                     DateTime  @updatedAt @db.DateTime(3)
+  deleted_at                     DateTime? @db.DateTime(3)
+  version                        Int       @default(0)
+
+  household             Household                   @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  member_authorities    RecipientMember[]
+  trusted_contacts      TrustedContact[]
+  bindings              CompanionBinding[]
+  activation_challenges DeviceActivationChallenge[]
+  consent_states        RecipientConsentState[]
+  consent_events        RecipientConsentEvent[]
+  memories              Memory[]
+  assets                Asset[]
+  asset_links           RecipientAsset[]
+  medications           Medication[]
+  routines              Routine[]
+  occurrences           RoutineOccurrence[]
+  care_events           CareEvent[]
+  family_tasks          FamilyTask[]
+  companion_sessions    CompanionSession[]
+  remote_sessions       RemoteAssistanceSession[]
+  notifications         Notification[]
+
+  @@index([household_id, status])
+  @@map("care_recipients")
+}
+
+model RecipientMember {
+  id                    String   @id @db.Char(26)
+  household_id          String   @db.Char(26)
+  recipient_id          String   @db.Char(26)
+  household_member_id   String   @db.Char(26)
+  relationship_label    String?  @db.VarChar(50)
+  access_level          String   @db.VarChar(32)
+  can_manage_profile    Boolean  @default(false)
+  can_manage_routine    Boolean  @default(false)
+  can_view_events       Boolean  @default(false)
+  can_view_conversation Boolean  @default(false)
+  can_activate_device   Boolean  @default(false)
+  can_remote_call       Boolean  @default(false)
+  receive_notifications Boolean  @default(true)
+  contact_priority      Int?
+  status                String   @db.VarChar(32)
+  created_at            DateTime @default(now()) @db.DateTime(3)
+  updated_at            DateTime @updatedAt @db.DateTime(3)
+  version               Int      @default(0)
+
+  recipient CareRecipient   @relation(fields: [recipient_id], references: [id], onDelete: Cascade)
+  member    HouseholdMember @relation(fields: [household_member_id], references: [id], onDelete: Cascade)
+
+  @@unique([recipient_id, household_member_id])
+  @@index([household_id, status])
+  @@map("recipient_members")
+}
+
+model TrustedContact {
+  id                  String   @id @db.Char(26)
+  household_id        String   @db.Char(26)
+  recipient_id        String   @db.Char(26)
+  household_member_id String?  @db.Char(26)
+  name                String   @db.VarChar(100)
+  relationship_label  String   @db.VarChar(50)
+  phone_ciphertext    Bytes?   @db.Blob
+  email_ciphertext    Bytes?   @db.Blob
+  contact_nonce       Bytes?   @db.VarBinary(24)
+  encryption_key_id   String?  @db.VarChar(64)
+  priority            Int      @default(1)
+  can_view_evidence   Boolean  @default(false)
+  created_at          DateTime @default(now()) @db.DateTime(3)
+  updated_at          DateTime @updatedAt @db.DateTime(3)
+  version             Int      @default(0)
+
+  recipient CareRecipient @relation(fields: [recipient_id], references: [id], onDelete: Cascade)
+
+  @@index([recipient_id, priority])
+  @@map("trusted_contacts")
+}
+
+model Device {
+  id                           String    @id @db.Char(26)
+  platform                     String    @db.VarChar(16)
+  installation_key_fingerprint Bytes     @unique @db.Binary(32)
+  installation_public_key      Bytes     @db.Blob
+  manufacturer                 String?   @db.VarChar(100)
+  model                        String?   @db.VarChar(100)
+  os_version                   String?   @db.VarChar(64)
+  app_version                  String?   @db.VarChar(32)
+  last_seen_at                 DateTime? @db.DateTime(3)
+  status                       String    @db.VarChar(32)
+  created_at                   DateTime  @default(now()) @db.DateTime(3)
+  updated_at                   DateTime  @updatedAt @db.DateTime(3)
+  version                      Int       @default(0)
+
+  companion_binding CompanionBinding?
+  challenges        DeviceActivationChallenge[]
+
+  @@index([status, last_seen_at])
+  @@map("devices")
+}
+
+model CompanionBinding {
+  id                     String    @id @db.Char(26)
+  device_id              String    @unique @db.Char(26)
+  household_id           String    @db.Char(26)
+  recipient_id           String    @db.Char(26)
+  display_name           String    @db.VarChar(100)
+  status                 String    @db.VarChar(32)
+  activated_by_member_id String    @db.Char(26)
+  activated_at           DateTime  @db.DateTime(3)
+  revoked_at             DateTime? @db.DateTime(3)
+  binding_version        Int       @default(1)
+  created_at             DateTime  @default(now()) @db.DateTime(3)
+  updated_at             DateTime  @updatedAt @db.DateTime(3)
+  version                Int       @default(0)
+
+  device               Device                    @relation(fields: [device_id], references: [id], onDelete: Restrict)
+  recipient            CareRecipient             @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  credentials          DeviceCredential[]
+  events               DeviceBindingEvent[]
+  companion_sessions   CompanionSession[]
+  remote_access_policy RemoteAccessPolicy?
+  remote_sessions      RemoteAssistanceSession[]
+
+  @@index([household_id, recipient_id, status])
+  @@map("companion_bindings")
+}
+
+model DeviceBindingEvent {
+  id          String   @id @db.Char(26)
+  binding_id  String   @db.Char(26)
+  event_type  String   @db.VarChar(32)
+  actor_type  String   @db.VarChar(16)
+  actor_id    String?  @db.Char(26)
+  reason_code String?  @db.VarChar(64)
+  occurred_at DateTime @default(now()) @db.DateTime(3)
+
+  binding CompanionBinding @relation(fields: [binding_id], references: [id], onDelete: Restrict)
+
+  @@index([binding_id, occurred_at])
+  @@map("device_binding_events")
+}
+
+model DeviceActivationChallenge {
+  id                    String    @id @db.Char(26)
+  public_id             String    @unique @db.VarChar(32)
+  flow                  String    @db.VarChar(32)
+  household_id          String    @db.Char(26)
+  recipient_id          String    @db.Char(26)
+  pending_device_id     String?   @db.Char(26)
+  secret_hash           Bytes     @unique @db.Binary(32)
+  code_hash             Bytes?    @db.Binary(32)
+  status                String    @db.VarChar(32)
+  issued_by_member_id   String    @db.Char(26)
+  approved_by_member_id String?   @db.Char(26)
+  expires_at            DateTime  @db.DateTime(3)
+  claimed_at            DateTime? @db.DateTime(3)
+  approved_at           DateTime? @db.DateTime(3)
+  consumed_at           DateTime? @db.DateTime(3)
+  attempt_count         Int       @default(0)
+  max_attempts          Int       @default(5)
+  created_at            DateTime  @default(now()) @db.DateTime(3)
+  updated_at            DateTime  @updatedAt @db.DateTime(3)
+  version               Int       @default(0)
+
+  recipient      CareRecipient @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  pending_device Device?       @relation(fields: [pending_device_id], references: [id], onDelete: SetNull)
+
+  @@index([status, expires_at])
+  @@index([household_id, recipient_id, status])
+  @@map("device_activation_challenges")
+}
+
+model DeviceCredential {
+  id                    String    @id @db.Char(26)
+  binding_id            String    @db.Char(26)
+  credential_hash       Bytes     @unique @db.Binary(32)
+  credential_family_id  String    @db.Char(26)
+  device_key_thumbprint Bytes     @db.Binary(32)
+  issued_at             DateTime  @db.DateTime(3)
+  expires_at            DateTime  @db.DateTime(3)
+  last_used_at          DateTime? @db.DateTime(3)
+  rotated_at            DateTime? @db.DateTime(3)
+  revoked_at            DateTime? @db.DateTime(3)
+
+  binding CompanionBinding @relation(fields: [binding_id], references: [id], onDelete: Cascade)
+
+  @@index([binding_id, revoked_at, expires_at])
+  @@index([credential_family_id])
+  @@map("device_credentials")
+}
+
+model ConsentDocumentVersion {
+  id           String   @id @db.Char(26)
+  code         String   @db.VarChar(64)
+  version      Int
+  content_hash Bytes    @db.Binary(32)
+  published_at DateTime @db.DateTime(3)
+
+  events RecipientConsentEvent[]
+
+  @@unique([code, version])
+  @@map("consent_document_versions")
+}
+
+model RecipientConsentState {
+  id            String   @id @db.Char(26)
+  household_id  String   @db.Char(26)
+  recipient_id  String   @db.Char(26)
+  scope         String   @db.VarChar(64)
+  decision      String   @db.VarChar(16)
+  last_event_id String?  @db.Char(26)
+  updated_at    DateTime @updatedAt @db.DateTime(3)
+  version       Int      @default(0)
+
+  recipient CareRecipient @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+
+  @@unique([recipient_id, scope])
+  @@index([household_id, scope, decision])
+  @@map("recipient_consent_states")
+}
+
+model RecipientConsentEvent {
+  id                   String   @id @db.Char(26)
+  household_id         String   @db.Char(26)
+  recipient_id         String   @db.Char(26)
+  scope                String   @db.VarChar(64)
+  decision             String   @db.VarChar(16)
+  document_version_id  String   @db.Char(26)
+  decided_by_member_id String   @db.Char(26)
+  reason               String?  @db.VarChar(500)
+  supersedes_event_id  String?  @db.Char(26)
+  occurred_at          DateTime @default(now()) @db.DateTime(3)
+
+  recipient        CareRecipient          @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  document_version ConsentDocumentVersion @relation(fields: [document_version_id], references: [id], onDelete: Restrict)
+
+  @@index([recipient_id, scope, occurred_at])
+  @@map("recipient_consent_events")
+}
+
+model Memory {
+  id                   String    @id @db.Char(26)
+  household_id         String    @db.Char(26)
+  recipient_id         String    @db.Char(26)
+  kind                 String    @db.VarChar(32)
+  title                String    @db.VarChar(200)
+  sensitivity          String    @db.VarChar(16)
+  verification_status  String    @db.VarChar(32)
+  status               String    @db.VarChar(32)
+  current_revision_no  Int       @default(1)
+  created_by_member_id String    @db.Char(26)
+  created_at           DateTime  @default(now()) @db.DateTime(3)
+  updated_at           DateTime  @updatedAt @db.DateTime(3)
+  deleted_at           DateTime? @db.DateTime(3)
+  version              Int       @default(0)
+
+  household Household        @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  recipient CareRecipient    @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  revisions MemoryRevision[]
+  tags      MemoryTag[]
+  assets    MemoryAsset[]
+
+  @@index([recipient_id, status, updated_at])
+  @@index([household_id, kind, status])
+  @@map("memories")
+}
+
+model MemoryRevision {
+  id                   String   @id @db.Char(26)
+  memory_id            String   @db.Char(26)
+  revision_no          Int
+  content_ciphertext   Bytes    @db.LongBlob
+  content_nonce        Bytes    @db.VarBinary(24)
+  encryption_key_id    String   @db.VarChar(64)
+  content_hash         Bytes    @db.Binary(32)
+  source               String   @db.VarChar(32)
+  change_reason        String?  @db.VarChar(500)
+  created_by_member_id String   @db.Char(26)
+  created_at           DateTime @default(now()) @db.DateTime(3)
+
+  memory Memory              @relation(fields: [memory_id], references: [id], onDelete: Restrict)
+  usages MemoryUsageRecord[]
+
+  @@unique([memory_id, revision_no])
+  @@map("memory_revisions")
+}
+
+model Tag {
+  id              String   @id @db.Char(26)
+  household_id    String   @db.Char(26)
+  name            String   @db.VarChar(100)
+  normalized_name String   @db.VarChar(100)
+  created_at      DateTime @default(now()) @db.DateTime(3)
+
+  memories MemoryTag[]
+
+  @@unique([household_id, normalized_name])
+  @@map("tags")
+}
+
+model MemoryTag {
+  memory_id String @db.Char(26)
+  tag_id    String @db.Char(26)
+
+  memory Memory @relation(fields: [memory_id], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tag_id], references: [id], onDelete: Cascade)
+
+  @@id([memory_id, tag_id])
+  @@map("memory_tags")
+}
+
+model Asset {
+  id                    String    @id @db.Char(26)
+  household_id          String    @db.Char(26)
+  recipient_id          String?   @db.Char(26)
+  bucket                String    @db.VarChar(100)
+  object_key            String    @db.VarChar(1024)
+  original_name         String    @db.VarChar(255)
+  mime_type             String    @db.VarChar(128)
+  byte_size             BigInt
+  sha256                Bytes     @db.Binary(32)
+  kind                  String    @db.VarChar(32)
+  scan_status           String    @db.VarChar(32)
+  encryption_key_id     String?   @db.VarChar(64)
+  retention_until       DateTime? @db.DateTime(3)
+  status                String    @db.VarChar(32)
+  uploaded_by_member_id String    @db.Char(26)
+  created_at            DateTime  @default(now()) @db.DateTime(3)
+  updated_at            DateTime  @updatedAt @db.DateTime(3)
+  version               Int       @default(0)
+
+  household          Household           @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  recipient          CareRecipient?      @relation(fields: [recipient_id], references: [id], onDelete: SetNull)
+  memory_links       MemoryAsset[]
+  recipient_links    RecipientAsset[]
+  medication_links   MedicationAsset[]
+  event_links        CareEventAsset[]
+  conversation_links ConversationAsset[]
+
+  @@unique([bucket, object_key])
+  @@index([household_id, sha256])
+  @@index([status, retention_until])
+  @@map("assets")
+}
+
+model MemoryAsset {
+  memory_id String @db.Char(26)
+  asset_id  String @db.Char(26)
+  position  Int    @default(0)
+
+  memory Memory @relation(fields: [memory_id], references: [id], onDelete: Cascade)
+  asset  Asset  @relation(fields: [asset_id], references: [id], onDelete: Restrict)
+
+  @@id([memory_id, asset_id])
+  @@map("memory_assets")
+}
+
+model RecipientAsset {
+  recipient_id String @db.Char(26)
+  asset_id     String @db.Char(26)
+  kind         String @db.VarChar(32)
+
+  recipient CareRecipient @relation(fields: [recipient_id], references: [id], onDelete: Cascade)
+  asset     Asset         @relation(fields: [asset_id], references: [id], onDelete: Restrict)
+
+  @@id([recipient_id, asset_id])
+  @@map("recipient_assets")
+}
+
+model Medication {
+  id                      String    @id @db.Char(26)
+  household_id            String    @db.Char(26)
+  recipient_id            String    @db.Char(26)
+  name                    String    @db.VarChar(100)
+  alias                   String?   @db.VarChar(100)
+  purpose_ciphertext      Bytes?    @db.Blob
+  requirements_ciphertext Bytes?    @db.LongBlob
+  content_nonce           Bytes?    @db.VarBinary(24)
+  encryption_key_id       String?   @db.VarChar(64)
+  container_label         String?   @db.VarChar(200)
+  container_location      String?   @db.VarChar(200)
+  status                  String    @db.VarChar(32)
+  created_at              DateTime  @default(now()) @db.DateTime(3)
+  updated_at              DateTime  @updatedAt @db.DateTime(3)
+  deleted_at              DateTime? @db.DateTime(3)
+  version                 Int       @default(0)
+
+  household Household         @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  recipient CareRecipient     @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  assets    MedicationAsset[]
+  routines  Routine[]
+
+  @@index([recipient_id, status])
+  @@map("medications")
+}
+
+model MedicationAsset {
+  medication_id String @db.Char(26)
+  asset_id      String @db.Char(26)
+
+  medication Medication @relation(fields: [medication_id], references: [id], onDelete: Cascade)
+  asset      Asset      @relation(fields: [asset_id], references: [id], onDelete: Restrict)
+
+  @@id([medication_id, asset_id])
+  @@map("medication_assets")
+}
+
+model Routine {
+  id                               String    @id @db.Char(26)
+  household_id                     String    @db.Char(26)
+  recipient_id                     String    @db.Char(26)
+  type                             String    @db.VarChar(32)
+  medication_id                    String?   @db.Char(26)
+  title                            String    @db.VarChar(200)
+  instructions_ciphertext          Bytes     @db.LongBlob
+  confirmation_question_ciphertext Bytes     @db.LongBlob
+  content_nonce                    Bytes     @db.VarBinary(24)
+  encryption_key_id                String    @db.VarChar(64)
+  status                           String    @db.VarChar(32)
+  created_at                       DateTime  @default(now()) @db.DateTime(3)
+  updated_at                       DateTime  @updatedAt @db.DateTime(3)
+  deleted_at                       DateTime? @db.DateTime(3)
+  version                          Int       @default(0)
+
+  household   Household           @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  recipient   CareRecipient       @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  medication  Medication?         @relation(fields: [medication_id], references: [id], onDelete: SetNull)
+  schedules   RoutineSchedule[]
+  occurrences RoutineOccurrence[]
+
+  @@index([recipient_id, status])
+  @@map("routines")
+}
+
+model RoutineSchedule {
+  id                    String    @id @db.Char(26)
+  routine_id            String    @db.Char(26)
+  timezone              String    @db.VarChar(64)
+  local_time_minutes    Int
+  weekday_mask          Int
+  start_date            DateTime  @db.Date
+  end_date              DateTime? @db.Date
+  grace_minutes         Int
+  family_notice_minutes Int
+  schedule_version      Int       @default(1)
+  active                Boolean   @default(true)
+  created_at            DateTime  @default(now()) @db.DateTime(3)
+
+  routine     Routine             @relation(fields: [routine_id], references: [id], onDelete: Restrict)
+  occurrences RoutineOccurrence[]
+
+  @@index([routine_id, active])
+  @@map("routine_schedules")
+}
+
+model RoutineOccurrence {
+  id                       String    @id @db.Char(26)
+  household_id             String    @db.Char(26)
+  recipient_id             String    @db.Char(26)
+  routine_id               String    @db.Char(26)
+  schedule_id              String    @db.Char(26)
+  scheduled_at_utc         DateTime  @db.DateTime(3)
+  scheduled_local_date     DateTime  @db.Date
+  status                   String    @db.VarChar(32)
+  confirmation_deadline_at DateTime? @db.DateTime(3)
+  escalation_at            DateTime? @db.DateTime(3)
+  completed_at             DateTime? @db.DateTime(3)
+  created_at               DateTime  @default(now()) @db.DateTime(3)
+  updated_at               DateTime  @updatedAt @db.DateTime(3)
+  version                  Int       @default(0)
+
+  household     Household             @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  recipient     CareRecipient         @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  routine       Routine               @relation(fields: [routine_id], references: [id], onDelete: Restrict)
+  schedule      RoutineSchedule       @relation(fields: [schedule_id], references: [id], onDelete: Restrict)
+  confirmations RoutineConfirmation[]
+  care_events   CareEvent[]
+
+  @@unique([schedule_id, scheduled_at_utc])
+  @@index([recipient_id, status, scheduled_at_utc])
+  @@index([household_id, status, escalation_at])
+  @@map("routine_occurrences")
+}
+
+model RoutineConfirmation {
+  id                String   @id @db.Char(26)
+  occurrence_id     String   @db.Char(26)
+  confirmation_type String   @db.VarChar(32)
+  source            String   @db.VarChar(32)
+  member_id         String?  @db.Char(26)
+  binding_id        String?  @db.Char(26)
+  utterance_id      String?  @db.Char(26)
+  note_ciphertext   Bytes?   @db.Blob
+  note_nonce        Bytes?   @db.VarBinary(24)
+  encryption_key_id String?  @db.VarChar(64)
+  confirmed_at      DateTime @db.DateTime(3)
+  idempotency_key   String   @unique @db.VarChar(100)
+  created_at        DateTime @default(now()) @db.DateTime(3)
+
+  occurrence RoutineOccurrence @relation(fields: [occurrence_id], references: [id], onDelete: Restrict)
+
+  @@index([occurrence_id, confirmed_at])
+  @@map("routine_confirmations")
+}
+
+model CareEvent {
+  id                    String   @id @db.Char(26)
+  household_id          String   @db.Char(26)
+  recipient_id          String   @db.Char(26)
+  type                  String   @db.VarChar(64)
+  severity              String   @db.VarChar(16)
+  source_type           String   @db.VarChar(32)
+  source_id             String?  @db.Char(26)
+  routine_occurrence_id String?  @db.Char(26)
+  model_session_id      String?  @db.Char(26)
+  remote_session_id     String?  @db.Char(26)
+  title_ciphertext      Bytes    @db.Blob
+  summary_ciphertext    Bytes    @db.LongBlob
+  content_nonce         Bytes    @db.VarBinary(24)
+  encryption_key_id     String   @db.VarChar(64)
+  dedupe_key            String   @db.VarChar(128)
+  payload_json          Json?
+  occurred_at           DateTime @db.DateTime(3)
+  created_at            DateTime @default(now()) @db.DateTime(3)
+
+  household  Household          @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  recipient  CareRecipient      @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  occurrence RoutineOccurrence? @relation(fields: [routine_occurrence_id], references: [id], onDelete: SetNull)
+  task       FamilyTask?
+  assets     CareEventAsset[]
+
+  @@unique([household_id, dedupe_key])
+  @@index([recipient_id, occurred_at])
+  @@index([household_id, type, occurred_at])
+  @@map("care_events")
+}
+
+model CareEventAsset {
+  event_id String @db.Char(26)
+  asset_id String @db.Char(26)
+
+  event CareEvent @relation(fields: [event_id], references: [id], onDelete: Cascade)
+  asset Asset     @relation(fields: [asset_id], references: [id], onDelete: Restrict)
+
+  @@id([event_id, asset_id])
+  @@map("care_event_assets")
+}
+
+model FamilyTask {
+  id                         String    @id @db.Char(26)
+  household_id               String    @db.Char(26)
+  recipient_id               String    @db.Char(26)
+  source_event_id            String    @unique @db.Char(26)
+  assignee_member_id         String?   @db.Char(26)
+  status                     String    @db.VarChar(32)
+  priority                   String    @db.VarChar(16)
+  due_at                     DateTime? @db.DateTime(3)
+  resolved_at                DateTime? @db.DateTime(3)
+  resolution_code            String?   @db.VarChar(64)
+  resolution_note_ciphertext Bytes?    @db.LongBlob
+  resolution_note_nonce      Bytes?    @db.VarBinary(24)
+  encryption_key_id          String?   @db.VarChar(64)
+  created_at                 DateTime  @default(now()) @db.DateTime(3)
+  updated_at                 DateTime  @updatedAt @db.DateTime(3)
+  version                    Int       @default(0)
+
+  household    Household          @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  recipient    CareRecipient      @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  source_event CareEvent          @relation(fields: [source_event_id], references: [id], onDelete: Restrict)
+  actions      FamilyTaskAction[]
+
+  @@index([household_id, status, due_at])
+  @@index([recipient_id, status])
+  @@map("family_tasks")
+}
+
+model FamilyTaskAction {
+  id                String   @id @db.Char(26)
+  task_id           String   @db.Char(26)
+  actor_member_id   String   @db.Char(26)
+  action            String   @db.VarChar(32)
+  from_status       String?  @db.VarChar(32)
+  to_status         String?  @db.VarChar(32)
+  note_ciphertext   Bytes?   @db.Blob
+  note_nonce        Bytes?   @db.VarBinary(24)
+  encryption_key_id String?  @db.VarChar(64)
+  occurred_at       DateTime @default(now()) @db.DateTime(3)
+
+  task FamilyTask @relation(fields: [task_id], references: [id], onDelete: Restrict)
+
+  @@index([task_id, occurred_at])
+  @@map("family_task_actions")
+}
+
+model PromptVersion {
+  id                 String   @id @db.Char(26)
+  code               String   @db.VarChar(64)
+  version            Int
+  provider           String   @db.VarChar(32)
+  model              String   @db.VarChar(100)
+  content_hash       Bytes    @db.Binary(32)
+  content_ciphertext Bytes    @db.LongBlob
+  content_nonce      Bytes    @db.VarBinary(24)
+  encryption_key_id  String   @db.VarChar(64)
+  published_at       DateTime @db.DateTime(3)
+
+  model_sessions ModelSession[]
+
+  @@unique([code, version])
+  @@map("prompt_versions")
+}
+
+model CompanionSession {
+  id                    String    @id @db.Char(26)
+  household_id          String    @db.Char(26)
+  recipient_id          String    @db.Char(26)
+  binding_id            String    @db.Char(26)
+  mode                  String    @db.VarChar(32)
+  status                String    @db.VarChar(32)
+  care_snapshot_hash    Bytes     @db.Binary(32)
+  consent_snapshot_json Json
+  started_at            DateTime  @db.DateTime(3)
+  ended_at              DateTime? @db.DateTime(3)
+  end_reason            String?   @db.VarChar(64)
+  trace_id              String    @db.VarChar(64)
+  created_at            DateTime  @default(now()) @db.DateTime(3)
+  version               Int       @default(0)
+
+  household      Household        @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  recipient      CareRecipient    @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  binding        CompanionBinding @relation(fields: [binding_id], references: [id], onDelete: Restrict)
+  model_sessions ModelSession[]
+
+  @@index([recipient_id, started_at])
+  @@index([binding_id, status])
+  @@map("companion_sessions")
+}
+
+model ModelSession {
+  id                   String    @id @db.Char(26)
+  companion_session_id String    @db.Char(26)
+  provider             String    @db.VarChar(32)
+  model                String    @db.VarChar(100)
+  prompt_version_id    String    @db.Char(26)
+  provider_session_id  String?   @db.VarChar(200)
+  status               String    @db.VarChar(32)
+  started_at           DateTime  @db.DateTime(3)
+  first_response_at    DateTime? @db.DateTime(3)
+  ended_at             DateTime? @db.DateTime(3)
+  end_reason           String?   @db.VarChar(64)
+  error_code           String?   @db.VarChar(64)
+  created_at           DateTime  @default(now()) @db.DateTime(3)
+
+  companion_session CompanionSession        @relation(fields: [companion_session_id], references: [id], onDelete: Restrict)
+  prompt_version    PromptVersion           @relation(fields: [prompt_version_id], references: [id], onDelete: Restrict)
+  utterances        ConversationUtterance[]
+  events            ModelSessionEvent[]
+  memory_usages     MemoryUsageRecord[]
+
+  @@index([companion_session_id, started_at])
+  @@index([status, started_at])
+  @@map("model_sessions")
+}
+
+model ConversationUtterance {
+  id                String   @id @db.Char(26)
+  model_session_id  String   @db.Char(26)
+  sequence_no       Int
+  speaker           String   @db.VarChar(32)
+  member_id         String?  @db.Char(26)
+  binding_id        String?  @db.Char(26)
+  provider_event_id String?  @db.VarChar(200)
+  start_offset_ms   Int?
+  end_offset_ms     Int?
+  is_final          Boolean  @default(true)
+  language          String?  @db.VarChar(16)
+  confidence        Float?
+  created_at        DateTime @default(now()) @db.DateTime(3)
+
+  model_session ModelSession                  @relation(fields: [model_session_id], references: [id], onDelete: Restrict)
+  content       ConversationUtteranceContent?
+  memory_usages MemoryUsageRecord[]
+  assets        ConversationAsset[]
+
+  @@unique([model_session_id, sequence_no])
+  @@unique([model_session_id, provider_event_id])
+  @@map("conversation_utterances")
+}
+
+model ConversationUtteranceContent {
+  utterance_id        String    @id @db.Char(26)
+  raw_text_ciphertext Bytes     @db.LongBlob
+  nonce               Bytes     @db.VarBinary(24)
+  encryption_key_id   String    @db.VarChar(64)
+  content_hash        Bytes     @db.Binary(32)
+  char_count          Int
+  retention_until     DateTime? @db.DateTime(3)
+  purged_at           DateTime? @db.DateTime(3)
+
+  utterance ConversationUtterance @relation(fields: [utterance_id], references: [id], onDelete: Restrict)
+
+  @@index([retention_until, purged_at])
+  @@map("conversation_utterance_contents")
+}
+
+model ConversationAsset {
+  utterance_id String @db.Char(26)
+  asset_id     String @db.Char(26)
+
+  utterance ConversationUtterance @relation(fields: [utterance_id], references: [id], onDelete: Cascade)
+  asset     Asset                 @relation(fields: [asset_id], references: [id], onDelete: Restrict)
+
+  @@id([utterance_id, asset_id])
+  @@map("conversation_assets")
+}
+
+model MemoryUsageRecord {
+  id                 String   @id @db.Char(26)
+  model_session_id   String   @db.Char(26)
+  utterance_id       String?  @db.Char(26)
+  memory_revision_id String   @db.Char(26)
+  usage_type         String   @db.VarChar(32)
+  rank               Int?
+  retrieval_score    Float?
+  created_at         DateTime @default(now()) @db.DateTime(3)
+
+  model_session   ModelSession           @relation(fields: [model_session_id], references: [id], onDelete: Restrict)
+  utterance       ConversationUtterance? @relation(fields: [utterance_id], references: [id], onDelete: SetNull)
+  memory_revision MemoryRevision         @relation(fields: [memory_revision_id], references: [id], onDelete: Restrict)
+
+  @@index([model_session_id, created_at])
+  @@map("memory_usage_records")
+}
+
+model ModelSessionEvent {
+  id               String   @id @db.Char(26)
+  model_session_id String   @db.Char(26)
+  event_type       String   @db.VarChar(64)
+  metrics_json     Json?
+  error_code       String?  @db.VarChar(64)
+  occurred_at      DateTime @db.DateTime(3)
+
+  model_session ModelSession @relation(fields: [model_session_id], references: [id], onDelete: Restrict)
+
+  @@index([model_session_id, occurred_at])
+  @@map("model_session_events")
+}
+
+model RemoteAccessPolicy {
+  id                        String    @id @db.Char(26)
+  household_id              String    @db.Char(26)
+  recipient_id              String    @db.Char(26)
+  binding_id                String    @unique @db.Char(26)
+  mode                      String    @db.VarChar(32)
+  camera_allowed            Boolean   @default(false)
+  microphone_allowed        Boolean   @default(true)
+  send_family_audio_allowed Boolean   @default(true)
+  countdown_seconds         Int       @default(10)
+  valid_from                DateTime  @db.DateTime(3)
+  valid_until               DateTime? @db.DateTime(3)
+  local_confirmed_at        DateTime? @db.DateTime(3)
+  consent_event_id          String?   @db.Char(26)
+  status                    String    @db.VarChar(32)
+  created_at                DateTime  @default(now()) @db.DateTime(3)
+  updated_at                DateTime  @updatedAt @db.DateTime(3)
+  version                   Int       @default(0)
+
+  binding  CompanionBinding           @relation(fields: [binding_id], references: [id], onDelete: Restrict)
+  members  RemoteAccessPolicyMember[]
+  sessions RemoteAssistanceSession[]
+
+  @@index([household_id, recipient_id, status])
+  @@map("remote_access_policies")
+}
+
+model RemoteAccessPolicyMember {
+  policy_id             String    @db.Char(26)
+  household_member_id   String    @db.Char(26)
+  allowed_video         Boolean   @default(false)
+  allowed_receive_audio Boolean   @default(true)
+  allowed_send_audio    Boolean   @default(true)
+  valid_until           DateTime? @db.DateTime(3)
+  revoked_at            DateTime? @db.DateTime(3)
+  created_at            DateTime  @default(now()) @db.DateTime(3)
+
+  policy RemoteAccessPolicy @relation(fields: [policy_id], references: [id], onDelete: Cascade)
+  member HouseholdMember    @relation(fields: [household_member_id], references: [id], onDelete: Cascade)
+
+  @@id([policy_id, household_member_id])
+  @@index([household_member_id, revoked_at])
+  @@map("remote_access_policy_members")
+}
+
+model RemoteAssistanceSession {
+  id                     String    @id @db.Char(26)
+  household_id           String    @db.Char(26)
+  recipient_id           String    @db.Char(26)
+  binding_id             String    @db.Char(26)
+  initiated_by_member_id String    @db.Char(26)
+  access_policy_id       String?   @db.Char(26)
+  answer_mode            String    @db.VarChar(32)
+  requested_media        String    @db.VarChar(32)
+  status                 String    @db.VarChar(32)
+  livekit_room_name      String    @unique @db.VarChar(128)
+  requested_at           DateTime  @db.DateTime(3)
+  accepted_at            DateTime? @db.DateTime(3)
+  connected_at           DateTime? @db.DateTime(3)
+  ended_at               DateTime? @db.DateTime(3)
+  ended_by_type          String?   @db.VarChar(16)
+  ended_by_id            String?   @db.Char(26)
+  end_reason             String?   @db.VarChar(64)
+  consent_snapshot_json  Json
+  trace_id               String    @db.VarChar(64)
+  created_at             DateTime  @default(now()) @db.DateTime(3)
+  updated_at             DateTime  @updatedAt @db.DateTime(3)
+  version                Int       @default(0)
+
+  household     Household                  @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  recipient     CareRecipient              @relation(fields: [recipient_id], references: [id], onDelete: Restrict)
+  binding       CompanionBinding           @relation(fields: [binding_id], references: [id], onDelete: Restrict)
+  access_policy RemoteAccessPolicy?        @relation(fields: [access_policy_id], references: [id], onDelete: SetNull)
+  participants  RemoteSessionParticipant[]
+  events        RemoteSessionEvent[]
+
+  @@index([binding_id, status, requested_at])
+  @@index([household_id, requested_at])
+  @@map("remote_assistance_sessions")
+}
+
+model RemoteSessionParticipant {
+  id              String    @id @db.Char(26)
+  session_id      String    @db.Char(26)
+  principal_type  String    @db.VarChar(16)
+  user_id         String?   @db.Char(26)
+  binding_id      String?   @db.Char(26)
+  role            String    @db.VarChar(16)
+  client_type     String    @db.VarChar(16)
+  joined_at       DateTime? @db.DateTime(3)
+  left_at         DateTime? @db.DateTime(3)
+  published_audio Boolean   @default(false)
+  published_video Boolean   @default(false)
+  created_at      DateTime  @default(now()) @db.DateTime(3)
+
+  session RemoteAssistanceSession @relation(fields: [session_id], references: [id], onDelete: Restrict)
+
+  @@index([session_id, joined_at])
+  @@map("remote_session_participants")
+}
+
+model RemoteSessionEvent {
+  id            String   @id @db.Char(26)
+  session_id    String   @db.Char(26)
+  event_type    String   @db.VarChar(64)
+  actor_type    String?  @db.VarChar(16)
+  actor_id      String?  @db.Char(26)
+  metadata_json Json?
+  occurred_at   DateTime @db.DateTime(3)
+
+  session RemoteAssistanceSession @relation(fields: [session_id], references: [id], onDelete: Restrict)
+
+  @@index([session_id, occurred_at])
+  @@map("remote_session_events")
+}
+
+model InspectionGrant {
+  id                   String    @id @db.Char(26)
+  environment          String    @db.VarChar(16)
+  requested_by_user_id String    @db.Char(26)
+  approved_by_user_id  String?   @db.Char(26)
+  household_id         String    @db.Char(26)
+  recipient_id         String?   @db.Char(26)
+  data_categories_json Json
+  reason               String    @db.VarChar(1000)
+  ticket_reference     String?   @db.VarChar(100)
+  status               String    @db.VarChar(32)
+  valid_from           DateTime  @db.DateTime(3)
+  expires_at           DateTime  @db.DateTime(3)
+  revoked_at           DateTime? @db.DateTime(3)
+  created_at           DateTime  @default(now()) @db.DateTime(3)
+
+  household   Household           @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  inspections ContentInspection[]
+
+  @@index([household_id, status, expires_at])
+  @@index([requested_by_user_id, created_at])
+  @@map("inspection_grants")
+}
+
+model ContentInspection {
+  id                String   @id @db.Char(26)
+  grant_id          String   @db.Char(26)
+  operator_user_id  String   @db.Char(26)
+  resource_type     String   @db.VarChar(64)
+  resource_id       String   @db.Char(26)
+  original_revealed Boolean  @default(false)
+  request_id        String   @db.VarChar(64)
+  occurred_at       DateTime @default(now()) @db.DateTime(3)
+
+  grant InspectionGrant @relation(fields: [grant_id], references: [id], onDelete: Restrict)
+
+  @@index([grant_id, occurred_at])
+  @@index([resource_type, resource_id, occurred_at])
+  @@map("content_inspections")
+}
+
+model AuditLog {
+  id                  String    @id @db.Char(26)
+  occurred_at         DateTime  @default(now()) @db.DateTime(3)
+  environment         String    @db.VarChar(16)
+  actor_type          String    @db.VarChar(16)
+  actor_user_id       String?   @db.Char(26)
+  actor_binding_id    String?   @db.Char(26)
+  actor_session_id    String?   @db.Char(26)
+  actor_role_snapshot Json?
+  source_ip_hash      Bytes?    @db.Binary(32)
+  user_agent          String?   @db.VarChar(512)
+  action              String    @db.VarChar(100)
+  resource_type       String    @db.VarChar(64)
+  resource_id         String?   @db.Char(26)
+  household_id        String?   @db.Char(26)
+  recipient_id        String?   @db.Char(26)
+  target_device_id    String?   @db.Char(26)
+  request_id          String    @db.VarChar(64)
+  trace_id            String?   @db.VarChar(64)
+  purpose             String?   @db.VarChar(100)
+  reason_code         String?   @db.VarChar(64)
+  ticket_id           String?   @db.Char(26)
+  approval_actor_id   String?   @db.Char(26)
+  decision            String    @db.VarChar(16)
+  failure_code        String?   @db.VarChar(64)
+  policy_version      String?   @db.VarChar(32)
+  changed_field_names Json?
+  before_hash         Bytes?    @db.Binary(32)
+  after_hash          Bytes?    @db.Binary(32)
+  previous_event_hash Bytes?    @db.Binary(32)
+  event_hash          Bytes     @db.Binary(32)
+  retention_until     DateTime? @db.DateTime(3)
+
+  @@index([household_id, occurred_at])
+  @@index([actor_user_id, occurred_at])
+  @@index([resource_type, resource_id, occurred_at])
+  @@index([ticket_id, occurred_at])
+  @@map("audit_logs")
+}
+
+model NotificationEndpoint {
+  id                  String    @id @db.Char(26)
+  user_id             String?   @db.Char(26)
+  device_id           String?   @db.Char(26)
+  channel             String    @db.VarChar(16)
+  provider            String    @db.VarChar(32)
+  endpoint_ciphertext Bytes     @db.Blob
+  endpoint_hash       Bytes     @db.Binary(32)
+  verified_at         DateTime? @db.DateTime(3)
+  status              String    @db.VarChar(32)
+  created_at          DateTime  @default(now()) @db.DateTime(3)
+  updated_at          DateTime  @updatedAt @db.DateTime(3)
+
+  user       User?                  @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  deliveries NotificationDelivery[]
+
+  @@unique([channel, endpoint_hash])
+  @@index([user_id, status])
+  @@map("notification_endpoints")
+}
+
+model Notification {
+  id                      String   @id @db.Char(26)
+  household_id            String   @db.Char(26)
+  recipient_id            String?  @db.Char(26)
+  type                    String   @db.VarChar(64)
+  priority                String   @db.VarChar(16)
+  template_code           String   @db.VarChar(100)
+  template_variables_json Json
+  scheduled_at            DateTime @db.DateTime(3)
+  dedupe_key              String   @db.VarChar(128)
+  created_at              DateTime @default(now()) @db.DateTime(3)
+
+  household  Household              @relation(fields: [household_id], references: [id], onDelete: Restrict)
+  recipient  CareRecipient?         @relation(fields: [recipient_id], references: [id], onDelete: SetNull)
+  deliveries NotificationDelivery[]
+
+  @@unique([household_id, dedupe_key])
+  @@index([scheduled_at])
+  @@map("notifications")
+}
+
+model NotificationDelivery {
+  id                  String    @id @db.Char(26)
+  notification_id     String    @db.Char(26)
+  endpoint_id         String    @db.Char(26)
+  status              String    @db.VarChar(32)
+  attempt_count       Int       @default(0)
+  next_attempt_at     DateTime? @db.DateTime(3)
+  provider_message_id String?   @db.VarChar(200)
+  sent_at             DateTime? @db.DateTime(3)
+  delivered_at        DateTime? @db.DateTime(3)
+  last_error_code     String?   @db.VarChar(64)
+  created_at          DateTime  @default(now()) @db.DateTime(3)
+  updated_at          DateTime  @updatedAt @db.DateTime(3)
+
+  notification Notification         @relation(fields: [notification_id], references: [id], onDelete: Cascade)
+  endpoint     NotificationEndpoint @relation(fields: [endpoint_id], references: [id], onDelete: Restrict)
+
+  @@unique([notification_id, endpoint_id])
+  @@index([status, next_attempt_at])
+  @@map("notification_deliveries")
+}
+
+model OutboxEvent {
+  id             String    @id @db.Char(26)
+  aggregate_type String    @db.VarChar(64)
+  aggregate_id   String    @db.Char(26)
+  event_type     String    @db.VarChar(100)
+  payload_json   Json
+  headers_json   Json?
+  occurred_at    DateTime  @db.DateTime(3)
+  available_at   DateTime  @db.DateTime(3)
+  lease_owner    String?   @db.VarChar(100)
+  lease_until    DateTime? @db.DateTime(3)
+  published_at   DateTime? @db.DateTime(3)
+  attempt_count  Int       @default(0)
+  last_error     String?   @db.VarChar(1000)
+
+  receipts InboxReceipt[]
+
+  @@index([published_at, available_at])
+  @@index([lease_until])
+  @@index([aggregate_type, aggregate_id, occurred_at])
+  @@map("outbox_events")
+}
+
+model InboxReceipt {
+  consumer     String   @db.VarChar(100)
+  event_id     String   @db.Char(26)
+  processed_at DateTime @default(now()) @db.DateTime(3)
+
+  event OutboxEvent @relation(fields: [event_id], references: [id], onDelete: Cascade)
+
+  @@id([consumer, event_id])
+  @@map("inbox_receipts")
+}

@@ -71,6 +71,8 @@ ssh -N `
 
 ## 设计和工程资料
 
+- [完整重构设计：账号、MySQL、设备激活、远程音视频与多端架构](docs/refactor/README.md)
+- [领域上下文地图](CONTEXT-MAP.md)
 - [产品与用户流程](docs/PRODUCT_SPEC.md)
 - [智能体与状态机](docs/AGENT_DESIGN.md)
 - [模型接入说明](docs/MODEL_INTEGRATION.md)

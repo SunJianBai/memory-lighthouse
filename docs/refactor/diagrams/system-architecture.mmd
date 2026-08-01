@@ -1,0 +1,37 @@
+flowchart TB
+  subgraph Clients["客户端"]
+    direction LR
+    Admin["管理员 Web<br/>Vue + Art Design"]
+    Web["用户 Web<br/>家属 / 陪伴模式"]
+    Android["Android App<br/>家属 / 陪伴模式"]
+  end
+
+  subgraph Control["控制平面"]
+    direction LR
+    API["服务器 Interface<br/>NestJS REST + WSS"] --> Modules["业务 Modules"]
+  end
+
+  subgraph Data["数据与异步"]
+    direction LR
+    MySQL[("MySQL<br/>业务事实")]
+    Redis[("Redis<br/>短时状态 / 队列")]
+    MinIO[("MinIO<br/>对象内容")]
+  end
+
+  subgraph Media["媒体平面"]
+    direction LR
+    Model["MiniCPM-o Provider"]
+    RTC["LiveKit / WebRTC"]
+  end
+
+  Admin -->|HTTPS| API
+  Web -->|HTTPS + WSS| API
+  Android -->|HTTPS + WSS| API
+  Modules --> MySQL
+  Modules --> Redis
+  Modules --> MinIO
+  Web <-->|全模态媒体| Model
+  Android <-->|全模态媒体| Model
+  Web <-->|远程音视频| RTC
+  Android <-->|远程音视频| RTC
+  API -.->|鉴权 / Ticket / 审计| RTC
