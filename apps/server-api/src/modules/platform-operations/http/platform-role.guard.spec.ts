@@ -80,4 +80,31 @@ describe('PlatformRoleGuard', () => {
       PlatformAccessDeniedException,
     );
   });
+
+  it('rejects an ordinary household user from the admin boundary', async () => {
+    const request = {
+      userPrincipal: {
+        kind: 'USER',
+        userId: 'household-user',
+        sessionId: 'session-1',
+        tokenId: 'token-1',
+        status: 'ACTIVE',
+      },
+    };
+    const findMany = jest.fn(async () => []);
+    const guard = new PlatformRoleGuard(
+      { canActivate: jest.fn() } as unknown as UserAccessGuard,
+      {
+        platformRoleAssignment: { findMany },
+      } as unknown as PrismaService,
+      {
+        getAllAndOverride: jest.fn(() => ['ADMIN', 'CONTENT_AUDITOR']),
+      } as unknown as Reflector,
+    );
+
+    await expect(guard.canActivate(contextFor(request))).rejects.toBeInstanceOf(
+      PlatformAccessDeniedException,
+    );
+    expect(request).not.toHaveProperty('platformRoles');
+  });
 });

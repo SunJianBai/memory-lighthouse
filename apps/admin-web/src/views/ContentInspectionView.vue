@@ -14,6 +14,7 @@ import {
 import AppIcon from '../components/AppIcon.vue'
 import StatePanel from '../components/StatePanel.vue'
 import StatusBadge from '../components/StatusBadge.vue'
+import { hasPlatformCapability } from '../state/platform-access'
 import { sessionState } from '../state/session'
 import type {
   InspectionDataCategory,
@@ -67,6 +68,18 @@ let clearResultTimer: number | undefined
 
 const requiredCategory = computed<InspectionDataCategory>(() =>
   lookup.kind === 'memory' ? 'MEMORY_REVISION' : 'CONVERSATION_UTTERANCE'
+)
+const canRequestGrant = computed(() =>
+  hasPlatformCapability(sessionState.identity, 'INSPECTION_GRANTS_REQUEST')
+)
+const canApproveGrant = computed(() =>
+  hasPlatformCapability(sessionState.identity, 'INSPECTION_GRANTS_APPROVE')
+)
+const canRevokeGrant = computed(() =>
+  hasPlatformCapability(sessionState.identity, 'INSPECTION_GRANTS_REVOKE')
+)
+const canReadOriginal = computed(() =>
+  hasPlatformCapability(sessionState.identity, 'CONTENT_INSPECTION_READ')
 )
 
 const usableGrants = computed(() => {
@@ -137,6 +150,7 @@ function selectedCategories(): InspectionDataCategory[] {
 }
 
 async function submitGrantRequest(): Promise<void> {
+  if (!canRequestGrant.value) return
   requestError.value = ''
   successMessage.value = ''
   const categories = selectedCategories()
@@ -181,6 +195,8 @@ async function submitGrantRequest(): Promise<void> {
 }
 
 async function mutateGrant(grant: InspectionGrant, action: 'approve' | 'revoke'): Promise<void> {
+  if (action === 'approve' && !canApproveGrant.value) return
+  if (action === 'revoke' && !canRevokeGrant.value) return
   mutationId.value = grant.id
   successMessage.value = ''
   grantsError.value = ''
@@ -211,7 +227,7 @@ function clearInspectionResult(): void {
 }
 
 async function inspectOriginal(): Promise<void> {
-  if (!canInspect.value) return
+  if (!canReadOriginal.value || !canInspect.value) return
   clearInspectionResult()
   inspectionLoading.value = true
   try {
@@ -278,7 +294,11 @@ onBeforeUnmount(clearInspectionResult)
         <AppIcon name="check" :size="20" />{{ successMessage }}
       </div>
 
-      <section class="surface inspection-section" aria-labelledby="grant-request-title">
+      <section
+        v-if="canRequestGrant"
+        class="surface inspection-section"
+        aria-labelledby="grant-request-title"
+      >
         <div class="section-heading">
           <span class="step-number">1</span>
           <div><h2 id="grant-request-title">申请短期授权</h2><p>范围越小越好，最长 15 分钟。</p></div>
@@ -363,7 +383,7 @@ onBeforeUnmount(clearInspectionResult)
                 <td>
                   <div class="row-actions">
                     <button
-                      v-if="grant.status === 'PENDING'"
+                      v-if="canApproveGrant && grant.status === 'PENDING'"
                       class="button button--small button--secondary"
                       type="button"
                       :disabled="mutationId === grant.id || grant.requestedByUserId === sessionState.user?.id"
@@ -371,7 +391,7 @@ onBeforeUnmount(clearInspectionResult)
                       @click="mutateGrant(grant, 'approve')"
                     >审批</button>
                     <button
-                      v-if="grant.status === 'PENDING' || grant.status === 'ACTIVE'"
+                      v-if="canRevokeGrant && (grant.status === 'PENDING' || grant.status === 'ACTIVE')"
                       class="button button--small button--danger-quiet"
                       type="button"
                       :disabled="mutationId === grant.id"
@@ -385,7 +405,11 @@ onBeforeUnmount(clearInspectionResult)
         </div>
       </section>
 
-      <section class="surface inspection-section inspection-section--danger" aria-labelledby="original-title">
+      <section
+        v-if="canReadOriginal"
+        class="surface inspection-section inspection-section--danger"
+        aria-labelledby="original-title"
+      >
         <div class="section-heading">
           <span class="step-number step-number--danger">3</span>
           <div><h2 id="original-title">按资源查看原文</h2><p>读取动作本身会立即产生审计记录。</p></div>

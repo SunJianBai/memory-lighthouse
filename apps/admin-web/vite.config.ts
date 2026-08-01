@@ -16,7 +16,7 @@ export default defineConfig(({ mode }) => {
     server: {
       proxy: {
         '/openBMB/api/v1': {
-          target: env.ADMIN_API_PROXY_TARGET || 'http://127.0.0.1:3000',
+          target: env.ADMIN_API_PROXY_TARGET || 'http://127.0.0.1:13100',
           changeOrigin: true
         }
       }

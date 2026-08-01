@@ -38,6 +38,28 @@ export interface CurrentUser {
   createdAt: string
 }
 
+export type PlatformRole = 'ADMIN' | 'CONTENT_AUDITOR'
+
+export type PlatformCapability =
+  | 'PLATFORM_DASHBOARD_READ'
+  | 'PLATFORM_USERS_READ'
+  | 'PLATFORM_HOUSEHOLDS_READ'
+  | 'PLATFORM_DEVICES_READ'
+  | 'PLATFORM_MODEL_SESSIONS_READ'
+  | 'PLATFORM_REMOTE_SESSIONS_READ'
+  | 'PLATFORM_AUDIT_LOGS_READ'
+  | 'INSPECTION_GRANTS_READ'
+  | 'INSPECTION_GRANTS_REQUEST'
+  | 'INSPECTION_GRANTS_APPROVE'
+  | 'INSPECTION_GRANTS_REVOKE'
+  | 'CONTENT_INSPECTION_READ'
+
+export interface AdminIdentity {
+  user: CurrentUser
+  platformRoles: PlatformRole[]
+  capabilities: PlatformCapability[]
+}
+
 export interface PlatformPage<T = Record<string, unknown>> {
   items: T[]
   page: number

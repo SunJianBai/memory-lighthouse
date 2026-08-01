@@ -4,13 +4,16 @@ import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '../components/AppIcon.vue'
 import { contentInspectionEnabled, deploymentEnvironment } from '../config/runtime'
+import { hasPlatformCapability } from '../state/platform-access'
 import { logout, sessionState } from '../state/session'
 import { currentTheme, toggleTheme } from '../state/theme'
+import type { PlatformCapability } from '../types/platform'
 
 interface NavigationItem {
   to: string
   label: string
   icon: string
+  requiredCapability: PlatformCapability
   risk?: boolean
 }
 
@@ -20,18 +23,59 @@ const mainElement = ref<HTMLElement | null>(null)
 const mobileNavigationOpen = ref(false)
 const loggingOut = ref(false)
 
-const navigation = computed<NavigationItem[]>(() => [
-  { to: '/dashboard', label: '运行概览', icon: 'dashboard' },
-  { to: '/users', label: '用户', icon: 'users' },
-  { to: '/households', label: '家庭', icon: 'home' },
-  { to: '/devices', label: '设备', icon: 'device' },
-  { to: '/model-sessions', label: '模型会话', icon: 'model' },
-  { to: '/remote-sessions', label: '远程会话', icon: 'call' },
-  { to: '/audit-logs', label: '审计日志', icon: 'audit' },
-  ...(contentInspectionEnabled
-    ? [{ to: '/content-inspection', label: '开发期原文检查', icon: 'inspection', risk: true }]
-    : [])
-])
+const navigation = computed<NavigationItem[]>(() => {
+  const items: NavigationItem[] = [
+    {
+      to: '/dashboard',
+      label: '运行概览',
+      icon: 'dashboard',
+      requiredCapability: 'PLATFORM_DASHBOARD_READ'
+    },
+    { to: '/users', label: '用户', icon: 'users', requiredCapability: 'PLATFORM_USERS_READ' },
+    {
+      to: '/households',
+      label: '家庭',
+      icon: 'home',
+      requiredCapability: 'PLATFORM_HOUSEHOLDS_READ'
+    },
+    {
+      to: '/devices',
+      label: '设备',
+      icon: 'device',
+      requiredCapability: 'PLATFORM_DEVICES_READ'
+    },
+    {
+      to: '/model-sessions',
+      label: '模型会话',
+      icon: 'model',
+      requiredCapability: 'PLATFORM_MODEL_SESSIONS_READ'
+    },
+    {
+      to: '/remote-sessions',
+      label: '远程会话',
+      icon: 'call',
+      requiredCapability: 'PLATFORM_REMOTE_SESSIONS_READ'
+    },
+    {
+      to: '/audit-logs',
+      label: '审计日志',
+      icon: 'audit',
+      requiredCapability: 'PLATFORM_AUDIT_LOGS_READ'
+    }
+  ]
+  if (contentInspectionEnabled) {
+    items.push({
+      to: '/content-inspection',
+      label: '开发期原文检查',
+      icon: 'inspection',
+      requiredCapability: 'INSPECTION_GRANTS_READ',
+      risk: true
+    })
+  }
+  return items.filter((item) =>
+    hasPlatformCapability(sessionState.identity, item.requiredCapability)
+  )
+})
 
 const routeTitle = computed(() => String(route.meta.title || '管理中心'))
 

@@ -11,9 +11,12 @@ import {
 } from '@nestjs/common';
 
 import type { RequestWithContext } from '../../../common/http/request-context';
+import { IdentityApplicationService } from '../../identity/identity.application.service';
 import { UserAccessGuard } from '../../identity/http/user-access.guard';
+import { capabilitiesForPlatformRoles } from '../platform-capabilities';
 import { PlatformOperationsApplicationService } from '../platform-operations.application.service';
 import type {
+  PlatformIdentityView,
   PlatformPrincipal,
   PlatformRequestMetadata,
 } from '../platform-operations.types';
@@ -34,7 +37,19 @@ import { PlatformRoleGuard } from './platform-role.guard';
 export class PlatformOperationsController {
   constructor(
     private readonly operations: PlatformOperationsApplicationService,
+    private readonly identity: IdentityApplicationService,
   ) {}
+
+  @Get('identity')
+  async getIdentity(
+    @CurrentPlatformPrincipal() principal: PlatformPrincipal,
+  ): Promise<PlatformIdentityView> {
+    return {
+      user: await this.identity.getMe(principal),
+      platformRoles: principal.platformRoles,
+      capabilities: capabilitiesForPlatformRoles(principal.platformRoles),
+    };
+  }
 
   @Get('operations/dashboard')
   @RequirePlatformRoles('ADMIN')

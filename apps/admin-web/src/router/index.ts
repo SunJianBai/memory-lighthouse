@@ -1,23 +1,26 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 import { contentInspectionEnabled } from '../config/runtime'
+import { defaultAdminRoute, routeIsPermitted } from '../state/platform-access'
 import { restoreSession, sessionState } from '../state/session'
+import type { PlatformCapability } from '../types/platform'
 
 declare module 'vue-router' {
   interface RouteMeta {
     title?: string
     requiresAuth?: boolean
     requiresInspection?: boolean
+    requiredCapability?: PlatformCapability
   }
 }
 
 const resourceRoutes = [
-  ['users', '用户'],
-  ['households', '家庭'],
-  ['devices', '设备'],
-  ['model-sessions', '模型会话'],
-  ['remote-sessions', '远程会话'],
-  ['audit-logs', '审计日志']
+  ['users', '用户', 'PLATFORM_USERS_READ'],
+  ['households', '家庭', 'PLATFORM_HOUSEHOLDS_READ'],
+  ['devices', '设备', 'PLATFORM_DEVICES_READ'],
+  ['model-sessions', '模型会话', 'PLATFORM_MODEL_SESSIONS_READ'],
+  ['remote-sessions', '远程会话', 'PLATFORM_REMOTE_SESSIONS_READ'],
+  ['audit-logs', '审计日志', 'PLATFORM_AUDIT_LOGS_READ']
 ] as const
 
 const routes: RouteRecordRaw[] = [
@@ -32,20 +35,29 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../layouts/AdminShell.vue'),
     meta: { requiresAuth: true },
     children: [
-      { path: '', redirect: { name: 'dashboard' } },
+      {
+        path: '',
+        name: 'admin-home',
+        component: () => import('../views/AdminEntryView.vue'),
+        meta: { requiresAuth: true }
+      },
       {
         path: 'dashboard',
         name: 'dashboard',
         component: () => import('../views/DashboardView.vue'),
-        meta: { title: '运行概览', requiresAuth: true }
+        meta: {
+          title: '运行概览',
+          requiresAuth: true,
+          requiredCapability: 'PLATFORM_DASHBOARD_READ'
+        }
       },
       ...resourceRoutes.map(
-        ([resourceKey, title]): RouteRecordRaw => ({
+        ([resourceKey, title, requiredCapability]): RouteRecordRaw => ({
           path: resourceKey,
           name: resourceKey,
           component: () => import('../views/ResourceListView.vue'),
           props: { resourceKey },
-          meta: { title, requiresAuth: true }
+          meta: { title, requiresAuth: true, requiredCapability }
         })
       ),
       ...(contentInspectionEnabled
@@ -57,7 +69,8 @@ const routes: RouteRecordRaw[] = [
               meta: {
                 title: '开发期原文检查',
                 requiresAuth: true,
-                requiresInspection: true
+                requiresInspection: true,
+                requiredCapability: 'INSPECTION_GRANTS_READ'
               }
             } satisfies RouteRecordRaw
           ]
@@ -91,8 +104,19 @@ router.beforeEach(async (to) => {
     return { name: 'login', query: { redirect: to.fullPath } }
   }
 
+  if (to.name === 'admin-home' && sessionState.status === 'authenticated') {
+    return defaultAdminRoute(sessionState.identity)
+  }
+
+  if (
+    to.meta.requiredCapability &&
+    !routeIsPermitted(sessionState.identity, to.meta.requiredCapability)
+  ) {
+    return defaultAdminRoute(sessionState.identity)
+  }
+
   if (to.name === 'login' && sessionState.status === 'authenticated') {
-    return { name: 'dashboard' }
+    return defaultAdminRoute(sessionState.identity)
   }
 
   return true

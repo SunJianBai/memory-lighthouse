@@ -1,4 +1,6 @@
 import type { UserPrincipal } from '../identity/identity.types';
+import type { UserView } from '../identity/identity.types';
+import type { PlatformCapabilityCode } from './platform-capabilities';
 import type {
   InspectionDataCategory,
   PlatformRoleCode,
@@ -6,6 +8,12 @@ import type {
 
 export interface PlatformPrincipal extends UserPrincipal {
   platformRoles: PlatformRoleCode[];
+}
+
+export interface PlatformIdentityView {
+  user: UserView;
+  platformRoles: PlatformRoleCode[];
+  capabilities: PlatformCapabilityCode[];
 }
 
 export interface PlatformPageQuery {

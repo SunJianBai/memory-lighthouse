@@ -40,7 +40,6 @@ function counts(...entries: Array<[string, unknown]>): CellValue {
     primary: entries.map(([label, value]) => `${label} ${safeText(value, '0')}`).join(' · ')
   }
 }
-
 function identitySummary(value: unknown): string {
   if (!Array.isArray(value) || value.length === 0) return '无登录标识'
   const identity = objectValue(value[0])
@@ -57,12 +56,37 @@ function bindingSummary(value: unknown): CellValue {
   }
 }
 
-function mediaSummary(value: unknown): string {
+export function summarizeRemoteMedia(value: unknown): string {
   const media = objectValue(value)
-  if (!media) return safeText(value)
-  const enabled = Object.entries(media)
-    .filter(([, item]) => item === true)
-    .map(([key]) => key)
+  if (media) {
+    const labels: Record<string, string> = {
+      receiveDeviceAudio: '接收设备音频',
+      receiveDeviceVideo: '接收设备视频',
+      sendFamilyAudio: '发送家属音频',
+      sendFamilyVideo: '发送家属视频'
+    }
+    const enabled = Object.entries(media)
+      .filter(([, item]) => item === true)
+      .map(([key]) => labels[key] || key)
+    return enabled.length ? enabled.join('、') : '未请求媒体'
+  }
+
+  const mask =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\d+$/.test(value)
+        ? Number(value)
+        : Number.NaN
+  if (!Number.isSafeInteger(mask) || mask < 0 || mask > 15) return '未知媒体权限'
+
+  const enabled = [
+    [1, '接收设备音频'],
+    [2, '接收设备视频'],
+    [4, '发送家属音频'],
+    [8, '发送家属视频']
+  ]
+    .filter(([bit]) => (mask & Number(bit)) !== 0)
+    .map(([, label]) => String(label))
   return enabled.length ? enabled.join('、') : '未请求媒体'
 }
 
@@ -153,7 +177,7 @@ export const resourceDefinitions: Record<string, ResourceDefinition> = {
     title: '模型会话',
     description: '查看模型运行元数据与错误码；对话原文不在此列表中暴露。',
     searchPlaceholder: '搜索会话 ID、模型、服务商或错误码',
-    statusOptions: ['RUNNING', 'COMPLETED', 'FAILED'],
+    statusOptions: ['ACTIVE', 'ENDED', 'FAILED'],
     columns: [
       { key: 'id', label: '会话 ID', minWidth: 190, cell: idCell },
       {
@@ -183,7 +207,19 @@ export const resourceDefinitions: Record<string, ResourceDefinition> = {
     title: '远程会话',
     description: '仅展示现场接听式远程通话的连接元数据；不录音、不转写。',
     searchPlaceholder: '搜索会话、家庭、长者、设备绑定或结束原因',
-    statusOptions: ['REQUESTED', 'RINGING', 'ACCEPTED', 'CONNECTED', 'ENDED', 'FAILED'],
+    statusOptions: [
+      'RINGING',
+      'ACCEPTED',
+      'CONNECTING',
+      'ACTIVE',
+      'ENDING',
+      'ENDED',
+      'DECLINED',
+      'CANCELLED',
+      'EXPIRED',
+      'FAILED',
+      'REVOKED'
+    ],
     columns: [
       { key: 'id', label: '远程会话 ID', minWidth: 190, cell: idCell },
       {
@@ -200,7 +236,10 @@ export const resourceDefinitions: Record<string, ResourceDefinition> = {
         key: 'media',
         label: '媒体权限',
         minWidth: 230,
-        cell: (row) => ({ primary: mediaSummary(row.requestedMedia), secondary: safeText(row.answerMode) })
+        cell: (row) => ({
+          primary: summarizeRemoteMedia(row.mediaMask ?? row.requestedMedia),
+          secondary: safeText(row.answerMode)
+        })
       },
       {
         key: 'counts',

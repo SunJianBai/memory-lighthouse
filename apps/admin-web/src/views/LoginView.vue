@@ -3,7 +3,8 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '../components/AppIcon.vue'
-import { login } from '../state/session'
+import { defaultAdminRoute } from '../state/platform-access'
+import { login, sessionState } from '../state/session'
 import { formatError } from '../utils/format'
 
 const route = useRoute()
@@ -25,8 +26,9 @@ async function submit(): Promise<void> {
 
   try {
     await login(identifier.value.trim(), password.value)
-    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/dashboard'
-    await router.replace(redirect.startsWith('/') ? redirect : '/dashboard')
+    const fallback = defaultAdminRoute(sessionState.identity)
+    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : fallback
+    await router.replace(redirect.startsWith('/') ? redirect : fallback)
   } catch (error) {
     errorMessage.value = formatError(error)
   } finally {
