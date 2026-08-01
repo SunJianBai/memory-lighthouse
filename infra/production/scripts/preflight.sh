@@ -103,10 +103,7 @@ case "${OPENBMB_SKIP_IMAGE_BUILD:-false}" in
       fail 'at least 3 GiB free space under /opt is required after preloading release images'
     ;;
   false)
-    [[ "$(( ${available_kib:-0} + ${swap_free_kib:-0} ))" -ge 2097152 ]] || \
-      fail 'available RAM plus free swap must total at least 2 GiB for the first build'
-    [[ "${available_disk_kib:-0}" -ge 10485760 ]] || \
-      fail 'at least 10 GiB free space under /opt is required for first-build layers and rollback images'
+    fail 'host-local production builds are disabled; use digest-pinned preloaded images and OPENBMB_SKIP_IMAGE_BUILD=true'
     ;;
   *) fail 'OPENBMB_SKIP_IMAGE_BUILD must be true or false' ;;
 esac

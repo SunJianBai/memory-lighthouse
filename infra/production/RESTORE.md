@@ -6,7 +6,17 @@
 
 ## 恢复前提
 
-1. 将备份完整复制到另一台机器，执行 `sha256sum -c SHA256SUMS`。
+1. 只接受非 `.partial-*` 目录且存在 `.openbmb-backup-complete` 的备份。先确认完成标记
+   的 64 位摘要与 `sha256sum SHA256SUMS` 一致，再将备份完整复制到另一台机器并执行
+   `sha256sum -c SHA256SUMS`；缺少完成标记、摘要不匹配或清单校验失败都视为无效备份。
+
+   ```bash
+   openbmb_backup_dir=/var/backups/openbmb/<stamp>
+   test -f "$openbmb_backup_dir/.openbmb-backup-complete"
+   test "$(cat "$openbmb_backup_dir/.openbmb-backup-complete")" = \
+     "$(sha256sum "$openbmb_backup_dir/SHA256SUMS" | awk '{ print $1 }')"
+   (cd "$openbmb_backup_dir" && sha256sum --check SHA256SUMS)
+   ```
 2. 记录当前 `/opt/openbmb/current`、镜像 ID 和卷名，并再做一次现状备份。
 3. 停止 API，避免恢复过程中产生新写入：
 

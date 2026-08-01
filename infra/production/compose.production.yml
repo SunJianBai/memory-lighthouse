@@ -1,9 +1,23 @@
 services:
+  # Every production dependency uses a release-scoped local tag. This keeps an
+  # older release verifiable and rollback-safe even if an upstream tag drifts.
+  mysql:
+    image: openbmb-mysql:${OPENBMB_INFRASTRUCTURE_RELEASE:?OPENBMB_INFRASTRUCTURE_RELEASE must identify an immutable release}
+
+  redis:
+    image: openbmb-redis:${OPENBMB_INFRASTRUCTURE_RELEASE:?OPENBMB_INFRASTRUCTURE_RELEASE must identify an immutable release}
+
+  minio:
+    image: openbmb-minio:${OPENBMB_INFRASTRUCTURE_RELEASE:?OPENBMB_INFRASTRUCTURE_RELEASE must identify an immutable release}
+
+  minio-init:
+    image: openbmb-minio-mc:${OPENBMB_INFRASTRUCTURE_RELEASE:?OPENBMB_INFRASTRUCTURE_RELEASE must identify an immutable release}
+
   # Linux host networking is intentional for the API. Caddy reaches the API
   # from loopback, which preserves the application's one-hop trusted-proxy
   # invariant. HOST is forced to loopback, so port 13100 is never public.
   api:
-    image: openbmb-api:${OPENBMB_RELEASE:?OPENBMB_RELEASE must identify an immutable release}
+    image: openbmb-api:${OPENBMB_APPLICATION_RELEASE:?OPENBMB_APPLICATION_RELEASE must identify an immutable release}
     build:
       context: ../..
       dockerfile: infra/production/Dockerfile.api
@@ -106,7 +120,7 @@ services:
     logging: *production-logging
 
   client-web:
-    image: openbmb-client-web:${OPENBMB_RELEASE:?OPENBMB_RELEASE must identify an immutable release}
+    image: openbmb-client-web:${OPENBMB_APPLICATION_RELEASE:?OPENBMB_APPLICATION_RELEASE must identify an immutable release}
     build:
       context: ../..
       dockerfile: infra/production/Dockerfile.web
@@ -137,7 +151,7 @@ services:
     logging: *production-logging
 
   admin-web:
-    image: openbmb-admin-web:${OPENBMB_RELEASE:?OPENBMB_RELEASE must identify an immutable release}
+    image: openbmb-admin-web:${OPENBMB_APPLICATION_RELEASE:?OPENBMB_APPLICATION_RELEASE must identify an immutable release}
     build:
       context: ../..
       dockerfile: infra/production/Dockerfile.web
@@ -171,6 +185,7 @@ services:
   # WebRTC deployment. Signal/API stays on loopback; only rtc/turn ports bind
   # publicly according to livekit/livekit.production.yaml.
   livekit:
+    image: openbmb-livekit:${OPENBMB_INFRASTRUCTURE_RELEASE:?OPENBMB_INFRASTRUCTURE_RELEASE must identify an immutable release}
     network_mode: host
     networks: !reset []
     ports: !reset []
@@ -194,6 +209,7 @@ services:
 
   # Host-network LiveKit reaches only this dedicated Redis ACL endpoint.
   redis-livekit:
+    image: openbmb-redis:${OPENBMB_INFRASTRUCTURE_RELEASE:?OPENBMB_INFRASTRUCTURE_RELEASE must identify an immutable release}
     ports:
       - 127.0.0.1:${REDIS_LIVEKIT_HOST_PORT:-16380}:6379
     networks:

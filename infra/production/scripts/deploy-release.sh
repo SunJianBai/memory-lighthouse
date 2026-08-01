@@ -16,6 +16,7 @@ release_root="$(CDPATH= cd -- "$production_dir/../.." && pwd -P)"
 release_id="$(basename -- "$release_root")"
 releases_root="${OPENBMB_RELEASES_ROOT:-/opt/openbmb/releases}"
 current_link="${OPENBMB_CURRENT_LINK:-/opt/openbmb/current}"
+application_link="${OPENBMB_APPLICATION_LINK:-/opt/openbmb/current-app}"
 
 case "$release_root" in
   "$releases_root"/*) ;;
@@ -25,33 +26,114 @@ esac
   printf 'unsafe release directory name: %s\n' "$release_id" >&2
   exit 1
 }
+[[ "$(dirname -- "$application_link")" == "$(dirname -- "$current_link")" ]] || {
+  printf 'application and stack links must share one state directory\n' >&2
+  exit 1
+}
+if [[ -e "$current_link" || -L "$current_link" ]]; then
+  [[ -L "$current_link" ]] || {
+    printf 'current stack path must be a symbolic link\n' >&2
+    exit 1
+  }
+fi
+if [[ -e "$application_link" || -L "$application_link" ]]; then
+  [[ -L "$application_link" ]] || {
+    printf 'current application path must be a symbolic link\n' >&2
+    exit 1
+  }
+fi
 
 export OPENBMB_RELEASE="$release_id"
+export OPENBMB_APPLICATION_RELEASE="$release_id"
+export OPENBMB_INFRASTRUCTURE_RELEASE="$release_id"
 
 old_release=''
 if [[ -L "$current_link" ]]; then
   old_release="$(readlink -f -- "$current_link")"
+  case "$old_release" in
+    "$releases_root"/*) ;;
+    *) printf 'current stack release escaped the release root\n' >&2; exit 1 ;;
+  esac
+  [[ "$(dirname -- "$old_release")" == "$releases_root" ]] || {
+    printf 'current stack release must be directly below the release root\n' >&2
+    exit 1
+  }
+fi
+old_application_release=''
+old_application_target=''
+if [[ -L "$application_link" ]]; then
+  old_application_target="$(readlink -f -- "$application_link")"
+  case "$old_application_target" in
+    "$releases_root"/*) ;;
+    *) printf 'current application release escaped the release root\n' >&2; exit 1 ;;
+  esac
+  [[ "$(dirname -- "$old_application_target")" == "$releases_root" ]] || {
+    printf 'current application release must be directly below the release root\n' >&2
+    exit 1
+  }
+  old_application_release="$(basename -- "$old_application_target")"
+elif [[ -n "$old_release" ]]; then
+  old_application_target="$old_release"
+  old_application_release="$(basename -- "$old_release")"
 fi
 
 deployment_complete=false
-rollback_on_exit() {
-  status=$?
+deployment_mutated=false
+rollback_with_status() {
+  local status="$1"
   trap - EXIT
-  if [[ "$deployment_complete" == true ]]; then
-    return
+  trap '' HUP INT TERM
+  if [[ "$deployment_complete" == true || "$deployment_mutated" == false ]]; then
+    exit "$status"
   fi
-  printf 'Deployment failed; attempting application-image rollback.\n' >&2
-  if [[ -n "$old_release" && -f "$old_release/infra/production/scripts/compose.sh" ]]; then
-    old_id="$(basename -- "$old_release")"
-    OPENBMB_RELEASE="$old_id" \
-      bash "$old_release/infra/production/scripts/compose.sh" \
-      up -d --pull never --no-build api client-web admin-web || true
+
+  if [[ -n "$old_application_target" ]]; then
+    ln -sfn -- "$old_application_target" "${application_link}.restore"
+    mv -Tf -- "${application_link}.restore" "$application_link"
+  else
+    rm -f -- "$application_link"
+  fi
+
+  recovery_stack=''
+  active_stack="$(readlink -f -- "$current_link" 2>/dev/null || true)"
+  if [[ "$active_stack" == "$release_root" ]]; then
+    recovery_stack="$release_root"
+  elif [[ -n "$old_release" ]]; then
+    recovery_stack="$old_release"
+  fi
+
+  printf 'Deployment failed; preserving the activated stack and attempting application-image rollback.\n' >&2
+  if [[ -n "$recovery_stack" && -n "$old_application_release" && \
+        -f "$recovery_stack/infra/production/scripts/compose.sh" ]]; then
+    recovery_id="$(basename -- "$recovery_stack")"
+    OPENBMB_RELEASE="$recovery_id" \
+      OPENBMB_APPLICATION_RELEASE="$old_application_release" \
+      OPENBMB_INFRASTRUCTURE_RELEASE="$recovery_id" \
+      bash "$recovery_stack/infra/production/scripts/compose.sh" \
+      up -d --pull never --no-build --no-deps api client-web admin-web || true
+  elif [[ -n "$recovery_stack" && \
+          -f "$recovery_stack/infra/production/scripts/compose.sh" ]]; then
+    recovery_id="$(basename -- "$recovery_stack")"
+    OPENBMB_RELEASE="$recovery_id" OPENBMB_APPLICATION_RELEASE="$recovery_id" \
+      OPENBMB_INFRASTRUCTURE_RELEASE="$recovery_id" \
+      bash "$recovery_stack/infra/production/scripts/compose.sh" \
+      stop --timeout 30 api client-web admin-web || true
   else
     bash "$script_dir/compose.sh" stop api client-web admin-web || true
   fi
   exit "$status"
 }
+rollback_on_exit() {
+  local status=$?
+  rollback_with_status "$status"
+}
+rollback_on_signal() {
+  rollback_with_status "$1"
+}
 trap rollback_on_exit EXIT
+trap 'rollback_on_signal 129' HUP
+trap 'rollback_on_signal 130' INT
+trap 'rollback_on_signal 143' TERM
 
 bash "$script_dir/preflight.sh"
 
@@ -62,14 +144,8 @@ case "$skip_image_build" in
     bash "$script_dir/verify-release-images.sh"
     ;;
   false)
-    printf 'Building immutable release images: %s\n' "$release_id"
-    # Keep BuildKit from compiling multiple TypeScript applications
-    # concurrently on the 3.6 GiB host. Later targets reuse the cache from
-    # earlier ones.
-    bash "$script_dir/compose.sh" build api
-    bash "$script_dir/compose.sh" --profile tools build migrate
-    bash "$script_dir/compose.sh" build client-web
-    bash "$script_dir/compose.sh" build admin-web
+    printf 'Host-local production builds are disabled; preload and verify the digest-pinned release images first.\n' >&2
+    exit 1
     ;;
   *)
     printf 'OPENBMB_SKIP_IMAGE_BUILD must be true or false\n' >&2
@@ -82,15 +158,47 @@ post_build_disk_kib="$(df -Pk /opt | awk 'NR == 2 { print $4 }')"
   exit 1
 }
 
+if [[ -n "$old_application_target" && ! -L "$application_link" ]]; then
+  deployment_mutated=true
+  mkdir -p -- "$(dirname -- "$application_link")"
+  ln -s -- "$old_application_target" "$application_link"
+fi
+
 if [[ -n "$old_release" && "$old_release" != "$release_root" ]]; then
+  deployment_mutated=true
   printf 'Taking a pre-migration backup with the current release.\n'
   old_id="$(basename -- "$old_release")"
-  OPENBMB_RELEASE="$old_id" OPENBMB_BACKUP_LEAVE_API_STOPPED=true \
+  OPENBMB_RELEASE="$old_id" \
+    OPENBMB_APPLICATION_RELEASE="$old_application_release" \
+    OPENBMB_INFRASTRUCTURE_RELEASE="$old_id" \
+    OPENBMB_BACKUP_LEAVE_API_STOPPED=true \
     bash "$old_release/infra/production/scripts/backup.sh"
 fi
 
+deployment_mutated=true
+mkdir -p -- "$(dirname -- "$current_link")"
+temporary_link="${current_link}.new"
+ln -sfn -- "$release_root" "$temporary_link"
+mv -Tf -- "$temporary_link" "$current_link"
+printf 'Stack release %s is now durable before infrastructure reconciliation.\n' "$release_id"
+
 printf 'Keeping the API stopped across infrastructure reconciliation and schema migration.\n'
-bash "$script_dir/compose.sh" stop --timeout 30 api || true
+bash "$script_dir/compose.sh" stop --timeout 30 api
+api_container_ids="$(
+  docker container ls --all --format '{{.ID}} {{.Names}}' |
+    awk '$2 == "openbmb-api" { print $1 }'
+)"
+if [[ -n "$api_container_ids" ]]; then
+  [[ "$api_container_ids" != *$'\n'* ]] || {
+    printf 'multiple containers unexpectedly use the openbmb-api name\n' >&2
+    exit 1
+  }
+  api_running="$(docker inspect --format '{{.State.Running}}' "$api_container_ids")"
+  [[ "$api_running" == false ]] || {
+    printf 'API remained running; refusing infrastructure reconciliation and migration.\n' >&2
+    exit 1
+  }
+fi
 
 printf 'Starting or reconciling data and media services.\n'
 bash "$script_dir/compose.sh" up -d \
@@ -130,12 +238,11 @@ printf 'Starting release application containers.\n'
 bash "$script_dir/compose.sh" up -d --pull never --no-build api client-web admin-web
 bash "$script_dir/health-check.sh" --local
 
-mkdir -p -- "$(dirname -- "$current_link")"
-temporary_link="${current_link}.new"
-ln -sfn -- "$release_root" "$temporary_link"
-mv -Tf -- "$temporary_link" "$current_link"
+application_temporary_link="${application_link}.new"
+ln -sfn -- "$release_root" "$application_temporary_link"
+mv -Tf -- "$application_temporary_link" "$application_link"
 
 deployment_complete=true
-trap - EXIT
+trap - EXIT HUP INT TERM
 printf 'Release %s is healthy and is now current.\n' "$release_id"
 printf 'Public traffic is unchanged until Caddy is installed/reloaded.\n'

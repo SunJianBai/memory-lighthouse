@@ -162,11 +162,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker pull mysql:8.4.8
-          docker pull redis:7.4.10-alpine
-          docker pull minio/minio:RELEASE.2025-04-22T22-12-26Z
-          docker pull minio/mc:RELEASE.2025-04-08T15-39-49Z
-          docker pull livekit/livekit-server:v1.13.4
+          source infra/production/scripts/release-image-set.sh
+          openbmb_load_release_image_set "$RELEASE_ID"
+          for index in "${!OPENBMB_REQUIRED_IMAGES[@]}"; do
+            source_image="${OPENBMB_SOURCE_IMAGES[$index]}"
+            release_image="${OPENBMB_REQUIRED_IMAGES[$index]}"
+            if [[ "$source_image" != "$release_image" ]]; then
+              docker pull "$source_image"
+              docker tag "$source_image" "$release_image"
+            fi
+          done
 
       - name: Publish exact release transport images to GHCR
         if: env.ALREADY_STAGED != 'true'
@@ -176,10 +181,14 @@ jobs:
         run: |
           set -euo pipefail
           auth_dir="$RUNNER_TEMP/openbmb-ghcr-auth-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          transport_manifest_name="openbmb-transport-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          transport_manifest="$RUNNER_TEMP/$transport_manifest_name"
           case "$auth_dir" in
             "$RUNNER_TEMP"/openbmb-ghcr-auth-[0-9]*-[0-9]*) ;;
             *) printf 'unsafe runner authentication path\n' >&2; exit 1 ;;
           esac
+          [[ ! -e "$transport_manifest" && ! -L "$transport_manifest" ]]
+          install -m 0600 /dev/null "$transport_manifest"
           install -d -m 0700 "$auth_dir"
           cleanup() {
             DOCKER_CONFIG="$auth_dir" docker logout ghcr.io >/dev/null 2>&1 || true
@@ -188,26 +197,46 @@ jobs:
           trap cleanup EXIT
           printf '%s\n' "$GHCR_TOKEN" | DOCKER_CONFIG="$auth_dir" \
             docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >/dev/null
-          images=(
-            "openbmb-api:$RELEASE_ID"
-            "openbmb-migrator:$RELEASE_ID"
-            "openbmb-client-web:$RELEASE_ID"
-            "openbmb-admin-web:$RELEASE_ID"
-            mysql:8.4.8
-            redis:7.4.10-alpine
-            minio/minio:RELEASE.2025-04-22T22-12-26Z
-            minio/mc:RELEASE.2025-04-08T15-39-49Z
-            livekit/livekit-server:v1.13.4
-          )
-          components=(
-            api migrator client-web admin-web mysql redis minio minio-mc livekit
-          )
-          [[ "${#images[@]}" -eq "${#components[@]}" ]]
+          source infra/production/scripts/release-image-set.sh
+          openbmb_load_release_image_set "$RELEASE_ID"
+          images=("${OPENBMB_REQUIRED_IMAGES[@]}")
+          components=("${OPENBMB_DELIVERY_COMPONENTS[@]}")
           for index in "${!images[@]}"; do
             delivery_ref="$DELIVERY_IMAGE:${components[$index]}-$RELEASE_ID"
             docker tag "${images[$index]}" "$delivery_ref"
-            DOCKER_CONFIG="$auth_dir" docker push "$delivery_ref"
+            push_log="$auth_dir/push-${components[$index]}.log"
+            DOCKER_CONFIG="$auth_dir" docker push "$delivery_ref" 2>&1 | tee "$push_log"
+            mapfile -t pushed_digests < <(
+              sed -nE 's/^.*digest: (sha256:[0-9a-f]{64}) size: [0-9]+.*$/\1/p' \
+                "$push_log" | sort -u
+            )
+            [[ "${#pushed_digests[@]}" -eq 1 ]]
+            pushed_digest="${pushed_digests[0]}"
+            registry_digest=''
+            for attempt in {1..6}; do
+              candidate_digest="$(
+                DOCKER_CONFIG="$auth_dir" docker buildx imagetools inspect \
+                  "$delivery_ref" --format '{{json .Manifest}}' 2>/dev/null |
+                  jq -er '.digest | strings | select(test("^sha256:[0-9a-f]{64}$"))' \
+                    2>/dev/null || true
+              )"
+              if [[ "$candidate_digest" == "$pushed_digest" ]]; then
+                registry_digest="$candidate_digest"
+                break
+              fi
+              if (( attempt < 6 )); then
+                printf 'GHCR digest has not converged for %s (attempt %s/6); retrying.\n' \
+                  "$delivery_ref" "$attempt" >&2
+                sleep "$((attempt * 3))"
+              fi
+            done
+            [[ "$registry_digest" == "$pushed_digest" ]]
+            printf '%s %s %s\n' \
+              "${images[$index]}" "$delivery_ref" "$pushed_digest" \
+              >> "$transport_manifest"
           done
+          [[ "$(wc -l < "$transport_manifest")" -eq "${#images[@]}" ]]
+          awk 'NF != 3 { exit 1 }' "$transport_manifest"
           trap - EXIT
           cleanup
 
@@ -222,20 +251,42 @@ jobs:
           transfer_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           remote_dir=".openbmb-transfer/$transfer_id"
           remote_helper="$remote_dir/pull-release-images.sh"
-          ssh tx4h4g-prod \
-            "set -eu; install -d -m 0700 \"\$HOME/.openbmb-transfer\" \"\$HOME/$remote_dir\""
-          scp infra/production/scripts/pull-release-images.sh \
-            "tx4h4g-prod:$remote_helper"
+          remote_image_set="$remote_dir/release-image-set.sh"
+          transport_manifest_name="openbmb-transport-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          transport_manifest="$RUNNER_TEMP/$transport_manifest_name"
+          manifest_name="openbmb-images-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          remote_manifest="$remote_dir/$manifest_name"
+          host_image_manifest="$RUNNER_TEMP/$manifest_name"
+          [[ -f "$transport_manifest" && ! -L "$transport_manifest" ]]
+          source infra/production/scripts/release-image-set.sh
+          openbmb_load_release_image_set "$RELEASE_ID"
+          required_images=("${OPENBMB_REQUIRED_IMAGES[@]}")
           cleanup_remote() {
             ssh tx4h4g-prod \
-              "rm -f -- \"\$HOME/$remote_helper\"; rmdir -- \"\$HOME/$remote_dir\" 2>/dev/null || true" \
+              "rm -f -- \"\$HOME/$remote_helper\" \"\$HOME/$remote_image_set\" \"\$HOME/$remote_dir/$transport_manifest_name\" \"\$HOME/$remote_manifest\"; rmdir -- \"\$HOME/$remote_dir\" 2>/dev/null || true" \
               >/dev/null 2>&1 || true
           }
           trap cleanup_remote EXIT
+          ssh tx4h4g-prod \
+            "set -eu; install -d -m 0700 \"\$HOME/.openbmb-transfer\" \"\$HOME/$remote_dir\""
+          scp infra/production/scripts/pull-release-images.sh \
+            infra/production/scripts/release-image-set.sh "$transport_manifest" \
+            "tx4h4g-prod:$remote_dir/"
           printf '%s\n' "$GHCR_TOKEN" | ssh tx4h4g-prod \
-            "chmod 0700 \"\$HOME/$remote_helper\"; bash \"\$HOME/$remote_helper\" '$RELEASE_ID' '$DELIVERY_IMAGE' '$GITHUB_ACTOR'"
+            "cd \"\$HOME/$remote_dir\"; chmod 0700 pull-release-images.sh; bash ./pull-release-images.sh '$RELEASE_ID' '$DELIVERY_IMAGE' '$GITHUB_ACTOR' '$transport_manifest_name' '$manifest_name'"
+          scp "tx4h4g-prod:$remote_manifest" "$host_image_manifest"
+          chmod 0600 "$host_image_manifest"
+          [[ "$(wc -l < "$host_image_manifest")" -eq "${#required_images[@]}" ]]
+          while read -r image_name image_id trailing; do
+            [[ -n "$image_name" && "$image_id" =~ ^sha256:[0-9a-f]{64}$ && -z "${trailing:-}" ]]
+          done < "$host_image_manifest"
+          for required_image in "${required_images[@]}"; do
+            [[ "$(awk -v image="$required_image" '$1 == image { count += 1 } END { print count + 0 }' "$host_image_manifest")" -eq 1 ]]
+          done
           trap - EXIT
           cleanup_remote
+          ssh tx4h4g-prod \
+            "test ! -e \"\$HOME/$remote_dir\" && test ! -L \"\$HOME/$remote_dir\""
 
       - name: Stage exact source release
         if: env.ALREADY_STAGED != 'true'
@@ -244,35 +295,36 @@ jobs:
           set -euo pipefail
           archive_name="openbmb-source-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
           manifest_name="openbmb-images-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          transport_manifest_name="openbmb-transport-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
           source_archive="$RUNNER_TEMP/$archive_name"
           image_manifest="$RUNNER_TEMP/$manifest_name"
+          transport_manifest="$RUNNER_TEMP/$transport_manifest_name"
+          source infra/production/scripts/release-image-set.sh
+          openbmb_load_release_image_set "$RELEASE_ID"
+          expected_image_count="${#OPENBMB_REQUIRED_IMAGES[@]}"
           git archive --format=tar.gz --output="$source_archive" "$SOURCE_SHA"
-          images=(
-            "openbmb-api:$RELEASE_ID"
-            "openbmb-migrator:$RELEASE_ID"
-            "openbmb-client-web:$RELEASE_ID"
-            "openbmb-admin-web:$RELEASE_ID"
-            mysql:8.4.8
-            redis:7.4.10-alpine
-            minio/minio:RELEASE.2025-04-22T22-12-26Z
-            minio/mc:RELEASE.2025-04-08T15-39-49Z
-            livekit/livekit-server:v1.13.4
-          )
-          : > "$image_manifest"
-          for image_name in "${images[@]}"; do
-            image_id="$(docker image inspect --format '{{.Id}}' "$image_name")"
-            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
-            printf '%s %s\n' "$image_name" "$image_id" >> "$image_manifest"
-          done
+          [[ -f "$image_manifest" && ! -L "$image_manifest" ]]
+          [[ -f "$transport_manifest" && ! -L "$transport_manifest" ]]
           source_archive_sha256="$(sha256sum "$source_archive" | awk '{ print $1 }')"
+          image_manifest_sha256="$(sha256sum "$image_manifest" | awk '{ print $1 }')"
+          transport_manifest_sha256="$(sha256sum "$transport_manifest" | awk '{ print $1 }')"
           [[ "$source_archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$image_manifest_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$transport_manifest_sha256" =~ ^[0-9a-f]{64}$ ]]
           transfer_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          remote_transfer_dir=".openbmb-transfer/$transfer_id"
+          cleanup_stage_transfer() {
+            ssh tx4h4g-prod \
+              "rm -f -- \"\$HOME/$remote_transfer_dir/$archive_name\" \"\$HOME/$remote_transfer_dir/$manifest_name\" \"\$HOME/$remote_transfer_dir/$transport_manifest_name\"; rmdir -- \"\$HOME/$remote_transfer_dir\" 2>/dev/null || true" \
+              >/dev/null 2>&1 || true
+          }
+          trap cleanup_stage_transfer EXIT
           ssh tx4h4g-prod \
-            "set -eu; install -d -m 0700 \"\$HOME/.openbmb-transfer\" \"\$HOME/.openbmb-transfer/$transfer_id\""
-          scp "$source_archive" "$image_manifest" \
-            "tx4h4g-prod:.openbmb-transfer/$transfer_id/"
+            "set -eu; install -d -m 0700 \"\$HOME/.openbmb-transfer\" \"\$HOME/$remote_transfer_dir\""
+          scp "$source_archive" "$image_manifest" "$transport_manifest" \
+            "tx4h4g-prod:$remote_transfer_dir/"
           ssh tx4h4g-prod \
-            "SOURCE_SHA='$SOURCE_SHA' RELEASE_ID='$RELEASE_ID' GITHUB_RUN_ID='$GITHUB_RUN_ID' GITHUB_RUN_ATTEMPT='$GITHUB_RUN_ATTEMPT' TRANSFER_ID='$transfer_id' ARCHIVE_NAME='$archive_name' MANIFEST_NAME='$manifest_name' SOURCE_ARCHIVE_SHA256='$source_archive_sha256' bash -s" <<'REMOTE'
+            "SOURCE_SHA='$SOURCE_SHA' RELEASE_ID='$RELEASE_ID' GITHUB_RUN_ID='$GITHUB_RUN_ID' GITHUB_RUN_ATTEMPT='$GITHUB_RUN_ATTEMPT' TRANSFER_ID='$transfer_id' ARCHIVE_NAME='$archive_name' MANIFEST_NAME='$manifest_name' TRANSPORT_MANIFEST_NAME='$transport_manifest_name' SOURCE_ARCHIVE_SHA256='$source_archive_sha256' IMAGE_MANIFEST_SHA256='$image_manifest_sha256' TRANSPORT_MANIFEST_SHA256='$transport_manifest_sha256' EXPECTED_IMAGE_COUNT='$expected_image_count' bash -s" <<'REMOTE'
           set -Eeuo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$RELEASE_ID" == "git-${SOURCE_SHA:0:12}" ]]
@@ -281,11 +333,16 @@ jobs:
           [[ "$TRANSFER_ID" == "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]
           [[ "$ARCHIVE_NAME" == "openbmb-source-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" ]]
           [[ "$MANIFEST_NAME" == "openbmb-images-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt" ]]
+          [[ "$TRANSPORT_MANIFEST_NAME" == "openbmb-transport-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt" ]]
           [[ "$SOURCE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$IMAGE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$TRANSPORT_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$EXPECTED_IMAGE_COUNT" =~ ^[1-9][0-9]*$ ]]
           release_root="/opt/openbmb/releases/$RELEASE_ID"
           transfer_dir="$HOME/.openbmb-transfer/$TRANSFER_ID"
           source_archive="$transfer_dir/$ARCHIVE_NAME"
           image_manifest="$transfer_dir/$MANIFEST_NAME"
+          transport_manifest="$transfer_dir/$TRANSPORT_MANIFEST_NAME"
           incoming="/opt/openbmb/releases/.incoming-$RELEASE_ID-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           candidate="$incoming/$RELEASE_ID"
           case "$incoming" in
@@ -294,12 +351,15 @@ jobs:
           esac
           cleanup() {
             sudo rm -rf -- "$incoming"
-            rm -f -- "$source_archive" "$image_manifest"
+            rm -f -- "$source_archive" "$image_manifest" "$transport_manifest"
             rmdir -- "$transfer_dir" 2>/dev/null || true
           }
           trap cleanup EXIT
           printf '%s  %s\n' "$SOURCE_ARCHIVE_SHA256" "$source_archive" | sha256sum --check --status
-          [[ "$(wc -l < "$image_manifest")" -eq 9 ]]
+          printf '%s  %s\n' "$IMAGE_MANIFEST_SHA256" "$image_manifest" | sha256sum --check --status
+          printf '%s  %s\n' "$TRANSPORT_MANIFEST_SHA256" "$transport_manifest" | sha256sum --check --status
+          [[ "$(wc -l < "$image_manifest")" -eq "$EXPECTED_IMAGE_COUNT" ]]
+          [[ "$(wc -l < "$transport_manifest")" -eq "$EXPECTED_IMAGE_COUNT" ]]
           sudo chown root:openbmb /opt/openbmb/releases
           sudo chmod 0750 /opt/openbmb/releases
           if [[ -e "$release_root" || -L "$release_root" ]]; then
@@ -310,6 +370,7 @@ jobs:
             [[ "$(sudo stat -c %U "$release_root")" == root ]]
             ! sudo find "$release_root" -xdev \( ! -user root -o -perm /022 \) -print -quit | grep -q .
             sudo cmp --silent "$image_manifest" "$release_root/.openbmb-images"
+            sudo cmp --silent "$transport_manifest" "$release_root/.openbmb-transport-digests"
           else
             if [[ -e "$incoming" || -L "$incoming" ]]; then
               sudo rm -rf -- "$incoming"
@@ -322,6 +383,8 @@ jobs:
             printf '%s\n' "$SOURCE_ARCHIVE_SHA256" | sudo tee "$candidate/.openbmb-source-sha256" >/dev/null
             sudo install -o root -g openbmb -m 0440 \
               "$image_manifest" "$candidate/.openbmb-images"
+            sudo install -o root -g openbmb -m 0440 \
+              "$transport_manifest" "$candidate/.openbmb-transport-digests"
             sudo chown -R root:openbmb "$incoming"
             sudo find "$incoming" -xdev -type d -exec chmod 0550 {} +
             sudo find "$incoming" -xdev -type f -perm /111 -exec chmod 0550 {} +
@@ -338,6 +401,10 @@ jobs:
           trap - EXIT
           cleanup
           REMOTE
+          trap - EXIT
+          cleanup_stage_transfer
+          ssh tx4h4g-prod \
+            "test ! -e \"\$HOME/$remote_transfer_dir\" && test ! -L \"\$HOME/$remote_transfer_dir\""
 
       - name: Verify transferred release assets
         shell: bash

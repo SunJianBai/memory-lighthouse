@@ -139,7 +139,7 @@ TX4H4G 所在网络不能可靠访问 Docker Hub，因此仓库的
 `.github/workflows/production-delivery.yml` 在已通过 CI 的 GitHub Runner 上构建
 四个应用镜像、拉取本文件锁定的基础设施镜像，再把九个精确镜像作为私有、按发布号
 隔离的传输 tag 推送到 GHCR。TX4H4G 通过固定主机密钥的 SSH 接收本次工作流短期
-Token，从 GHCR 拉取后恢复为 Compose 的原始 tag；Token 只进入 `docker login`
+Token，从 GHCR 按摘要拉取后写入 Compose 使用的 release-scoped 本地 tag；Token 只进入 `docker login`
 标准输入并使用临时 `DOCKER_CONFIG`，完成后立即注销和清理。服务器不会从第三方
 公共加速器或 Docker Hub 拉取镜像。
 
@@ -151,42 +151,29 @@ Token，从 GHCR 拉取后恢复为 Compose 的原始 tag；Token 只进入 `doc
 成功运行才会自动激活。PR、非 `main` 手工运行和被取消/失败的 CI 都不能触发生产
 部署。
 
-工作流使用确定性的 `git-<12位提交哈希>` 发布号，并在发布目录写入完整提交哈希
-、源码归档 SHA-256 和精确镜像 ID 清单。发布树由 `root` 拥有且不可被组或其他用户
+工作流使用确定性的 `git-<12位提交哈希>` 发布号，并在发布目录写入完整提交哈希、
+源码归档 SHA-256、GHCR transport digest 清单和服务器本地镜像 ID 清单。发布树由 `root` 拥有且不可被组或其他用户
 写入；容器必须读取的 Redis/LiveKit 配置只获得只读例外。新发布先传送镜像，再在
 临时目录核对 Compose 实际引用的全部 9 个镜像 ID 和四个应用镜像的 OCI revision，
 通过后才原子落盘。同一提交重跑时会先验证并复用已有不可变发布，防止重建镜像覆盖
-已有 tag。`deploy-release.sh` 只有在显式设置
-`OPENBMB_SKIP_IMAGE_BUILD=true` 且上述完整校验通过时才跳过本机构建；所有生产
+已有 tag。`deploy-release.sh` 强制要求
+`OPENBMB_SKIP_IMAGE_BUILD=true` 且上述完整校验通过；TX4H4G 不提供主机本地生产构建回退。所有生产
 `compose up/run` 都使用 `--pull never`，不会在主机上回退访问 Docker Hub。
 
-### 备用：在主机本地串行构建
-
-把干净源码放到新发布目录，排除 `.git`、`node_modules`、`dist` 和所有 `.env`：
-
-```bash
-release_id="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short HEAD)"
-sudo install -d -o "$USER" -g openbmb -m 0750 "/opt/openbmb/releases/$release_id"
-rsync -a --delete \
-  --exclude .git --exclude node_modules --exclude dist --exclude '.env*' \
-  ./ "/opt/openbmb/releases/$release_id/"
-sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env \
-  OPENBMB_API_ENV_FILE=/etc/openbmb/api.env \
-  bash "/opt/openbmb/releases/$release_id/infra/production/scripts/deploy-release.sh"
-```
-
-发布脚本依次执行：严格预检 → 构建带 release tag 的镜像 → 对已有系统做 MySQL
-和 MinIO 备份 → 保持 API 停机 → 启动/核对数据与 LiveKit →
-`prisma migrate deploy` → 启动三个
-应用容器 → 本机 liveness/readiness → 原子切换 `current` 符号链接。它不运行
+发布脚本依次执行：严格预检 → 校验已预装的 release tag 与两份摘要清单 → 对已有系统做 MySQL
+和 MinIO 备份 → 先原子持久化 `current` 栈指针 → 保持 API 停机 → 启动/核对数据与 LiveKit →
+`prisma migrate deploy` → 启动三个应用容器 → 本机 liveness/readiness → 最后原子切换
+`current-app` 应用指针。两个指针有意分阶段切换：断电后宁可由新基础设施继续承载旧应用，
+也不会在重启时根据旧 `current` 延迟降级 MySQL、Redis、MinIO 或 LiveKit。它不运行
 `prisma migrate dev`，也不删除卷。
 
-所有迁移应保持至少一个发布窗口的向后兼容。脚本失败会尝试恢复上一个应用镜像，
-但不会猜测如何回滚 schema。
+所有迁移应保持至少一个发布窗口的向后兼容。栈指针持久化后的失败会保留新栈并尝试恢复
+上一个应用镜像；脚本不会猜测如何回滚 schema 或基础设施数据格式。
 
 部署、备份、应用回滚以及公网切换共用
 `/run/lock/openbmb-operation.lock`。计划备份最多等待 30 分钟，其他互斥操作在锁被
-占用时以退出码 75 快速失败，避免迁移、备份和路由切换相互穿插。
+占用时以退出码 75 快速失败，避免迁移、备份和路由切换相互穿插。systemd 的启动、
+重载与停止同样通过 `service-control.sh` 持有整段操作锁；健康检查不会与部署或回退交叉。
 
 ## 4. 安装 Caddy（先校验，不启动）
 
@@ -264,7 +251,11 @@ sudo systemctl enable --now openbmb-backup.timer
 ```
 
 备份会短暂停止 API，使用事务快照导出 MySQL，并镜像 MinIO 的当前对象状态；
-静态 Web 和 CampusHub 不停。结果为 0700/0600，包含个人敏感信息。必须加密复制
+静态 Web 和 CampusHub 不停。脚本先写隐藏的 `.partial-*` 目录，校验临时 SHA-256
+清单后原子发布目录，最后写入绑定清单摘要的 `.openbmb-backup-complete` 标记；API
+恢复和本机健康检查失败会令备份单元失败，停止备份服务时最多预留 10 分钟完成恢复与
+partial 清理；systemd 的 `ExecStopPost` 还会在脚本被强制终止后按当前两个版本指针
+再次拉起并检查应用。结果为 0700/0600，包含个人敏感信息。必须加密复制
 到异机，并按 `RESTORE.md` 在隔离环境验证。脚本不会自动删除旧备份，防止路径或
 保留策略错误造成误删；需根据磁盘和离线副本制定人工保留策略。
 
@@ -280,7 +271,9 @@ sudo ROLLBACK_SCHEMA_COMPATIBLE=yes \
   <previous-release-id>
 ```
 
-这只切换 API/两个 Web 镜像和 `current`，不回滚数据库、不删除卷。
+这只切换 API/两个 Web 镜像和独立的 `current-app` 指针；基础设施与配置继续使用
+`current` 指向的 stack release，不回滚数据库、不删除卷。systemd 重启后仍会读取
+`current-app`，不会悄悄恢复成较新的应用，也不会降级 MySQL、Redis、MinIO 或 LiveKit。
 
 ### 立即撤销公网代理，恢复 CampusHub 直占 80
 

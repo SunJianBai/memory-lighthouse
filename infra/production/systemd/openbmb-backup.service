@@ -3,12 +3,14 @@ Description=Create an OpenBMB MySQL and MinIO backup
 Requires=docker.service
 After=docker.service openbmb.service
 ConditionPathIsSymbolicLink=/opt/openbmb/current
+ConditionPathIsSymbolicLink=/opt/openbmb/current-app
 
 [Service]
 Type=oneshot
 Environment=OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env
 Environment=OPENBMB_BACKUP_ROOT=/var/backups/openbmb
 ExecStart=/bin/bash /opt/openbmb/current/infra/production/scripts/backup.sh
+ExecStopPost=/bin/bash /opt/openbmb/current/infra/production/scripts/service-control.sh reload
 User=root
 Group=root
 UMask=0077
@@ -18,3 +20,4 @@ ProtectSystem=strict
 ReadWritePaths=/var/backups/openbmb /run/lock
 NoNewPrivileges=true
 TimeoutStartSec=3600
+TimeoutStopSec=600
