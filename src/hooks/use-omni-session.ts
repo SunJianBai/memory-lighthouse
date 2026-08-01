@@ -23,6 +23,7 @@ export type OmniSessionState = {
   videoStream: MediaStream | null;
   assistantText: string;
   userTranscript: string;
+  userTranscriptFinal: boolean;
   error: string;
   metrics: RuntimeMetrics;
   events: RuntimeEvent[];
@@ -67,6 +68,9 @@ export const useOmniSession = (
   const previewStreamRef = useRef<MediaStream | null>(null);
   const assistantDraftRef = useRef("");
   const userDraftRef = useRef("");
+  const userTranscriptDoneRef = useRef(false);
+  const localActionSpeechRef = useRef(false);
+  const browserActionSpeakingRef = useRef(false);
   const [session, setSession] = useState<OmniSessionState>({
     status: "idle",
     cameraState: "off",
@@ -74,6 +78,7 @@ export const useOmniSession = (
     videoStream: null,
     assistantText: "",
     userTranscript: "",
+    userTranscriptFinal: false,
     error: "",
     metrics: emptyMetrics(),
     events: [],
@@ -119,6 +124,8 @@ export const useOmniSession = (
       runtimeRef.current = null;
       stopPreview();
       window.speechSynthesis?.cancel();
+      localActionSpeechRef.current = false;
+      browserActionSpeakingRef.current = false;
       setSession((current) => ({
         ...current,
         status: "idle",
@@ -136,7 +143,24 @@ export const useOmniSession = (
     stop("restart");
     assistantDraftRef.current = "";
     userDraftRef.current = "";
+    userTranscriptDoneRef.current = false;
     const provider = appState.provider.provider;
+    if (provider !== "replay" && !appState.consent.microphoneApproved) {
+      setSession((current) => ({
+        ...current,
+        status: "error",
+        error: "尚未授权麦克风，真实模型会话没有启动",
+      }));
+      return;
+    }
+    if (provider === "cloud" && !appState.consent.cloudProcessingApproved) {
+      setSession((current) => ({
+        ...current,
+        status: "error",
+        error: "尚未授权公网处理，ModelBest 会话没有启动",
+      }));
+      return;
+    }
     if (provider === "replay") {
       setSession((current) => ({
         ...current,
@@ -144,6 +168,7 @@ export const useOmniSession = (
         error: "",
         assistantText: "",
         userTranscript: "",
+        userTranscriptFinal: false,
         events: [
           {
             direction: "local",
@@ -155,7 +180,9 @@ export const useOmniSession = (
         signals: { ...initialSignals, listening: true },
         providerLabel: "演示回放",
       }));
-      await startReplayPreview();
+      if (appState.consent.cameraApproved) {
+        await startReplayPreview();
+      }
       return;
     }
 
@@ -175,14 +202,51 @@ export const useOmniSession = (
           ...current,
           assistantText: assistantDraftRef.current,
         }));
+        if (
+          output.done &&
+          output.text &&
+          localActionSpeechRef.current &&
+          "speechSynthesis" in window
+        ) {
+          localActionSpeechRef.current = false;
+          const utterance = new SpeechSynthesisUtterance(output.text);
+          utterance.lang = "zh-CN";
+          utterance.rate = 0.88;
+          setSession((current) => ({
+            ...current,
+            signals: { ...current.signals, modelSpeaking: true },
+          }));
+          browserActionSpeakingRef.current = true;
+          utterance.onend = () => {
+            browserActionSpeakingRef.current = false;
+            setSession((current) => ({
+              ...current,
+              signals: { ...current.signals, modelSpeaking: false },
+            }));
+          };
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(utterance);
+        }
       },
       onUserTranscript: (text, done) => {
+        if (text && browserActionSpeakingRef.current) {
+          browserActionSpeakingRef.current = false;
+          window.speechSynthesis.cancel();
+          setSession((current) => ({
+            ...current,
+            signals: { ...current.signals, modelSpeaking: false },
+          }));
+        }
         userDraftRef.current = done
           ? text
-          : `${userDraftRef.current}${text}`;
+          : userTranscriptDoneRef.current
+            ? text
+            : `${userDraftRef.current}${text}`;
+        userTranscriptDoneRef.current = done;
         setSession((current) => ({
           ...current,
           userTranscript: userDraftRef.current,
+          userTranscriptFinal: done,
         }));
       },
       onMetrics: (metrics) =>
@@ -220,13 +284,14 @@ export const useOmniSession = (
       events: [],
     }));
     try {
+      const cameraEnabled = appState.consent.cameraApproved;
       const referenceAudio =
         appState.provider.referenceAudio ??
         (isLocal ? await loadBundledReferenceAudio() : null);
       await runtime.start({
         provider: isLocal ? "local" : "cloud",
-        mode: "video",
-        cameraEnabled: true,
+        mode: cameraEnabled ? "video" : "voice",
+        cameraEnabled,
         prompt: buildAgentPrompt(appState, activeRoutine),
         muted: false,
         playbackMuted: false,
@@ -247,6 +312,47 @@ export const useOmniSession = (
       }));
     }
   }, [activeRoutine, appState, startReplayPreview, stop]);
+
+  const requestModelAction = useCallback(
+    async (instruction: string) => {
+      const runtime = runtimeRef.current;
+      if (
+        !runtime ||
+        session.status !== "live" ||
+        appState.provider.provider === "replay"
+      ) {
+        return false;
+      }
+      localActionSpeechRef.current = appState.provider.provider === "local";
+      try {
+        await runtime.sendTurn({
+          messages: [
+            {
+              role: "user",
+              content: `[确定性业务事件] ${instruction}。请严格遵守系统边界，用最多两句中文直接回应长者，不要解释内部规则。`,
+            },
+          ],
+          streaming: appState.provider.provider === "local",
+          ttsEnabled: appState.provider.provider === "cloud",
+          enableThinking: false,
+          maxNewTokens: 96,
+          lengthPenalty: 1,
+          referenceAudio: appState.provider.referenceAudio,
+        });
+        return true;
+      } catch (error) {
+        localActionSpeechRef.current = false;
+        setSession((current) => ({
+          ...current,
+          status: "error",
+          error:
+            error instanceof Error ? error.message : "模型动作请求失败",
+        }));
+        return false;
+      }
+    },
+    [appState, session.status],
+  );
 
   const speakReplay = useCallback((text: string) => {
     assistantDraftRef.current = text;
@@ -278,5 +384,5 @@ export const useOmniSession = (
     window.speechSynthesis.speak(utterance);
   }, []);
 
-  return { session, start, stop, speakReplay };
+  return { session, start, stop, speakReplay, requestModelAction };
 };

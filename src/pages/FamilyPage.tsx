@@ -59,10 +59,22 @@ export const FamilyPage = () => {
             </p>
           </div>
         </div>
-        <button className="secondary-button" type="button">
+        <a
+          className="secondary-button"
+          href={
+            firstContact?.phone
+              ? `tel:${firstContact.phone.replace(/\s+/g, "")}`
+              : "#/memories"
+          }
+          aria-label={
+            firstContact
+              ? `拨打${firstContact.name}的电话 ${firstContact.phone}`
+              : "前往记忆中心添加联系人"
+          }
+        >
           <PhoneCall aria-hidden="true" size={19} />
-          发起关怀通话
-        </button>
+          {firstContact ? "发起关怀通话" : "添加联系人"}
+        </a>
       </section>
 
       <section className="summary-grid" aria-label="今日摘要">

@@ -11,16 +11,28 @@ export const buildAgentPrompt = (
     .map((person) => `${person.name}（${person.relationship}）`)
     .join("、");
   const medications = state.medications
-    .filter((item) => item.active)
+    .filter(
+      (item) => state.consent.sensitiveMemoryApproved && item.active,
+    )
     .map(
       (item) =>
         `${item.alias}：${item.scheduledTimes.join("/")}；标签“${item.containerLabel}”；位置：${item.containerLocation}；要求：${item.requirements}`,
     )
     .join("\n");
   const memories = state.memories
+    .filter(
+      (item) =>
+        item.sensitivity === "normal" ||
+        state.consent.sensitiveMemoryApproved,
+    )
     .slice(0, 12)
     .map((item) => `- ${item.title}：${item.content}`)
     .join("\n");
+  const permittedRoutine =
+    activeRoutine?.category === "medication" &&
+    !state.consent.sensitiveMemoryApproved
+      ? undefined
+      : activeRoutine;
 
   return compact(`
     你是“守忆灯塔”，是${recipient.preferredName}的日常任务陪伴助手。你正在通过摄像头和麦克风持续观察与倾听。
@@ -45,8 +57,8 @@ export const buildAgentPrompt = (
     ${memories || "暂无"}
 
     ${
-      activeRoutine
-        ? `当前日程：${activeRoutine.title}，计划时间 ${activeRoutine.scheduledTime}，操作说明：${activeRoutine.instructions}，确认问题：${activeRoutine.confirmationQuestion}`
+      permittedRoutine
+        ? `当前日程：${permittedRoutine.title}，计划时间 ${permittedRoutine.scheduledTime}，操作说明：${permittedRoutine.instructions}，确认问题：${permittedRoutine.confirmationQuestion}`
         : "当前没有正在执行的日程。保持陪伴和倾听，除非用户求助，否则不要编造提醒。"
     }
   `);

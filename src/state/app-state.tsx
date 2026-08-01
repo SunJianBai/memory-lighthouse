@@ -8,6 +8,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import {
+  clearSavedAppState,
   exportAppState,
   importAppState,
   loadAppState,
@@ -37,7 +38,11 @@ export const AppStateProvider = ({ children }: PropsWithChildren) => {
   const [state, setState] = useState<AppState>(() => loadAppState());
 
   useEffect(() => {
-    saveAppState(state);
+    if (state.consent.localStorageApproved) {
+      saveAppState(state);
+    } else {
+      clearSavedAppState();
+    }
   }, [state]);
 
   useEffect(() => {

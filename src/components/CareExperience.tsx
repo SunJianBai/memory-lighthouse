@@ -3,11 +3,13 @@ import {
   Camera,
   Check,
   CircleStop,
+  CookingPot,
   Glasses,
   Hand,
   HeartHandshake,
   MessageCircleMore,
   Mic,
+  MoonStar,
   Play,
   RotateCcw,
   ScanEye,
@@ -31,6 +33,7 @@ import {
   findNextRoutine,
   routineOccurrenceKey,
 } from "../agent/routine-scheduler";
+import { classifyVoiceCommand } from "../agent/voice-command";
 import type { Routine } from "../domain/types";
 import { useOmniSession } from "../hooks/use-omni-session";
 import { useAppState } from "../state/app-state";
@@ -68,6 +71,7 @@ export const CareExperience = ({
   );
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const lastAutomaticRoutineRef = useRef("");
+  const lastVoiceCommandRef = useRef("");
   const enabledRoutines = useMemo(
     () => state.routines.filter((routine) => routine.enabled),
     [state.routines],
@@ -79,10 +83,8 @@ export const CareExperience = ({
         : findNextRoutine(enabledRoutines, clock),
     [clock, enabledRoutines, presenterMode],
   );
-  const { session, start, stop, speakReplay } = useOmniSession(
-    state,
-    activeRoutine,
-  );
+  const { session, start, stop, speakReplay, requestModelAction } =
+    useOmniSession(state, activeRoutine);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClock(new Date()), 1000);
@@ -116,10 +118,25 @@ export const CareExperience = ({
     });
 
   const beginSession = async () => {
+    const realProvider = state.provider.provider !== "replay";
+    if (
+      (realProvider && !state.consent.microphoneApproved) ||
+      (state.provider.provider === "cloud" &&
+        !state.consent.cloudProcessingApproved)
+    ) {
+      await start();
+      return;
+    }
+    const providerLabel =
+      state.provider.provider === "local"
+        ? "本地 Ascend"
+        : state.provider.provider === "cloud"
+          ? "ModelBest 公网"
+          : "演示回放";
     dispatch({ type: "SESSION_STARTED", at: new Date().toISOString() });
     record(
       "陪伴会话开始",
-      `${session.providerLabel}准备接收语音与视频。`,
+      `${providerLabel}准备接收语音与视频。`,
       "session_started",
     );
     await start();
@@ -152,15 +169,34 @@ export const CareExperience = ({
         : "请保持安静并把“早 · 08:30”标签放入镜头，观察模型是否主动提醒。",
     );
     const text = `${state.recipient.preferredName}，现在是${routine.scheduledTime}，我们一起确认一下${routine.title}。${routine.instructions}`;
-    sayIfReplay(text);
-    record(
-      `${routine.title}已提醒`,
-      "系统根据家属录入的时间与标签发出提醒，等待本人确认。",
-      "reminder_spoken",
-      "info",
-      "open",
-      "agent",
-    );
+    if (state.provider.provider === "replay") {
+      sayIfReplay(text);
+      record(
+        `${routine.title}已提醒`,
+        "回放引擎根据家属录入的时间与标签发出提醒，等待本人确认。",
+        "reminder_spoken",
+        "info",
+        "open",
+        "demo",
+      );
+    } else {
+      void requestModelAction(
+        `现在是${routine.scheduledTime}，日程“${routine.title}”已到期。请根据操作说明主动提醒：${routine.instructions}`,
+      ).then((accepted) =>
+        record(
+          accepted
+            ? `${routine.title}已到期`
+            : `${routine.title}触发失败`,
+          accepted
+            ? "确定性日程规则已触发，提醒请求已提交到真实模型通道。"
+            : "确定性日程规则已触发，但真实模型没有接受提醒请求。",
+          "routine_due",
+          accepted ? "info" : "attention",
+          "open",
+          "caregiver",
+        ),
+      );
+    }
   };
 
   useEffect(() => {
@@ -182,18 +218,21 @@ export const CareExperience = ({
         ? "主动纠正已完成。现在请说“是右边这个吗？”，展示用户可打断。"
         : "请拿起“下午”标签盒并自然说话；此按钮只显示演员提示，不伪造模型输出。",
     );
-    sayIfReplay(text);
-    record(
-      "标签与当前任务不一致",
-      "画面中出现“下午”标签；系统未判断药物，只提示重新核对已录入标签。",
-      "needs_confirmation",
-      "attention",
-      "open",
-      "agent",
-    );
+    if (state.provider.provider === "replay") {
+      sayIfReplay(text);
+      record(
+        "演示标签与当前任务不一致",
+        "回放场景使用“下午”道具标签；未识别药物，只提示重新核对。",
+        "needs_confirmation",
+        "attention",
+        "open",
+        "demo",
+      );
+    }
   };
 
-  const confirmRoutine = () => {
+  const confirmRoutine = (source: "user" | "demo" = "user") => {
+    if (agent.phase !== "awaiting_confirmation") return;
     dispatch({ type: "USER_CONFIRMED", at: new Date().toISOString() });
     const text = `好的，${state.recipient.preferredName}。我记录的是“本人已口头确认”，不是医学判断。今天这项任务完成了。`;
     sayIfReplay(text);
@@ -204,7 +243,7 @@ export const CareExperience = ({
       "user_confirmed",
       "info",
       "resolved",
-      "user",
+      source,
     );
   };
 
@@ -212,12 +251,25 @@ export const CareExperience = ({
     const text = nextRoutine
       ? `好的，我慢一点再说一次。现在只需要先看看${nextRoutine.instructions}`
       : "好的，我会慢一点再说一次。";
-    sayIfReplay(text);
+    if (state.provider.provider === "replay") {
+      sayIfReplay(text);
+    } else {
+      void requestModelAction(
+        `长者请求你慢一点重复当前步骤。当前步骤是：${nextRoutine?.instructions ?? "请简短重复刚才的提醒"}`,
+      );
+    }
     setPresenterCue("已按长者需求缩短并重复指令。");
   };
 
-  const requestFamily = () => {
-    dispatch({ type: "CONFIRMATION_TIMEOUT", at: new Date().toISOString() });
+  const requestFamily = (source: "user" | "demo" = "user") => {
+    if (agent.phase === "idle" || agent.phase === "completed") return;
+    dispatch({
+      type:
+        agent.phase === "awaiting_confirmation"
+          ? "CONFIRMATION_TIMEOUT"
+          : "FAMILY_REQUESTED",
+      at: new Date().toISOString(),
+    });
     const person = state.trustedPeople[0];
     sayIfReplay(
       `好的，我不会猜测。已经把这件事标记为待${person?.relationship ?? "家属"}查看。`,
@@ -229,7 +281,7 @@ export const CareExperience = ({
       "family_contacted",
       "important",
       "open",
-      "agent",
+      source,
     );
   };
 
@@ -238,17 +290,91 @@ export const CareExperience = ({
     const text = memory
       ? `${state.recipient.preferredName}，家属记录里写着：${memory.content}我们先去那里看看，好吗？`
       : "我还没有眼镜位置的可靠记录，可以请家属补充。";
-    sayIfReplay(text);
-    setPresenterCue("已展示“上传记忆 → 对话中主动取用”的闭环。");
+    if (state.provider.provider === "replay") {
+      sayIfReplay(text);
+      setPresenterCue("回放已展示“上传记忆 → 对话中取用”的闭环。");
+      record(
+        "演示调用眼镜位置记忆",
+        memory?.content ?? "未找到可靠的位置记忆。",
+        "memory_used",
+        "info",
+        "resolved",
+        "demo",
+      );
+    } else {
+      setPresenterCue("眼镜位置问题已发送给真实模型，等待它依据授权记忆回答。");
+      void requestModelAction(
+        memory
+          ? `长者询问眼镜位置。授权记忆写明：${memory.content}`
+          : "长者询问眼镜位置，但没有可靠的位置记录；请明确说不知道并建议联系家属",
+      );
+    }
+  };
+
+  const triggerKitchenCheck = () => {
+    setPresenterCue(
+      state.provider.provider === "replay"
+        ? "厨房回放场景已触发；只提示复核，不声称识别到真实危险。"
+        : "请播放流水声或在镜头中展示厨房道具，让模型自然判断是否需要提醒；按钮不会写入证据。",
+    );
+    if (state.provider.provider !== "replay") return;
+    speakReplay(
+      `${state.recipient.preferredName}，我听到演示中的流水声还在。我们先回头确认水龙头是否关好；灶台状态我还不能确认。`,
+    );
     record(
-      "调用眼镜位置记忆",
-      memory?.content ?? "未找到可靠的位置记忆。",
-      "memory_used",
-      "info",
-      "resolved",
-      "agent",
+      "厨房离开前需要复核",
+      "回放场景模拟持续流水声；系统只请求本人逐项确认，没有判定真实危险。",
+      "needs_confirmation",
+      "attention",
+      "open",
+      "demo",
     );
   };
+
+  const triggerNightCheck = () => {
+    setPresenterCue(
+      state.provider.provider === "replay"
+        ? "夜间回放场景已触发；先开灯、坐稳，再决定是否联系家属。"
+        : "请调暗演示灯光并自然做起身动作，等待模型主动给出单步骤提醒；按钮不会写入证据。",
+    );
+    if (state.provider.provider !== "replay") return;
+    speakReplay(
+      `${state.recipient.preferredName}，演示画面比较暗。请先把灯打开，坐稳后再慢慢站起，需要的话我可以联系家人。`,
+    );
+    record(
+      "夜间起身需要复核",
+      "回放场景模拟光线较暗；系统给出低风险步骤，没有判断跌倒或健康状态。",
+      "needs_confirmation",
+      "attention",
+      "open",
+      "demo",
+    );
+  };
+
+  useEffect(() => {
+    if (!session.userTranscriptFinal) {
+      lastVoiceCommandRef.current = "";
+      return;
+    }
+    if (
+      session.status !== "live" ||
+      !session.userTranscript.trim()
+    ) {
+      return;
+    }
+    const command = session.userTranscript.replace(/\s+/g, "").trim();
+    if (command === lastVoiceCommandRef.current) return;
+    lastVoiceCommandRef.current = command;
+
+    const intent = classifyVoiceCommand(command);
+    if (intent === "confirm") {
+      confirmRoutine("user");
+    } else if (intent === "repeat") {
+      repeatReminder();
+    } else if (intent === "family") {
+      requestFamily("user");
+    }
+  }, [session.status, session.userTranscript, session.userTranscriptFinal]);
 
   const statusTone =
     agent.phase === "needs_attention"
@@ -378,8 +504,11 @@ export const CareExperience = ({
           <button
             className="care-action-button success"
             type="button"
-            disabled={session.status !== "live"}
-            onClick={confirmRoutine}
+            disabled={
+              session.status !== "live" ||
+              agent.phase !== "awaiting_confirmation"
+            }
+            onClick={() => confirmRoutine("user")}
           >
             <Check aria-hidden="true" size={24} />
             我完成了
@@ -397,7 +526,7 @@ export const CareExperience = ({
             className="care-action-button"
             type="button"
             disabled={session.status !== "live"}
-            onClick={requestFamily}
+            onClick={() => requestFamily("user")}
           >
             <HeartHandshake aria-hidden="true" size={23} />
             联系家人
@@ -430,7 +559,11 @@ export const CareExperience = ({
           </div>
 
           <div className="scenario-list">
-            <button type="button" onClick={() => triggerRoutine()}>
+            <button
+              type="button"
+              disabled={session.status !== "live"}
+              onClick={() => triggerRoutine()}
+            >
               <span>01</span>
               <div>
                 <strong>触发晨间日程</strong>
@@ -438,7 +571,11 @@ export const CareExperience = ({
               </div>
               <BellRing aria-hidden="true" size={20} />
             </button>
-            <button type="button" onClick={triggerWrongBox}>
+            <button
+              type="button"
+              disabled={session.status !== "live"}
+              onClick={triggerWrongBox}
+            >
               <span>02</span>
               <div>
                 <strong>展示拿错标签盒</strong>
@@ -446,7 +583,11 @@ export const CareExperience = ({
               </div>
               <ScanEye aria-hidden="true" size={20} />
             </button>
-            <button type="button" onClick={repeatReminder}>
+            <button
+              type="button"
+              disabled={session.status !== "live"}
+              onClick={repeatReminder}
+            >
               <span>03</span>
               <div>
                 <strong>用户打断并追问</strong>
@@ -454,7 +595,11 @@ export const CareExperience = ({
               </div>
               <MessageCircleMore aria-hidden="true" size={20} />
             </button>
-            <button type="button" onClick={findGlasses}>
+            <button
+              type="button"
+              disabled={session.status !== "live"}
+              onClick={findGlasses}
+            >
               <span>04</span>
               <div>
                 <strong>询问眼镜位置</strong>
@@ -462,13 +607,41 @@ export const CareExperience = ({
               </div>
               <Glasses aria-hidden="true" size={20} />
             </button>
-            <button type="button" onClick={requestFamily}>
+            <button
+              type="button"
+              disabled={session.status !== "live"}
+              onClick={() => requestFamily("demo")}
+            >
               <span>05</span>
               <div>
                 <strong>模拟未明确确认</strong>
                 <small>进入家属协同，不制造告警</small>
               </div>
               <HeartHandshake aria-hidden="true" size={20} />
+            </button>
+            <button
+              type="button"
+              disabled={session.status !== "live"}
+              onClick={triggerKitchenCheck}
+            >
+              <span>06</span>
+              <div>
+                <strong>厨房离开前复核</strong>
+                <small>听觉线索与逐项确认</small>
+              </div>
+              <CookingPot aria-hidden="true" size={20} />
+            </button>
+            <button
+              type="button"
+              disabled={session.status !== "live"}
+              onClick={triggerNightCheck}
+            >
+              <span>07</span>
+              <div>
+                <strong>夜间起身陪伴</strong>
+                <small>低风险步骤，不判定跌倒</small>
+              </div>
+              <MoonStar aria-hidden="true" size={20} />
             </button>
           </div>
 
@@ -494,7 +667,7 @@ export const CareExperience = ({
           <div className="presenter-note">
             <ShieldAlert aria-hidden="true" size={18} />
             <p>
-              演示回放用于离线备用并明确标注；真实模型模式下，按钮只给演员提示，不伪造模型输出。
+              回放始终明确标注；真实模式中，日程、重复和记忆按钮会发起模型请求，纯视觉按钮只给演员提示，不伪造模型输出或证据。
             </p>
           </div>
         </aside>

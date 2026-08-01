@@ -10,6 +10,6 @@ tmp/
 .DS_Store
 
 # User-generated sensitive demo data stays in the browser and must never be committed.
-data/
-uploads/
-recordings/
+/data/
+/uploads/
+/recordings/

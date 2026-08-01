@@ -40,4 +40,19 @@ describe("agent state machine", () => {
     expect(result.phase).toBe("needs_attention");
     expect(result.message).toContain("待家属查看");
   });
+
+  it("rejects an early confirmation and accepts an explicit family request", () => {
+    const observing = transitionAgent(createInitialAgentState("t0"), {
+      type: "SESSION_STARTED",
+      at: "t1",
+    });
+
+    expect(
+      transitionAgent(observing, { type: "USER_CONFIRMED", at: "t2" }),
+    ).toEqual(observing);
+    expect(
+      transitionAgent(observing, { type: "FAMILY_REQUESTED", at: "t3" })
+        .phase,
+    ).toBe("needs_attention");
+  });
 });

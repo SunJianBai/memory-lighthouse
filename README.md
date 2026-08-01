@@ -75,6 +75,7 @@ ssh -N `
 - [4 分钟现场演示脚本](docs/DEMO_SCRIPT.md)
 - [隐私与安全边界](docs/PRIVACY_AND_SAFETY.md)
 - [验收记录](docs/TEST_REPORT.md)
+- [原方案追踪与实现取舍](docs/SOURCE_TRACEABILITY.md)
 - [视觉设计系统](design-system/memory-lighthouse/MASTER.md)
 
 ## 项目结构

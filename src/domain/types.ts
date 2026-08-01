@@ -181,5 +181,6 @@ export type AgentAction =
   | { type: "REMINDER_DELIVERED"; at: string }
   | { type: "USER_CONFIRMED"; at: string }
   | { type: "CONFIRMATION_TIMEOUT"; at: string }
+  | { type: "FAMILY_REQUESTED"; at: string }
   | { type: "FAMILY_ACKNOWLEDGED"; at: string }
   | { type: "SESSION_ENDED"; at: string };

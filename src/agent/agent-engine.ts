@@ -37,6 +37,7 @@ export const transitionAgent = (
         message: "提醒已送达，等待本人确认",
       };
     case "USER_CONFIRMED":
+      if (state.phase !== "awaiting_confirmation") return state;
       return {
         ...state,
         phase: "completed",
@@ -50,6 +51,14 @@ export const transitionAgent = (
         phase: "needs_attention",
         lastTransitionAt: action.at,
         message: "未获得明确确认，标记为待家属查看",
+      };
+    case "FAMILY_REQUESTED":
+      if (state.phase === "idle" || state.phase === "completed") return state;
+      return {
+        ...state,
+        phase: "needs_attention",
+        lastTransitionAt: action.at,
+        message: "本人请求联系家属，等待家属接手",
       };
     case "FAMILY_ACKNOWLEDGED":
       return {

@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { prepareAsset } from "../data/storage";
-import type { AssetKind, MemoryKind } from "../domain/types";
+import type { AssetKind, ConsentState, MemoryKind } from "../domain/types";
 import { useAppState } from "../state/app-state";
 
 type TabId = "people" | "medications" | "daily" | "privacy";
@@ -36,6 +36,9 @@ export const MemoriesPage = () => {
   } = useAppState();
   const [tab, setTab] = useState<TabId>("people");
   const [feedback, setFeedback] = useState("");
+  const [feedbackTone, setFeedbackTone] = useState<"success" | "danger">(
+    "success",
+  );
   const [personForm, setPersonForm] = useState({
     name: "",
     relationship: "",
@@ -65,12 +68,19 @@ export const MemoriesPage = () => {
     attach: (assetId: string) => void,
   ) => {
     if (!file) return;
+    if (!state.consent.sensitiveMemoryApproved) {
+      setFeedbackTone("danger");
+      setFeedback("请先在“授权与数据”中允许保存敏感记忆，再上传图片。");
+      return;
+    }
     try {
       const asset = await prepareAsset(file, kind);
       addAsset(asset);
       attach(asset.id);
+      setFeedbackTone("success");
       setFeedback(`“${file.name}”已压缩并保存到本浏览器。`);
     } catch (error) {
+      setFeedbackTone("danger");
       setFeedback(error instanceof Error ? error.message : "上传失败");
     }
   };
@@ -93,11 +103,17 @@ export const MemoriesPage = () => {
       ],
     }));
     setPersonForm({ name: "", relationship: "", phone: "" });
+    setFeedbackTone("success");
     setFeedback("联系人已添加，默认无敏感事件查看权限。");
   };
 
   const addMedication = (event: FormEvent) => {
     event.preventDefault();
+    if (!state.consent.sensitiveMemoryApproved) {
+      setFeedbackTone("danger");
+      setFeedback("请先授权保存药物等敏感记忆，再建立药物日程。");
+      return;
+    }
     if (!medicationForm.name.trim() || !medicationForm.time) return;
     const medicationId = crypto.randomUUID();
     const routineId = crypto.randomUUID();
@@ -143,6 +159,7 @@ export const MemoriesPage = () => {
       containerLabel: "",
       containerLocation: "",
     });
+    setFeedbackTone("success");
     setFeedback("药物记忆与对应日程已同时建立。请仅录入医生或家属已确认的信息。");
   };
 
@@ -171,7 +188,32 @@ export const MemoriesPage = () => {
       ],
     }));
     setMemoryForm({ kind: "preference", title: "", content: "", tags: "" });
+    setFeedbackTone("success");
     setFeedback("生活记忆已保存，并会在相关对话中加入模型上下文。");
+  };
+
+  const setConsent = (
+    key: Exclude<keyof ConsentState, "acceptedAt">,
+    approved: boolean,
+  ) => {
+    updateState((current) => ({
+      ...current,
+      consent: { ...current.consent, [key]: approved },
+      provider:
+        key === "cloudProcessingApproved" &&
+        !approved &&
+        current.provider.provider === "cloud"
+          ? { ...current.provider, provider: "replay" }
+          : current.provider,
+    }));
+    setFeedbackTone("success");
+    setFeedback(
+      approved
+        ? "授权已更新。"
+        : key === "localStorageApproved"
+          ? "本地持久化已关闭；当前页面仍可使用，刷新后将恢复演示数据。"
+          : "授权已撤回，后续会话和上传将立即遵守新设置。",
+    );
   };
 
   return (
@@ -196,7 +238,7 @@ export const MemoriesPage = () => {
       </div>
 
       {feedback && (
-        <div className="inline-alert success" role="status">
+        <div className={`inline-alert ${feedbackTone}`} role={feedbackTone === "danger" ? "alert" : "status"}>
           <Check aria-hidden="true" size={19} />
           <span>{feedback}</span>
           <button type="button" onClick={() => setFeedback("")}>
@@ -776,13 +818,10 @@ export const MemoriesPage = () => {
                   type="checkbox"
                   checked={Boolean(state.consent[key as keyof typeof state.consent])}
                   onChange={(event) =>
-                    updateState((current) => ({
-                      ...current,
-                      consent: {
-                        ...current.consent,
-                        [key]: event.target.checked,
-                      },
-                    }))
+                    setConsent(
+                      key as Exclude<keyof ConsentState, "acceptedAt">,
+                      event.target.checked,
+                    )
                   }
                 />
               </label>
