@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1.7
+
+FROM node:22.19.0-bookworm-slim AS dependencies
+
+ENV CI=true \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    NODE_OPTIONS=--max-old-space-size=640
+
+WORKDIR /workspace
+RUN chown node:node /workspace
+
+COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node apps/server-api/package.json apps/server-api/package.json
+COPY --chown=node:node apps/client-web/package.json apps/client-web/package.json
+COPY --chown=node:node apps/admin-web/package.json apps/admin-web/package.json
+COPY --chown=node:node packages/api-contracts/package.json packages/api-contracts/package.json
+COPY --chown=node:node packages/event-contracts/package.json packages/event-contracts/package.json
+
+USER node
+RUN npm ci \
+    --workspace @memory-lighthouse/client-web \
+    --workspace @memory-lighthouse/admin-web \
+    --include-workspace-root
+
+FROM dependencies AS client-build
+
+ARG VITE_API_BASE_URL=/openBMB/api/v1
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+COPY --chown=node:node apps/client-web apps/client-web
+RUN npm run build --workspace @memory-lighthouse/client-web
+
+FROM dependencies AS admin-build
+
+ARG VITE_API_BASE=/openBMB/api/v1
+ENV VITE_API_BASE=${VITE_API_BASE} \
+    VITE_DEPLOYMENT_ENVIRONMENT=production \
+    VITE_ENABLE_DEVELOPMENT_CONTENT_INSPECTION=false
+COPY --chown=node:node apps/admin-web apps/admin-web
+RUN npm run build --workspace @memory-lighthouse/admin-web
+
+FROM nginxinc/nginx-unprivileged:1.29.4-alpine AS client-runtime
+
+COPY infra/production/nginx/client.conf /etc/nginx/conf.d/default.conf
+COPY --from=client-build /workspace/apps/client-web/dist/ /usr/share/nginx/html/openBMB/
+
+FROM nginxinc/nginx-unprivileged:1.29.4-alpine AS admin-runtime
+
+COPY infra/production/nginx/admin.conf /etc/nginx/conf.d/default.conf
+COPY --from=admin-build /workspace/apps/admin-web/dist/ /usr/share/nginx/html/openBMB/admin/

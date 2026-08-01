@@ -1,0 +1,206 @@
+services:
+  # Linux host networking is intentional for the API. Caddy reaches the API
+  # from loopback, which preserves the application's one-hop trusted-proxy
+  # invariant. HOST is forced to loopback, so port 13100 is never public.
+  api:
+    image: openbmb-api:${OPENBMB_RELEASE:?OPENBMB_RELEASE must identify an immutable release}
+    build:
+      context: ../..
+      dockerfile: infra/production/Dockerfile.api
+      target: api-runtime
+    container_name: openbmb-api
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    env_file:
+      - path: ${OPENBMB_API_ENV_FILE:?set OPENBMB_API_ENV_FILE to /etc/openbmb/api.env}
+        required: true
+        format: raw
+    environment:
+      NODE_ENV: production
+      HOST: 127.0.0.1
+      PORT: "13100"
+      CORS_ORIGINS: https://${OPENBMB_DOMAIN:-sun227454.online}
+      PUBLIC_APP_URL: https://${OPENBMB_DOMAIN:-sun227454.online}/openBMB
+      MAIL_DELIVERY_MODE: smtp
+      DATABASE_URL: mysql://${MYSQL_USER:-openbmb}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD}@127.0.0.1:${MYSQL_HOST_PORT:-13306}/${MYSQL_DATABASE:-openbmb}
+      REDIS_URL: redis://openbmb-api:${REDIS_APP_PASSWORD:?set REDIS_APP_PASSWORD}@127.0.0.1:${REDIS_HOST_PORT:-16379}/0
+      # Path-style S3 URLs become /openbmb-assets/<key> on the already-existing
+      # main domain; Caddy preserves that exact signed path for MinIO.
+      OBJECT_STORAGE_ENDPOINT: https://${OPENBMB_DOMAIN:-sun227454.online}
+      OBJECT_STORAGE_REGION: ${OBJECT_STORAGE_REGION:-us-east-1}
+      OBJECT_STORAGE_BUCKET: ${MINIO_BUCKET:-openbmb-assets}
+      OBJECT_STORAGE_ACCESS_KEY_ID: ${MINIO_APP_ACCESS_KEY:-openbmb-api}
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: ${MINIO_APP_SECRET_KEY:?set MINIO_APP_SECRET_KEY}
+      OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+      LIVEKIT_URL: ws://127.0.0.1:${LIVEKIT_SIGNAL_HOST_PORT:-17880}
+      # The LiveKit client appends /rtc/v1. Caddy routes that path on the
+      # already-resolving main domain, so deployment does not depend on a
+      # separate rtc.* DNS record.
+      LIVEKIT_PUBLIC_URL: wss://${OPENBMB_DOMAIN:-sun227454.online}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-openbmb_api}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET}
+      RATE_LIMIT_TRUST_PROXY_HOPS: "1"
+      ENABLE_DEVELOPMENT_CONTENT_INSPECTION: "false"
+    extra_hosts:
+      # Keep S3 signatures on the public hostname while avoiding public-IP
+      # hairpin routing for API-side HEAD/DELETE requests.
+      - "${OPENBMB_DOMAIN:-sun227454.online}:127.0.0.1"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      livekit:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:13100/openBMB/api/v1/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+    mem_limit: 448m
+    cpus: 0.80
+    pids_limit: 180
+    security_opt:
+      - no-new-privileges:true
+    logging: &production-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  migrate:
+    image: openbmb-migrator:${OPENBMB_RELEASE:?OPENBMB_RELEASE must identify an immutable release}
+    build:
+      context: ../..
+      dockerfile: infra/production/Dockerfile.api
+      target: api-migrator
+    profiles: [tools]
+    init: true
+    network_mode: host
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: mysql://${MYSQL_USER:-openbmb}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD}@127.0.0.1:${MYSQL_HOST_PORT:-13306}/${MYSQL_DATABASE:-openbmb}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    mem_limit: 256m
+    cpus: 0.50
+    pids_limit: 100
+    security_opt:
+      - no-new-privileges:true
+    logging: *production-logging
+
+  client-web:
+    image: openbmb-client-web:${OPENBMB_RELEASE:?OPENBMB_RELEASE must identify an immutable release}
+    build:
+      context: ../..
+      dockerfile: infra/production/Dockerfile.web
+      target: client-runtime
+      args:
+        VITE_API_BASE_URL: /openBMB/api/v1
+    container_name: openbmb-client-web
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:${OPENBMB_CLIENT_HOST_PORT:-14173}:8080
+    networks: [web]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m,mode=1777
+      - /var/cache/nginx:rw,noexec,nosuid,size=8m,mode=0755
+    mem_limit: 48m
+    cpus: 0.15
+    pids_limit: 60
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging: *production-logging
+
+  admin-web:
+    image: openbmb-admin-web:${OPENBMB_RELEASE:?OPENBMB_RELEASE must identify an immutable release}
+    build:
+      context: ../..
+      dockerfile: infra/production/Dockerfile.web
+      target: admin-runtime
+      args:
+        VITE_API_BASE: /openBMB/api/v1
+    container_name: openbmb-admin-web
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:${OPENBMB_ADMIN_HOST_PORT:-14174}:8080
+    networks: [web]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m,mode=1777
+      - /var/cache/nginx:rw,noexec,nosuid,size=8m,mode=0755
+    mem_limit: 48m
+    cpus: 0.15
+    pids_limit: 60
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging: *production-logging
+
+  # LiveKit host networking avoids Docker's UDP/NAT ambiguity on a single-node
+  # WebRTC deployment. Signal/API stays on loopback; only rtc/turn ports bind
+  # publicly according to livekit/livekit.production.yaml.
+  livekit:
+    network_mode: host
+    networks: !reset []
+    ports: !reset []
+    command:
+      - --config
+      - /etc/livekit/livekit.yaml
+      - --bind
+      - 127.0.0.1
+      - --node-ip
+      - ${LIVEKIT_NODE_IP:?set LIVEKIT_NODE_IP to 124.220.81.104}
+    volumes: !override
+      - ../production/livekit/livekit.production.yaml:/etc/livekit/livekit.yaml:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:${LIVEKIT_SIGNAL_HOST_PORT:-17880}/
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  # Host-network LiveKit reaches only this dedicated Redis ACL endpoint.
+  redis-livekit:
+    ports:
+      - 127.0.0.1:${REDIS_LIVEKIT_HOST_PORT:-16380}:6379
+    networks:
+      - private
+      - host_access
+
+networks:
+  web:
+    name: openbmb_web
+    internal: true

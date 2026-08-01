@@ -1,0 +1,6 @@
+# Confirm the real service key with `docker compose config --services`.
+# Docker Compose 2.40 supports !override and removes the old 0.0.0.0:80 bind.
+services:
+  frontend:
+    ports: !override
+      - 127.0.0.1:18080:80

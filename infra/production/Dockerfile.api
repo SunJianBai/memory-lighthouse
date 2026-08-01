@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1.7
+
+# Prisma CLI detects OpenSSL while generating and applying migrations. It is
+# installed only in this build/migrator lineage; the long-running runtime below
+# uses Prisma's JS client engine and stays on the much smaller slim image.
+FROM node:22.19.0-bookworm-slim AS dependencies
+
+ENV CI=true \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    CHECKPOINT_DISABLE=1 \
+    PRISMA_HIDE_UPDATE_MESSAGE=true \
+    NODE_OPTIONS=--max-old-space-size=768
+
+WORKDIR /workspace
+RUN chown node:node /workspace
+
+USER root
+RUN apt-get -o Acquire::Retries=10 -o Acquire::http::Timeout=30 update \
+    && apt-get install --yes --no-install-recommends ca-certificates openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node apps/server-api/package.json apps/server-api/package.json
+COPY --chown=node:node apps/client-web/package.json apps/client-web/package.json
+COPY --chown=node:node apps/admin-web/package.json apps/admin-web/package.json
+COPY --chown=node:node packages/api-contracts/package.json packages/api-contracts/package.json
+COPY --chown=node:node packages/event-contracts/package.json packages/event-contracts/package.json
+
+USER node
+RUN npm ci \
+    --workspace @memory-lighthouse/server-api \
+    --include-workspace-root
+
+FROM dependencies AS api-build
+
+COPY --chown=node:node apps/server-api apps/server-api
+COPY --chown=node:node packages packages
+
+RUN npm run build --workspace @memory-lighthouse/server-api
+
+FROM api-build AS production-dependencies
+
+RUN npm prune --omit=dev \
+    --workspace @memory-lighthouse/server-api \
+    --include-workspace-root
+
+FROM node:22.19.0-bookworm-slim AS api-runtime
+
+ENV NODE_ENV=production \
+    NODE_OPTIONS=--max-old-space-size=320
+
+WORKDIR /workspace/apps/server-api
+
+COPY --from=production-dependencies --chown=node:node /workspace/node_modules /workspace/node_modules
+COPY --from=api-build --chown=node:node /workspace/apps/server-api/dist ./dist
+COPY --from=api-build --chown=node:node /workspace/apps/server-api/package.json ./package.json
+
+USER node
+CMD ["node", "dist/main.js"]
+
+FROM api-build AS api-migrator
+
+ENV NODE_ENV=production \
+    NODE_OPTIONS=--max-old-space-size=192
+
+WORKDIR /workspace/apps/server-api
+USER node
+CMD ["../../node_modules/.bin/prisma", "migrate", "deploy"]

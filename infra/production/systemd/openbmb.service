@@ -1,0 +1,23 @@
+[Unit]
+Description=OpenBMB Memory Lighthouse production stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathIsSymbolicLink=/opt/openbmb/current
+ConditionPathExists=/etc/openbmb/infra.env
+ConditionPathExists=/etc/openbmb/api.env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env
+ExecStart=/bin/bash /opt/openbmb/current/infra/production/scripts/compose.sh up -d --no-build mysql redis redis-livekit minio livekit minio-init api client-web admin-web
+ExecStartPost=/bin/bash /opt/openbmb/current/infra/production/scripts/health-check.sh --local
+ExecReload=/bin/bash /opt/openbmb/current/infra/production/scripts/compose.sh up -d --no-build api client-web admin-web
+ExecStop=/bin/bash /opt/openbmb/current/infra/production/scripts/compose.sh stop --timeout 30 api client-web admin-web livekit
+TimeoutStartSec=300
+TimeoutStopSec=90
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

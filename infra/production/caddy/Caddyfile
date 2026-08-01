@@ -1,0 +1,109 @@
+{
+	email {$ACME_EMAIL}
+	admin 127.0.0.1:2019
+}
+
+{$OPENBMB_DOMAIN:sun227454.online} {
+	log {
+		output file /var/log/caddy/openbmb-access.log {
+			roll_size 20MiB
+			roll_keep 5
+			roll_keep_for 168h
+		}
+		format json
+	}
+
+	encode zstd gzip
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+	}
+
+	# LiveKit carries a short-lived participant JWT in the WebSocket query.
+	# Never persist that URL in Caddy access logs.
+	@livekitNoAccessLog path /rtc /rtc/*
+	log_skip @livekitNoAccessLog
+	# S3 presigned URLs contain a temporary credential and signature in their
+	# query string. Do not persist those URLs either.
+	@objectStorageNoAccessLog path /openbmb-assets /openbmb-assets/*
+	log_skip @objectStorageNoAccessLog
+
+	route {
+		@clientRoot path /openBMB
+		redir @clientRoot /openBMB/ 308
+
+		@adminRoot path /openBMB/admin
+		redir @adminRoot /openBMB/admin/ 308
+
+		# All official LiveKit clients append /rtc/v1 (and /validate) to the
+		# supplied base URL. Keeping the standard root path is compatible with
+		# both Web and Android SDKs and avoids a separate rtc.* DNS dependency.
+		@livekitSignal path /rtc /rtc/*
+		handle @livekitSignal {
+			header {
+				Cache-Control "no-store"
+				Referrer-Policy "no-referrer"
+			}
+			reverse_proxy {$LIVEKIT_SIGNAL_UPSTREAM:127.0.0.1:17880}
+		}
+
+		@livekitHealth path /openBMB/rtc-health
+		handle @livekitHealth {
+			rewrite * /
+			reverse_proxy {$LIVEKIT_SIGNAL_UPSTREAM:127.0.0.1:17880}
+		}
+
+		# Path-style S3 signing includes both Host and /<bucket>/<key>. Preserve
+		# the URI byte-for-byte so MinIO can validate the signature. The only
+		# exposed bucket path is the fixed private application bucket.
+		@objectStorage path /openbmb-assets /openbmb-assets/*
+		handle @objectStorage {
+			header {
+				Referrer-Policy "no-referrer"
+			}
+			reverse_proxy {$MINIO_S3_UPSTREAM:127.0.0.1:19000}
+		}
+
+		@objectStorageHealth path /openBMB/object-storage-health
+		handle @objectStorageHealth {
+			rewrite * /minio/health/live
+			reverse_proxy {$MINIO_S3_UPSTREAM:127.0.0.1:19000}
+		}
+
+		# Preserve the URI: NestJS owns the complete /openBMB/api/v1 prefix.
+		@openbmbApi path /openBMB/api/v1 /openBMB/api/v1/* /openBMB/ws /openBMB/ws/*
+		handle @openbmbApi {
+			header {
+				Cache-Control "no-store"
+				Referrer-Policy "no-referrer"
+			}
+			reverse_proxy {$OPENBMB_API_UPSTREAM:127.0.0.1:13100}
+		}
+
+		@openbmbAdmin path /openBMB/admin/*
+		handle @openbmbAdmin {
+			header {
+				Cache-Control "no-store"
+				Referrer-Policy "no-referrer"
+				Permissions-Policy "camera=(), microphone=(), geolocation=()"
+			}
+			reverse_proxy {$OPENBMB_ADMIN_UPSTREAM:127.0.0.1:14174}
+		}
+
+		@openbmbClient path /openBMB/*
+		handle @openbmbClient {
+			header {
+				Referrer-Policy "strict-origin-when-cross-origin"
+				Permissions-Policy "camera=(self), microphone=(self), geolocation=()"
+			}
+			reverse_proxy {$OPENBMB_CLIENT_UPSTREAM:127.0.0.1:14173}
+		}
+
+		# CampusHub remains the fallback for every non-OpenBMB path.
+		handle {
+			reverse_proxy {$CAMPUSHUB_UPSTREAM:127.0.0.1:18080}
+		}
+	}
+}
