@@ -56,10 +56,27 @@ delivery_components=(
 )
 [[ "${#required_images[@]}" -eq "${#delivery_components[@]}" ]]
 
+pull_with_retry() {
+  local image_ref="$1"
+  local attempt
+  for attempt in $(seq 1 6); do
+    if DOCKER_CONFIG="$auth_dir" docker pull "$image_ref"; then
+      return 0
+    fi
+    if [[ "$attempt" -lt 6 ]]; then
+      printf 'GHCR pull failed for %s (attempt %s/6); retrying.\n' \
+        "$image_ref" "$attempt" >&2
+      sleep "$(( attempt * 2 ))"
+    fi
+  done
+  printf 'GHCR pull exhausted retries for %s\n' "$image_ref" >&2
+  return 1
+}
+
 for index in "${!required_images[@]}"; do
   required_image="${required_images[$index]}"
   delivery_ref="$delivery_image:${delivery_components[$index]}-$release_id"
-  DOCKER_CONFIG="$auth_dir" docker pull "$delivery_ref"
+  pull_with_retry "$delivery_ref"
   pulled_id="$(docker image inspect --format '{{.Id}}' "$delivery_ref")"
   [[ "$pulled_id" =~ ^sha256:[0-9a-f]{64}$ ]]
   docker tag "$delivery_ref" "$required_image"
