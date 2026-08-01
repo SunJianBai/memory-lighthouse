@@ -28,6 +28,7 @@ import {
   createInitialAgentState,
   transitionAgent,
 } from "../agent/agent-engine";
+import { resolveOpenTaskEvents } from "../agent/event-closure";
 import {
   findDueRoutine,
   findNextRoutine,
@@ -64,7 +65,7 @@ type CareExperienceProps = {
 export const CareExperience = ({
   presenterMode = false,
 }: CareExperienceProps) => {
-  const { state, addEvent } = useAppState();
+  const { state, updateState, addEvent } = useAppState();
   const [agent, dispatch] = useReducer(
     transitionAgent,
     undefined,
@@ -251,12 +252,19 @@ export const CareExperience = ({
   const confirmRoutine = (source: "user" | "demo" = "user") => {
     if (agent.phase !== "awaiting_confirmation") return;
     dispatch({ type: "USER_CONFIRMED", at: new Date().toISOString() });
+    updateState((current) => ({
+      ...current,
+      events: resolveOpenTaskEvents(
+        current.events,
+        currentRoutine?.id,
+      ),
+    }));
     const text = `好的，${state.recipient.preferredName}。我记录的是“本人已口头确认”，不是医学判断。今天这项任务完成了。`;
     sayIfReplay(text);
     setPresenterCue("长者端闭环完成。切换到家属端可查看带边界说明的事件摘要。");
     record(
       `${currentRoutine?.title ?? "晨间任务"}已确认`,
-      "本人通过页面或语音明确确认完成；系统未判断具体药片和剂量。",
+      "本人通过明确操作确认完成；系统未判断具体药片和剂量。",
       "user_confirmed",
       "info",
       "resolved",
@@ -571,7 +579,9 @@ export const CareExperience = ({
         </div>
 
         <p className="care-boundary">
-          守忆灯塔只复述家属录入的信息，不识别药片、剂量或诊断健康状况。
+          {state.provider.provider === "cloud"
+            ? "守忆灯塔不识别药片、剂量或诊断健康状况。ModelBest 官方双工协议不返回用户转写，完成与联系家人请点击按钮留痕。"
+            : "守忆灯塔只复述家属录入的信息，不识别药片、剂量或诊断健康状况。"}
         </p>
       </section>
 

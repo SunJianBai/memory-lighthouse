@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createDemoState } from "../domain/demo-data";
-import { isAppState } from "./storage";
+import { isAppState, saveAppState } from "./storage";
 
 describe("isAppState", () => {
   it("accepts a complete exported state", () => {
@@ -33,5 +33,25 @@ describe("isAppState", () => {
         events: [null],
       }),
     ).toBe(false);
+  });
+
+  it("returns an actionable error when browser storage rejects a write", () => {
+    vi.stubGlobal("window", {
+      localStorage: {
+        setItem: () => {
+          throw new DOMException("quota", "QuotaExceededError");
+        },
+      },
+      dispatchEvent: vi.fn(),
+    });
+    try {
+      expect(saveAppState(createDemoState())).toEqual({
+        ok: false,
+        message:
+          "浏览器本地存储空间不足或不可用，数据没有保存。请删除不需要的图片后重试。",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -125,7 +125,16 @@ export const AppStateProvider = ({ children }: PropsWithChildren) => {
       addAsset,
       deleteAsset,
       exportData: () => exportAppState(state),
-      importData: async (file) => setState(await importAppState(file)),
+      importData: async (file) => {
+        const imported = await importAppState(file);
+        if (imported.consent.localStorageApproved) {
+          const result = saveAppState(imported);
+          if (!result.ok) throw new Error(result.message);
+        } else {
+          clearSavedAppState();
+        }
+        setState(imported);
+      },
       resetData: () => setState(resetAppState()),
     }),
     [addAsset, addEvent, deleteAsset, state, updateState],

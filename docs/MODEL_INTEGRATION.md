@@ -38,7 +38,7 @@ https://minicpmo45.modelbest.cn
 2. 等待 `session.queue_done` 后发送带 `system_prompt`、`config` 和 `voice` 的 `session.init`。
 3. 收到 `session.created` 后才进入 live；上行是 16 kHz 单声道 float32 PCM，视频模式附带 JPEG `video_frames`。
 4. 分别处理 `response.output.delta` 的 `listen`、`text`、`audio`；24 kHz 音频进入播放队列。
-5. 确定性日程动作另开 `?mode=chat` 轮次，并等待 `response.done` 后才把提醒记为已送达。
+5. 确定性日程动作另开 `?mode=chat` 轮次，把同一份完整安全 Prompt 作为 `system` 消息连同业务事件发送，并等待 `response.done` 后才把提醒记为已送达。
 
 只有 `cloudProcessingApproved=true` 时设置页才允许选择公网 Provider。首次加载仍使用回放，避免未授权时自动上传。公网参考音使用官方服务的默认 float32 PCM；浏览器上传的音频资料不隐式发送给公网。
 
@@ -57,7 +57,9 @@ https://minicpmo45.modelbest.cn
 7. 用户打断时清空未播放音频并恢复监听。
 8. 结束或错误时关闭 Socket、音轨、定时器和 AudioContext。
 
-确定性日程到期时不会靠模型自行猜时间。规则层会显式发起一轮短动作请求：本地模式调用同一 vLLM-Omni 的 Chat HTTP，公网模式建立独立 Chat Realtime 请求；生成结果回到同一字幕区。用户语音转写中的闭环命令再交给业务状态机处理。
+确定性日程到期时不会靠模型自行猜时间。规则层会显式发起一轮短动作请求：本地模式调用同一 vLLM-Omni 的 Chat HTTP，公网模式建立独立 Chat Realtime 请求；两者都携带完整授权上下文与安全边界，生成结果回到同一字幕区。
+
+官方 ModelBest duplex 输出只有模型侧的 `listen`、`text`、`audio`，没有用户转写事件。因此公网模式支持自然语音对话与打断，但“本人完成”“重复”“联系家属”等业务留痕使用页面大按钮；本地 Provider 若返回输入转写，才启用确定性语音命令分类。Demo 不额外调用浏览器云 ASR，也不从模型回答反推本人是否确认。
 
 ## 故障降级
 
@@ -75,6 +77,6 @@ https://minicpmo45.modelbest.cn
 - ModelBest `/health` 返回 HTTP 200。
 - ModelBest `/api/config/eta` 返回 HTTP 200。
 - 公网 Realtime WebSocket 完成排队/初始化并收到 `session.created`，音频会话进入 live。
-- 按官方 Chat 生命周期触发晨间日程，收到 `response.done` 后真实返回“林阿姨，您的晨间用药确认已到期，请查看标有‘早 · 08:30’的白色药盒。”，随后状态才进入等待本人确认。
+- 按官方 Chat 生命周期并携带完整安全 Prompt 触发晨间日程，收到 `response.done` 后真实返回“林阿姨，现在是早上八点半了。我们一起确认一下，您已经查看标有‘早 · 08:30’的白色药盒了吗？”，随后状态才进入等待本人确认。
 - 无头浏览器没有可用虚拟摄像头，因此公网验证只证明音频 Realtime 会话；真实摄像头的全模态演示应在比赛设备上再跑硬件检查。
 - 本地 `18099` 当时不可达，SSH 主机验证返回公钥拒绝；本地链路代码复用工作区已验收的 vLLM-Omni 运行时，但本次没有伪造在线结论。

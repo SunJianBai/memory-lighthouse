@@ -21,17 +21,11 @@ export const classifyVoiceCommand = (transcript: string): VoiceCommand | null =>
     );
   if (repeatRequest && !repeatNegated) return "repeat";
 
-  const confirmRequest = /(?:已经|都|刚刚|刚才|我)?(?:完成了?|做好了?|弄好了?)/.test(
-    command,
-  );
-  const confirmUncertain =
-    /(?:没|没有|还没|未|尚未|不是|不确定|不知道|记不清|不太确定).{0,12}(?:完成|做好|弄好)/.test(
-      command,
-    ) ||
-    /(?:完成|做好|弄好).{0,5}(?:吗|没有|没|不确定|不知道)/.test(
+  const explicitConfirmation =
+    /^(?:好的?|嗯|对|是的)*(?:我)?(?:已经|都|刚刚|刚才|现在)?(?:完成了?|做好了?|弄好了?)(?:谢谢(?:你)?|可以了|好啦|呀|啊|哦)*$/.test(
       command,
     );
-  if (confirmRequest && !confirmUncertain) return "confirm";
+  if (explicitConfirmation) return "confirm";
 
   return null;
 };

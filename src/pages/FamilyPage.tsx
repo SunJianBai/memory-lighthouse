@@ -11,6 +11,7 @@ import {
   UserRoundCheck,
 } from "lucide-react";
 import { navigate } from "../app/navigation";
+import { resolveOpenTaskEvents } from "../agent/event-closure";
 import type { CareEvent } from "../domain/types";
 import { useAppState } from "../state/app-state";
 import { formatEventTime } from "../utils/format";
@@ -66,10 +67,10 @@ export const FamilyPage = () => {
         ...current,
         events: [
           closure,
-          ...current.events.map((event) =>
-            event.id === eventId
-              ? { ...event, status: "resolved" as const }
-              : event,
+          ...resolveOpenTaskEvents(
+            current.events,
+            original.routineId,
+            original.id,
           ),
         ].slice(0, 200),
       };

@@ -924,7 +924,7 @@ input[type="file"] {
 
 .inline-alert button {
   min-width: 44px;
-  min-height: 36px;
+  min-height: 44px;
   margin-left: auto;
   color: inherit;
   background: transparent;
@@ -1402,7 +1402,7 @@ input[type="file"] {
 
 .scenario-list button strong {
   color: inherit;
-  font-size: 0.9rem;
+  font-size: 1rem;
 }
 
 .scenario-list button small {
@@ -2344,7 +2344,7 @@ input[type="file"] {
 }
 
 .stepper strong {
-  font-size: 0.83rem;
+  font-size: 1rem;
 }
 
 .onboarding-card {

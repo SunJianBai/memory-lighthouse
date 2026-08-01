@@ -215,7 +215,12 @@ export class SessionRuntime {
       throw new Error("会话已经结束，请创建新会话后重试");
     }
     const input = {
-      messages: request.messages,
+      messages: [
+        ...(this.options.prompt
+          ? [{ role: "system", content: this.options.prompt }]
+          : []),
+        ...request.messages,
+      ],
       streaming: request.streaming,
       generation: {
         max_new_tokens: request.maxNewTokens,
@@ -289,7 +294,7 @@ export class SessionRuntime {
       socket.send(JSON.stringify({ type: "input.append", input }));
       this.emit(
         "input.append",
-        `messages=${request.messages.length} · streaming=${request.streaming} · tts=${request.ttsEnabled}`,
+        `messages=${input.messages.length} · streaming=${request.streaming} · tts=${request.ttsEnabled}`,
         "out",
         "blue",
       );
