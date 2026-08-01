@@ -1,14 +1,14 @@
 # 决策确认记录与外部依赖
 
-以下高影响问题已由产品方在 2026-08-01 确认，不再作为开发阻塞项。尚未提供的第三方凭据与 DNS 配置列在文末，并通过 Adapter 或本地替代实现保持开发可验证。
+以下高影响问题已由产品方在 2026-08-01 确认，不再作为开发阻塞项。尚未提供的第三方凭据、云安全组确认和硬件/公网验收列在文末；根域已复用，不需要新增 RTC 或对象存储子域。
 
 ## Q1：远程陪伴如何接听
 
-**已确认**：默认现场点击接听；只有提前授予自动接听权限的专用陪伴设备，才允许在铃声、语音播报和至少 10 秒全屏倒计时后自动接听。永不允许静默开启。比赛主流程按现场接听实现。
+**已确认**：远程来电必须由陪伴端现场明确点击接听；当前不提供自动接听或静默接入。家属发起来电不会直接开启陪伴端摄像头和麦克风。
 
 ## Q2：管理员查看的“对话原文”范围
 
-**已确认**：只保存并查看经过单独授权的用户文字转写和模型文字回复，不保存原始音频、视频或摄像头帧。用户语音原文由独立 ASR Adapter 获取，绝不从模型回复反推。远程家属通话不录音、录像或转写。
+**已确认**：仅在 `MODEL_INPUT_TRANSCRIPTION` 授权开启且 Provider/ASR 实际返回最终用户文本时保存 USER 原文；ModelBest 当前协议不返回用户转写，Android 不反推或伪造。ASSISTANT 文本受 `MODEL_PROCESSING` 授权约束。远程家属通话永不录音、录像或转写。
 
 ## Q3：家庭角色
 
@@ -16,11 +16,11 @@
 
 ## Q4：管理员原文访问是否对家庭可见
 
-**已确认**：家庭 OWNER 可在隐私中心查看管理员何时、因何原因访问过哪些类别的资料，并收到站内通知。
+**已确认并实现**：家庭 OWNER 可在隐私中心查看管理员何时、因何原因访问过哪些类别的资料，并收到按用户独立已读的站内通知。原文读取、检查记录、哈希链审计、通知及当时所有 ACTIVE OWNER 的回执采用同一事务；家庭视图不暴露管理员身份、具体资源、Grant、Request 或 Ticket 标识。
 
 ## Q5：生产环境是否保留原文检查
 
-**已确认**：生产环境硬关闭；只在开发/测试环境提供 Development Content Auditor。比赛验收部署使用开发验收模式、显式环境标记、Inspection Grant 与完整审计。
+**已确认**：TX4H4G 生产部署硬关闭内容检查；Development Content Auditor 只允许在明确启用的 `development` 环境中，经 Inspection Grant 和完整审计启用；`test` 与 `production` 环境均不可启用。
 
 ## Q6：交付时间与人力
 
@@ -32,6 +32,7 @@
 
 ## 尚待外部输入
 
-- 为 `rtc.sun227454.online` 增加 DNS 解析，并在腾讯云安全组放通最终确认的 LiveKit/TURN TCP、UDP 端口；HTTP 产品页面仍统一位于 `/openBMB/...`。
-- SMTP 和 Android Push 的生产凭据尚未提供；开发阶段使用可审计的本地 Mail/Push Adapter。
-- Android 真机尚未连接；先完成可重复构建、单元测试、模拟器/instrumented 测试和 APK，再补真机媒体验收。
+- 根域 `sun227454.online` 已解析到 `124.220.81.104`，LiveKit 信令复用标准 `/rtc/v1`；UFW 当前未启用，仍需确认腾讯云安全组开放 `7881/TCP`、`7882/UDP`、`3478/UDP`。若以后启用 UFW，必须同步加入对应规则。
+- 真实 SMTP 主机、端口、账号、密码和发件地址尚未提供，是生产启用和公网切流的阻塞项；当前来电通知使用已认证轮询，不依赖 Android Push。
+- Android 单元测试、Lint、Debug APK 与 CI 产物已经完成；尚未连接真机，也未完成双公网设备 LiveKit 音视频验收。
+- OpenBMB 尚未切换公网流量，CampusHub 仍正常提供现有服务；CD stage-only 使用私有 GHCR 摘要固定与服务器本地镜像清单双重校验，运行状态以 [Production delivery](https://github.com/SunJianBai/memory-lighthouse/actions/workflows/production-delivery.yml) 为准。即使 stage-only 通过，仍需真实 SMTP 才能执行正式激活和 Caddy 切流。

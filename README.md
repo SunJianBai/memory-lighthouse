@@ -1,6 +1,6 @@
 # 守忆灯塔 Memory Lighthouse
 
-面向轻度认知障碍长者的全模态日常任务陪伴平台。项目已拆分为 Server API、用户 Web、管理员 Web（后续阶段）和原生 Android（后续阶段）；原 MiniCPM-o 4.5 比赛 Demo 作为独立路由完整保留。
+面向轻度认知障碍长者的全模态日常任务陪伴平台。项目已拆分为 Server API、用户 Web、管理员 Web 和原生 Android 四个独立产物；用户 Web 与 Android 均按账号权限切换家属端/陪伴端，原 MiniCPM-o 4.5 比赛 Demo 作为独立路由完整保留。
 
 这不是医疗诊断或自动用药决策工具。系统不识别药片、不判断剂量、不推断危险，只复述家属录入的时间、标签、位置和要求。
 
@@ -21,6 +21,8 @@ npm run test
 npm run build
 ```
 
+以上根目录 `dev/test/build` 快捷命令只针对 Client Web 与原 Demo。Server、Contracts、Admin 和 Android 的完整门禁由 GitHub Actions 分别执行，具体命令与证据见[验收记录](docs/TEST_REPORT.md)。
+
 ## 已实现的客户端流程
 
 1. 邮箱/用户名密码注册登录、HttpOnly Cookie 刷新轮换、邮箱验证和密码重置。
@@ -29,7 +31,8 @@ npm run build
 4. Consent 中心逐项授权或撤回摄像头、麦克风、模型、转写、记忆、远程协助和开发期检查。
 5. 陪伴设备以独立短时 device access token 获取最小上下文、发送心跳、创建 Companion/Model Session，再启动现有 MiniCPM-o runtime。
 6. 家属发起远程通话，陪伴端现场接听后连接 LiveKit；远程通话固定不录音、不转写。
-7. 原本地 Demo 的引导、记忆、确定性状态机、演示回放与 MiniCPM-o 联调行为全部保留。
+7. 管理员开发期读取原文时，同一事务生成检查审计和所有当前家庭 OWNER 的站内通知；隐私中心显示类别、原因、时间及独立已读状态。
+8. 原本地 Demo 的引导、记忆、确定性状态机、演示回放与 MiniCPM-o 联调行为全部保留。
 
 ## 三种推理模式
 
@@ -62,14 +65,15 @@ ssh -N `
 
 ## 页面入口
 
-- `/openBMB/login`、`/register`：用户认证。
+- `/openBMB/login`、`/openBMB/register`：用户认证。
 - `/openBMB/app/overview`：家属工作区。
 - `/openBMB/app/memories`：服务器记忆档案。
 - `/openBMB/app/routines`：日程与家庭待办。
 - `/openBMB/app/devices`：设备激活与绑定。
-- `/openBMB/app/privacy`：Consent 中心。
-- `/openBMB/app/remote`：现场接听远程通话。
-- `/openBMB/companion`：激活后的陪伴设备模式。
+- `/openBMB/app/privacy`：Consent 中心与 OWNER 管理员访问历史。
+- `/openBMB/app/remote`：家属发起和管理远程陪伴通话。
+- `/openBMB/companion`：激活后的陪伴设备模式与现场接听。
+- `/openBMB/admin/`：管理员运营、审计和开发期内容检查；生产环境内容检查硬关闭。
 - `/openBMB/demo/showcase`：原一镜到底演示台。
 
 ## 设计和工程资料
@@ -90,6 +94,8 @@ ssh -N `
 ```text
 apps/server-api          NestJS + Prisma + MySQL Server API
 apps/client-web          React/Vite 家属工作区、陪伴模式与原 Demo
+apps/admin-web           Vue 3 管理员面板（参考 Art Design 管理壳层）
+apps/client-android      Kotlin / Jetpack Compose 原生统一客户端
 apps/client-web/src/api  统一 API client 与内存 access token
 apps/client-web/src/device 设备密钥、激活和凭据轮换
 apps/client-web/src/runtime MiniCPM-o 音视频与 Realtime runtime
@@ -97,4 +103,4 @@ packages                 API 与事件契约
 infra                    MySQL、Redis、MinIO、LiveKit 与 Caddy
 ```
 
-项目仍处于开发和部署验证阶段。陪伴端会使用设备凭据保护的 current 接口发现跨设备来电，浏览器跨标签页通知只用于降低本机联调延迟；界面不会把通知或媒体失败伪装成成功。后续可接入服务端鉴权 WSS，替换轮询通知。
+核心业务闭环和四端产物已实现，当前处于生产交付与公网验收阶段。TX4H4G 尚未切换公网流量；真实 SMTP、腾讯云媒体端口安全组确认，以及 Android 真机/双公网设备 LiveKit 验收仍待完成。陪伴端通过设备凭据保护的轮询接口发现跨设备来电，浏览器跨标签页通知只用于降低本机联调延迟；界面不会把通知或媒体失败伪装成成功。服务端鉴权 WSS 或 Android Push 可作为后续通知增强，但不是当前来电授权与媒体安全的替代品。
