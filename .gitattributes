@@ -1,0 +1,8 @@
+# Linux deployment assets must remain executable/readable after Windows checkouts
+# and `git archive`; CRLF breaks Bash and contaminates raw Compose env values.
+.gitattributes text eol=lf
+*.sh text eol=lf
+apps/client-android/gradlew text eol=lf
+infra/production/** text eol=lf
+infra/compose/** text eol=lf
+.github/workflows/** text eol=lf
