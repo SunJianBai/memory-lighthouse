@@ -17,6 +17,15 @@ export enum DevicePlatformDto {
   WEB = 'WEB',
 }
 
+export enum DeviceKeyProtectionDto {
+  NON_EXPORTABLE_V1 = 'NON_EXPORTABLE_V1',
+}
+
+export enum InstallationKeyAlgorithmDto {
+  ED25519 = 'ED25519',
+  ECDSA_P256_SHA256 = 'ECDSA_P256_SHA256',
+}
+
 export enum ActivationProofTypeDto {
   QR_SECRET = 'QR_SECRET',
   DYNAMIC_CODE = 'DYNAMIC_CODE',
@@ -27,6 +36,12 @@ export class RegisterDeviceInstallationDto {
   @Length(40, 684)
   @Matches(BASE64URL_PATTERN)
   installationPublicKeySpki!: string;
+
+  @IsEnum(InstallationKeyAlgorithmDto)
+  installationKeyAlgorithm!: InstallationKeyAlgorithmDto;
+
+  @IsEnum(DeviceKeyProtectionDto)
+  keyProtection!: DeviceKeyProtectionDto;
 
   @IsEnum(DevicePlatformDto)
   platform!: DevicePlatformDto;
@@ -70,7 +85,7 @@ export class ClaimActivationChallengeDto {
   proof!: string;
 
   @IsString()
-  @Length(86, 86)
+  @Length(8, 108)
   @Matches(BASE64URL_PATTERN)
   signature!: string;
 }
@@ -85,7 +100,7 @@ export class ExchangeDeviceCredentialDto {
   installationId!: string;
 
   @IsString()
-  @Length(86, 86)
+  @Length(8, 108)
   @Matches(BASE64URL_PATTERN)
   signature!: string;
 }
@@ -97,7 +112,7 @@ export class RefreshDeviceCredentialDto {
   credential!: string;
 
   @IsString()
-  @Length(86, 86)
+  @Length(8, 108)
   @Matches(BASE64URL_PATTERN)
   signature!: string;
 }
@@ -107,6 +122,13 @@ export class CancelActivationDto {
   @IsString()
   @MaxLength(64)
   reasonCode?: string;
+}
+
+export class ApproveActivationDto {
+  @IsString()
+  @Length(43, 43)
+  @Matches(BASE64URL_PATTERN)
+  claimSnapshotToken!: string;
 }
 
 export class UpdateCompanionBindingDto {

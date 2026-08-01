@@ -27,8 +27,8 @@
 10. [开发计划与验收](./10-development-roadmap.md)
 11. [决策确认记录与外部依赖](./11-open-questions.md)
 12. [数据字典](./database/data-dictionary.md)
-13. [Prisma 目标模型草案](./database/schema.prisma)
-14. [Prisma 7 配置草案](./database/prisma.config.ts)
+13. [Prisma 物理模型对照](./database/schema.prisma)（CI 与服务端可执行 schema 做等价 diff）
+14. [Prisma 7 文档模型校验配置](./database/prisma.config.ts)（迁移历史唯一引用服务端目录）
 15. [实施状态](./IMPLEMENTATION_STATUS.md)
 
 ## 图表

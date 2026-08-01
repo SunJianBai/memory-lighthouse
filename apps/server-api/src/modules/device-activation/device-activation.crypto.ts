@@ -13,7 +13,10 @@ import { Inject, Injectable } from '@nestjs/common';
 import { DEVICE_ACTIVATION_SECURITY_CONFIG } from './device-activation.constants';
 import type { DeviceActivationSecurityConfig } from './device-activation.config';
 import { InvalidInstallationKeyException } from './device-activation.errors';
-import type { ActivationProofType } from './device-activation.types';
+import type {
+  ActivationProofType,
+  InstallationKeyAlgorithm,
+} from './device-activation.types';
 
 const ACTIVATION_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 
@@ -50,6 +53,44 @@ function randomCharacters(length: number): string {
     }
   }
   return output;
+}
+
+function isCanonicalP256DerSignature(signature: Buffer): boolean {
+  if (
+    signature.length < 8 ||
+    signature.length > 72 ||
+    signature[0] !== 0x30 ||
+    signature[1] !== signature.length - 2
+  ) {
+    return false;
+  }
+  let offset = 2;
+  for (let integer = 0; integer < 2; integer += 1) {
+    if (signature[offset] !== 0x02) return false;
+    const length = signature[offset + 1];
+    offset += 2;
+    if (!length || length > 33 || offset + length > signature.length) {
+      return false;
+    }
+    const first = signature[offset];
+    if (
+      (first & 0x80) !== 0 ||
+      (length > 1 && first === 0 && (signature[offset + 1] & 0x80) === 0)
+    ) {
+      return false;
+    }
+    offset += length;
+  }
+  return offset === signature.length;
+}
+
+function keyMatchesAlgorithm(key: KeyObject, algorithm: string): boolean {
+  if (algorithm === 'ED25519') return key.asymmetricKeyType === 'ed25519';
+  return (
+    algorithm === 'ECDSA_P256_SHA256' &&
+    key.asymmetricKeyType === 'ec' &&
+    key.asymmetricKeyDetails?.namedCurve === 'prime256v1'
+  );
 }
 
 function proofMessage(
@@ -115,7 +156,10 @@ export class DeviceActivationCrypto {
     private readonly config: DeviceActivationSecurityConfig,
   ) {}
 
-  parseEd25519Spki(encoded: string): {
+  parseInstallationSpki(
+    encoded: string,
+    algorithm: InstallationKeyAlgorithm,
+  ): {
     der: Uint8Array<ArrayBuffer>;
     key: KeyObject;
     fingerprint: Uint8Array<ArrayBuffer>;
@@ -127,7 +171,7 @@ export class DeviceActivationCrypto {
 
     try {
       const key = createPublicKey({ key: der, format: 'der', type: 'spki' });
-      if (key.asymmetricKeyType !== 'ed25519') {
+      if (!keyMatchesAlgorithm(key, algorithm)) {
         throw new InvalidInstallationKeyException();
       }
       const canonicalDer = key.export({ format: 'der', type: 'spki' });
@@ -147,18 +191,32 @@ export class DeviceActivationCrypto {
     }
   }
 
-  decodeSignature(value: string): Buffer | null {
-    const signature = decodeCanonicalBase64Url(value, 64);
-    return signature?.length === 64 ? signature : null;
+  parseEd25519Spki(encoded: string): {
+    der: Uint8Array<ArrayBuffer>;
+    key: KeyObject;
+    fingerprint: Uint8Array<ArrayBuffer>;
+  } {
+    return this.parseInstallationSpki(encoded, 'ED25519');
   }
 
-  verifyEd25519(
+  verifyInstallationSignature(
+    algorithm: string,
     publicKeyDer: Uint8Array,
     message: Buffer,
     encodedSignature: string,
   ): boolean {
-    const signature = this.decodeSignature(encodedSignature);
+    const signature = decodeCanonicalBase64Url(encodedSignature, 80);
     if (!signature) {
+      return false;
+    }
+    if (algorithm !== 'ED25519' && algorithm !== 'ECDSA_P256_SHA256') {
+      return false;
+    }
+    if (
+      (algorithm === 'ED25519' && signature.length !== 64) ||
+      (algorithm === 'ECDSA_P256_SHA256' &&
+        !isCanonicalP256DerSignature(signature))
+    ) {
       return false;
     }
     try {
@@ -167,12 +225,31 @@ export class DeviceActivationCrypto {
         format: 'der',
         type: 'spki',
       });
-      return publicKey.asymmetricKeyType === 'ed25519'
+      if (!keyMatchesAlgorithm(publicKey, algorithm)) return false;
+      return algorithm === 'ED25519'
         ? verify(null, message, publicKey, signature)
-        : false;
+        : verify(
+            'sha256',
+            message,
+            { key: publicKey, dsaEncoding: 'der' },
+            signature,
+          );
     } catch {
       return false;
     }
+  }
+
+  verifyEd25519(
+    publicKeyDer: Uint8Array,
+    message: Buffer,
+    encodedSignature: string,
+  ): boolean {
+    return this.verifyInstallationSignature(
+      'ED25519',
+      publicKeyDer,
+      message,
+      encodedSignature,
+    );
   }
 
   generateActivationSecret(): string {
@@ -233,6 +310,44 @@ export class DeviceActivationCrypto {
         this.config.activationPepper,
         'installation-server-nonce',
         `${deviceId}\0${Buffer.from(fingerprint).toString('base64url')}`,
+      ),
+    ).toString('base64url');
+  }
+
+  approvalSnapshotToken(input: {
+    challengeId: string;
+    challengeVersion: number;
+    pendingDeviceId: string;
+    deviceKeyFingerprint: Uint8Array;
+    deviceMetadata: {
+      platform: string;
+      installationKeyAlgorithm: string;
+      manufacturer: string | null;
+      model: string | null;
+      osVersion: string | null;
+      appVersion: string | null;
+    };
+    claimedAt: Date;
+    claimNetworkSource: string;
+  }): string {
+    return Buffer.from(
+      this.hmac(
+        this.config.activationPepper,
+        'activation-approval-snapshot',
+        [
+          input.challengeId,
+          String(input.challengeVersion),
+          input.pendingDeviceId,
+          Buffer.from(input.deviceKeyFingerprint).toString('base64url'),
+          input.deviceMetadata.platform,
+          input.deviceMetadata.installationKeyAlgorithm,
+          input.deviceMetadata.manufacturer ?? '',
+          input.deviceMetadata.model ?? '',
+          input.deviceMetadata.osVersion ?? '',
+          input.deviceMetadata.appVersion ?? '',
+          input.claimedAt.toISOString(),
+          input.claimNetworkSource,
+        ].join('\0'),
       ),
     ).toString('base64url');
   }

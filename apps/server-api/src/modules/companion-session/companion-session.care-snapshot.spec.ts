@@ -109,12 +109,17 @@ function snapshotHarness(rows: ReturnType<typeof careOccurrence>[]) {
       content.ciphertext.toString('utf8'),
     ),
   };
+  const mediaSecurity = {
+    hasPendingCleanup: jest.fn(async () => false),
+    hasRemoteMediaBarrier: jest.fn(async () => false),
+  };
   const service = new CompanionSessionApplicationService(
     prisma as unknown as PrismaService,
     config as unknown as ConfigService,
     encryption as unknown as DataEncryptionPort,
     leases as unknown as MediaLeasePort,
     careCipher as unknown as CareWorkflowContentCipher,
+    mediaSecurity as never,
   );
   return { service, findOccurrences, careCipher };
 }

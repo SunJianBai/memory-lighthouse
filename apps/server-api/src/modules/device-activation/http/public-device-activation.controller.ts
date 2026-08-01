@@ -6,7 +6,9 @@ import {
   HttpStatus,
   Param,
   Post,
+  Req,
 } from '@nestjs/common';
+import type { Request } from 'express';
 
 import {
   RateLimited,
@@ -53,9 +55,11 @@ export class PublicDeviceActivationController {
   async claim(
     @Param('publicId') publicId: string,
     @Body() input: ClaimActivationChallengeDto,
+    @Req() request: Request,
   ): Promise<{ claimed: true; challengeId: string }> {
     return this.deviceActivation.claimActivationChallenge({
       publicId,
+      ipAddress: request.ip,
       ...input,
     });
   }

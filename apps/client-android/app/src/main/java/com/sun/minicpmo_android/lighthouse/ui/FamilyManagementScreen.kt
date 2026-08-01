@@ -95,6 +95,7 @@ internal class FamilyUiActions(
     val createHousehold: (String, String) -> Unit,
     val createRecipient: (CareRecipientInput) -> Unit,
     val createActivation: (String) -> Unit,
+    val loadActivationApprovalDetails: (String) -> Unit,
     val approveActivation: (String) -> Unit,
     val requestCall: (String) -> Unit,
     val createMemory: (MemoryInput) -> Unit,

@@ -12,12 +12,12 @@ export const CurrentPlatformPrincipal = createParamDecorator(
     const request = context
       .switchToHttp()
       .getRequest<PlatformAuthenticatedRequest>();
-    if (!request.userPrincipal || !request.platformRoles) {
+    if (!request.adminPrincipal || !request.platformRoles) {
       throw new InternalServerErrorException(
         'Platform principal is missing after authentication',
       );
     }
 
-    return { ...request.userPrincipal, platformRoles: request.platformRoles };
+    return { ...request.adminPrincipal, platformRoles: request.platformRoles };
   },
 );

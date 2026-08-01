@@ -87,6 +87,7 @@ PUT    /v1/households/:householdId/care-recipients/:recipientId/authorities/:mem
 POST   /v1/device-installations
 POST   /v1/households/:householdId/care-recipients/:recipientId/activation-challenges
 GET    /v1/activation-challenges/:challengeId
+GET    /v1/activation-challenges/:challengeId/approval-details
 POST   /v1/activation-challenges/:publicId/claim
 POST   /v1/activation-challenges/:challengeId/approve
 POST   /v1/activation-challenges/:challengeId/cancel
@@ -96,6 +97,23 @@ GET    /v1/households/:householdId/companion-bindings
 PATCH  /v1/households/:householdId/companion-bindings/:bindingId
 DELETE /v1/households/:householdId/companion-bindings/:bindingId
 ```
+
+安装登记请求：
+
+```json
+{
+  "installationPublicKeySpki": "base64url-encoded-ed25519-spki",
+  "installationKeyAlgorithm": "ED25519",
+  "keyProtection": "NON_EXPORTABLE_V1",
+  "platform": "ANDROID",
+  "manufacturer": "Example",
+  "model": "Companion",
+  "osVersion": "15",
+  "appVersion": "0.2.0"
+}
+```
+
+`installationKeyAlgorithm` 与 `keyProtection` 都是必填协议能力。前者只接受 `ED25519` 或 `ECDSA_P256_SHA256`：服务端必须验证 SPKI 类型与声明一致，P-256 只接受 `prime256v1`，并在 claim、exchange、refresh 中从数据库列选择 Ed25519 或 DER 编码 ECDSA/SHA-256 验签，拒绝曲线、算法及 IEEE-P1363/DER 编码混淆。后者当前只接受 `NON_EXPORTABLE_V1`。缺失或旧值拒绝注册；服务端持久化两个字段，并在 claim、批准详情、批准、凭据交换、Device Access Token 校验和 Device Refresh Credential 轮换时重新要求受支持值。`keyProtection` 是官方客户端版本门槛，不是远程硬件证明：服务端无法仅凭声明证明浏览器或 Keystore 的物理实现，仍依赖官方客户端的不可导出密钥实现、持钥签名和家属现场核对批准。
 
 创建 Challenge 响应：
 
@@ -109,7 +127,7 @@ DELETE /v1/households/:householdId/companion-bindings/:bindingId
 }
 ```
 
-二维码的秘密部分只展示一次。设备 Claim 后仍然没有家庭访问权，必须等待已登录家属批准并证明持有安装私钥，才能兑换 Device Credential。
+二维码的秘密部分只展示一次。设备 Claim 后仍然没有家庭访问权，必须等待已登录家属批准并证明持有安装私钥，才能兑换 Device Credential。公开状态轮询只返回状态和时间，不返回设备信息；有当前 Care Authority 的家属通过 `approval-details` 读取厂商、型号、平台、系统/App 版本、公钥指纹后缀、认领时间和粗粒度网络类别。批准请求必须同时携带 `Idempotency-Key` 请求头及该详情响应中的 `claimSnapshotToken`；设备信息或挑战版本变化时返回 `ACTIVATION_APPROVAL_SNAPSHOT_CHANGED`，要求重新核对。设备认领按 IP、Challenge 与安装身份限流；家属创建/批准再按 IP、账号、登录会话、陪伴对象或 Challenge 的组合限流。
 
 完整时序见 [device-activation-sequence.mmd](./diagrams/device-activation-sequence.mmd)。
 
@@ -145,6 +163,8 @@ PATCH  /v1/households/:householdId/medications/:medicationId
 DELETE /v1/households/:householdId/medications/:medicationId
 ```
 
+Upload Intent 返回的 PUT 请求同时绑定 `x-amz-server-side-encryption: AES256` 与 `If-None-Match: *`；客户端必须原样发送，Complete 仅表示对象已到达，资产仍要等待真实字节校验和恶意内容扫描通过。
+
 ## 7. Routine、Occurrence、Event 和 Family Task Interface
 
 ```text
@@ -166,6 +186,8 @@ POST   /v1/households/:householdId/family-tasks/:taskId/dismiss
 
 客户端不能发送 `status=COMPLETED` 通用更新；必须调用明确的确认 Interface，由服务器验证当前状态并在事务中完成闭环。
 
+Occurrence 确认/家属复核、Family Task 的 claim/resolve/dismiss 及设备“联系家人”命令都要求 `Idempotency-Key`。若请求体也含 `idempotencyKey`，必须与请求头逐字一致；客户端对网络超时、断连及用户再次重试必须复用原键。服务端持久化“命令类型 + 主体 + 目标 + 完整规范化 payload”的 SHA-256 和首次响应；同键且完整命令一致时原样重放首次响应，`source`、`utteranceId`、`note`、`resolutionCode`、`version` 等任何业务字段变化均返回 `IDEMPOTENCY_CONFLICT`。
+
 ## 8. Companion 和模型 Interface
 
 Device Principal 使用独立路径，服务器从凭据解析 binding 和 recipient：
@@ -181,6 +203,25 @@ POST /v1/device/model-sessions/:modelSessionId/events
 POST /v1/device/companion-sessions/:sessionId/end
 POST /v1/device/occurrences/:occurrenceId/confirm
 POST /v1/device/family-contact-requests
+```
+
+设备心跳是媒体对账接口，而不只是在线打点。若本地 MiniCPM 运行时仍在采集，客户端必须在请求中携带 `activeCompanionSessionId`。服务端仅在该 ID 与当前 `ACTIVE` 会话一致且 `CAMERA_CAPTURE`（视频模式）、`MICROPHONE_CAPTURE`、`MODEL_PROCESSING` 仍有效时返回 `mediaDirective=CONTINUE` 并续租；否则返回 `mediaDirective=STOP` 和机器可读 `reason`。客户端收到 `STOP` 或模型事件提交失败时必须立即关闭 CameraX/getUserMedia、AudioRecord/音轨与 Provider WebSocket。客户端未声明活动 ID 但数据库仍有活动会话时，服务端以 `CLIENT_SESSION_MISSING` 结束并释放幽灵会话；双方均无活动会话时返回 `CONTINUE`，不会因历史撤权记录永久锁死重新授权后的新会话。
+
+```json
+{
+  "activeCompanionSessionId": "01J...",
+  "appVersion": "0.1.0",
+  "osVersion": "Android 15"
+}
+```
+
+```json
+{
+  "online": true,
+  "serverTime": "2026-08-02T00:00:00.000Z",
+  "mediaDirective": "STOP",
+  "reason": "CONSENT_REVOKED_MICROPHONE_CAPTURE"
+}
 ```
 
 模型会话创建返回 Provider、端点、有效授权快照、Prompt 版本和最小 Care Snapshot。ModelBest 当前不返回用户侧转写时，客户端只能保存模型文字输出；不得从模型回复反推或伪造用户原文。
@@ -206,6 +247,8 @@ POST /v1/device/remote-sessions/:sessionId/join-ticket
 POST /v1/webhooks/livekit
 ```
 
+Join Ticket 固定为单次签发、单次实际入会。LiveKit webhook 适配层必须保留 event UUID、participant SID，以及票据 metadata 中的 `participantId/ticketId`。首次合法 `participant_joined` 原子消费票据；相同 event UUID + SID 的 webhook 重投幂等，任何新的 join event 或 SID 都视为票据重放并立即移除参与者。合法参与者离开后会话结束；需要恢复时重新发起现场接听流程，不复用或重新签发原票据。
+
 发起请求：
 
 ```json
@@ -220,13 +263,14 @@ POST /v1/webhooks/livekit
 }
 ```
 
-服务器创建会话前重新验证成员、Care Authority、Remote Access Policy、Consent、设备在线状态和媒体租约。Join Ticket 只有在现场接受或合法倒计时结束后签发。
+服务器创建会话前重新验证成员、Care Authority、Remote Access Policy、Consent、设备在线状态和媒体租约。修改 Remote Access Policy 必须提交当前密码进行重新认证，并按 IP、账号、登录会话和 Binding 限制密码尝试；远程发起按源 IP、用户、登录会话、目标 Binding 及其组合多维限流。Web/Android 在请求结果不确定时保留同一 Idempotency Key，只有收到成功响应或业务意图变化后才换键。Join Ticket 只有在设备现场明确接受后签发，每个会话参与者只签发一次，并持久化 `ISSUING/PROVISIONING/ROOM_READY/ISSUED/CONSUMED/REVOKED` 生命周期；只有 `ISSUED` 成功持久化后才向客户端返回 JWT。进程崩溃遗留的未交付阶段由定时任务按 CAS 恢复，过期 `PROVISIONING` 的确认与会话终止在同一串行化事务中完成。再次请求已交付或已消费的票据返回 `REMOTE_JOIN_TICKET_ALREADY_ISSUED`。远程通话固定返回 `recording=false`、`transcription=false`。
 
 ## 10. 管理员 Interface
 
 ```text
 POST /v1/admin/auth/login
 POST /v1/admin/auth/refresh
+POST /v1/admin/auth/logout
 GET  /v1/admin/operations/dashboard
 GET  /v1/admin/users
 GET  /v1/admin/households
@@ -296,9 +340,15 @@ HOUSEHOLD_ACCESS_DENIED
 RECIPIENT_ACCESS_DENIED
 VERSION_CONFLICT
 IDEMPOTENCY_CONFLICT
+IDEMPOTENCY_KEY_REQUIRED
+IDEMPOTENCY_KEY_MISMATCH
 ACTIVATION_EXPIRED
 ACTIVATION_ALREADY_CONSUMED
 ACTIVATION_ATTEMPTS_EXCEEDED
+ACTIVATION_APPROVAL_SNAPSHOT_CHANGED
+ACTIVATION_IDEMPOTENCY_CONFLICT
+DEVICE_KEY_PROTECTION_UNSUPPORTED
+DEVICE_INSTALLATION_KEY_ALGORITHM_UNSUPPORTED
 DEVICE_REVOKED
 CONSENT_REQUIRED
 MEDIA_PERMISSION_REQUIRED
@@ -306,10 +356,10 @@ REMOTE_CALL_NOT_ALLOWED
 REMOTE_DEVICE_OFFLINE
 REMOTE_DEVICE_BUSY
 REMOTE_SESSION_TERMINAL
+REMOTE_JOIN_TICKET_ALREADY_ISSUED
 MODEL_PROVIDER_UNAVAILABLE
 ASSET_SCAN_PENDING
 INSPECTION_GRANT_REQUIRED
 INSPECTION_GRANT_EXPIRED
 RATE_LIMITED
 ```
-

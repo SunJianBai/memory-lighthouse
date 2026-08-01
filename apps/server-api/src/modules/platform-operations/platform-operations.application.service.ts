@@ -1011,6 +1011,10 @@ export class PlatformOperationsApplicationService {
     const id = newUlid(occurredAt.getTime());
     const roles = [...input.principal.platformRoles].sort();
     const requestId = this.auditRequestId(input.request.requestId);
+    if (input.request.sourceIpHash.byteLength !== 32) {
+      throw new Error('Platform audit source IP hash must be 32 bytes');
+    }
+    const sourceIpHash = Uint8Array.from(input.request.sourceIpHash);
     const hashPayload = {
       id,
       occurredAt: occurredAt.toISOString(),
@@ -1025,6 +1029,7 @@ export class PlatformOperationsApplicationService {
       householdId: input.householdId ?? null,
       recipientId: input.recipientId ?? null,
       requestId,
+      sourceIpHash: Buffer.from(sourceIpHash).toString('base64url'),
       grantId: input.grant?.id ?? null,
       approvalActorId: input.grant?.approvedByUserId ?? null,
       decision: 'ALLOW',
@@ -1048,7 +1053,7 @@ export class PlatformOperationsApplicationService {
         actorBindingId: null,
         actorSessionId: input.principal.sessionId,
         actorRoleSnapshot: roles,
-        sourceIpHash: null,
+        sourceIpHash,
         userAgent: input.request.userAgent?.slice(0, 512) ?? null,
         action: input.action,
         resourceType: input.resourceType,

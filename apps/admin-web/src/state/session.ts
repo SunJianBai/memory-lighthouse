@@ -64,9 +64,9 @@ export async function restoreSession(): Promise<void> {
 }
 
 export async function login(identifier: string, password: string): Promise<void> {
-  const token = await apiRequest<SessionToken>('/auth/login', {
+  const token = await apiRequest<SessionToken>('/admin/auth/login', {
     method: 'POST',
-    body: { identifier, password, clientType: 'WEB' },
+    body: { identifier, password },
     authenticated: false,
     retryAuthentication: false
   })
@@ -83,7 +83,7 @@ export async function login(identifier: string, password: string): Promise<void>
 export async function logout(): Promise<void> {
   try {
     if (sessionState.status === 'authenticated') {
-      await apiRequest('/auth/logout', { method: 'POST' })
+      await apiRequest('/admin/auth/logout', { method: 'POST' })
     }
   } finally {
     clearSession()

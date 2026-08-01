@@ -9,6 +9,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import { ApiError, apiClient } from "../api/api-client";
+import { clearPersistentIdempotencyNamespace } from "../api/idempotent-command";
 import type { SessionTokenView, UserView } from "../api/types";
 
 type RegisterInput = {
@@ -32,14 +33,18 @@ type AuthContextValue = {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export const AuthProvider = ({ children }: PropsWithChildren) => {
-  const [status, setStatus] = useState<AuthContextValue["status"]>(
-    "bootstrapping",
-  );
+  const [status, setStatus] =
+    useState<AuthContextValue["status"]>("bootstrapping");
   const [user, setUser] = useState<UserView | null>(null);
   const mounted = useRef(true);
   const initialRefreshStarted = useRef(false);
+  const activeUserId = useRef<string | null>(null);
 
   const markAnonymous = useCallback(() => {
+    if (activeUserId.current) {
+      clearPersistentIdempotencyNamespace(activeUserId.current);
+      activeUserId.current = null;
+    }
     apiClient.setAccessToken(null);
     if (mounted.current) {
       setUser(null);
@@ -51,6 +56,10 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
     const next = await apiClient.request<UserView>("/me", {
       retryAuthentication: false,
     });
+    if (activeUserId.current && activeUserId.current !== next.id) {
+      clearPersistentIdempotencyNamespace(activeUserId.current);
+    }
+    activeUserId.current = next.id;
     if (mounted.current) setUser(next);
     return next;
   }, []);
@@ -66,12 +75,15 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
 
   const refresh = useCallback(async (): Promise<boolean> => {
     try {
-      const session = await apiClient.request<SessionTokenView>("/auth/refresh", {
-        method: "POST",
-        body: { clientType: "WEB" },
-        authenticated: false,
-        retryAuthentication: false,
-      });
+      const session = await apiClient.request<SessionTokenView>(
+        "/auth/refresh",
+        {
+          method: "POST",
+          body: { clientType: "WEB" },
+          authenticated: false,
+          retryAuthentication: false,
+        },
+      );
       await applySession(session);
       return true;
     } catch (error) {
@@ -114,18 +126,21 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
 
   const register = useCallback(
     async (input: RegisterInput) => {
-      const session = await apiClient.request<SessionTokenView>("/auth/register", {
-        method: "POST",
-        body: {
-          email: input.email,
-          username: input.username || undefined,
-          password: input.password,
-          displayName: input.displayName || undefined,
-          clientType: "WEB",
+      const session = await apiClient.request<SessionTokenView>(
+        "/auth/register",
+        {
+          method: "POST",
+          body: {
+            email: input.email,
+            username: input.username || undefined,
+            password: input.password,
+            displayName: input.displayName || undefined,
+            clientType: "WEB",
+          },
+          authenticated: false,
+          retryAuthentication: false,
         },
-        authenticated: false,
-        retryAuthentication: false,
-      });
+      );
       await applySession(session);
     },
     [applySession],
@@ -175,7 +190,16 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
       refreshUser,
       requestEmailVerification,
     }),
-    [login, logout, logoutAll, refreshUser, register, requestEmailVerification, status, user],
+    [
+      login,
+      logout,
+      logoutAll,
+      refreshUser,
+      register,
+      requestEmailVerification,
+      status,
+      user,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

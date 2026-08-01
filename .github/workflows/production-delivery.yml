@@ -95,13 +95,20 @@ jobs:
         run: |
           set -euo pipefail
           ssh tx4h4g-prod 'set -euo pipefail
-            sudo -n true
-            docker version >/dev/null
-            docker compose version >/dev/null
-            test -d /opt/openbmb/releases
-            docker_root="$(docker info --format "{{.DockerRootDir}}")"
-            docker_free_kib="$(sudo df -Pk "$docker_root" | awk "NR == 2 { print \$4 }")"
-            release_free_kib="$(df -Pk /opt/openbmb/releases | awk "NR == 2 { print \$4 }")"
+             sudo -n true
+             docker version >/dev/null
+             docker compose version >/dev/null
+             sudo -n test -d /opt/openbmb
+             sudo -n test ! -L /opt/openbmb
+             test "$(sudo -n stat -c %U:%G /opt/openbmb)" = root:openbmb
+             test -z "$(sudo -n find /opt/openbmb -maxdepth 0 -perm /0022 -print -quit)"
+             sudo -n test -d /opt/openbmb/releases
+             sudo -n test ! -L /opt/openbmb/releases
+             test "$(sudo -n stat -c %U:%G /opt/openbmb/releases)" = root:openbmb
+             test -z "$(sudo -n find /opt/openbmb/releases -maxdepth 0 -perm /0022 -print -quit)"
+             docker_root="$(docker info --format "{{.DockerRootDir}}")"
+             docker_free_kib="$(sudo -n df -Pk "$docker_root" | awk "NR == 2 { print \$4 }")"
+             release_free_kib="$(sudo -n df -Pk /opt/openbmb/releases | awk "NR == 2 { print \$4 }")"
             test "${docker_free_kib:-0}" -ge 6291456
             test "${release_free_kib:-0}" -ge 1048576'
 
@@ -362,8 +369,8 @@ jobs:
           [[ "$(wc -l < "$transport_manifest")" -eq "$EXPECTED_IMAGE_COUNT" ]]
           sudo chown root:openbmb /opt/openbmb/releases
           sudo chmod 0750 /opt/openbmb/releases
-          if [[ -e "$release_root" || -L "$release_root" ]]; then
-            [[ ! -L "$release_root" ]]
+          if sudo -n test -e "$release_root" || sudo -n test -L "$release_root"; then
+            sudo -n test ! -L "$release_root"
             [[ "$(sudo readlink -f -- "$release_root")" == "$release_root" ]]
             [[ "$(sudo cat "$release_root/.openbmb-release-sha")" == "$SOURCE_SHA" ]]
             [[ "$(sudo cat "$release_root/.openbmb-source-sha256")" == "$SOURCE_ARCHIVE_SHA256" ]]
@@ -372,10 +379,11 @@ jobs:
             sudo cmp --silent "$image_manifest" "$release_root/.openbmb-images"
             sudo cmp --silent "$transport_manifest" "$release_root/.openbmb-transport-digests"
           else
-            if [[ -e "$incoming" || -L "$incoming" ]]; then
+            if sudo -n test -e "$incoming" || sudo -n test -L "$incoming"; then
               sudo rm -rf -- "$incoming"
             fi
-            [[ ! -e "$incoming" && ! -L "$incoming" ]]
+            sudo -n test ! -e "$incoming"
+            sudo -n test ! -L "$incoming"
             sudo install -d -o root -g openbmb -m 0550 "$incoming"
             sudo install -d -o root -g openbmb -m 0550 "$candidate"
             sudo tar --no-same-owner --no-same-permissions -xzf "$source_archive" -C "$candidate"
@@ -434,7 +442,7 @@ jobs:
         run: |
           set -euo pipefail
           ssh tx4h4g-prod \
-            "sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env OPENBMB_API_ENV_FILE=/etc/openbmb/api.env OPENBMB_SKIP_IMAGE_BUILD=true /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/deploy-release.sh"
+            "sudo -n OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env OPENBMB_API_ENV_FILE=/etc/openbmb/api.env OPENBMB_SKIP_IMAGE_BUILD=true /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/deploy-release.sh"
 
       - name: Verify public health after activation
         if: env.ACTIVATE_RELEASE == 'true'
@@ -442,7 +450,7 @@ jobs:
         run: |
           set -euo pipefail
           ssh tx4h4g-prod \
-            "OPENBMB_DOMAIN=sun227454.online /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/health-check.sh --public"
+            "sudo -n env OPENBMB_DOMAIN=sun227454.online bash /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/health-check.sh --public"
           curl --fail --silent --show-error \
             --retry 12 --retry-delay 5 --retry-all-errors \
             https://sun227454.online/openBMB/api/v1/health/ready \

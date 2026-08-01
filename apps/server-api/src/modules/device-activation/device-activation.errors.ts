@@ -19,6 +19,24 @@ export class InvalidInstallationKeyException extends CodedBadRequest {
   }
 }
 
+export class UnsupportedDeviceKeyProtectionException extends CodedBadRequest {
+  constructor() {
+    super(
+      'DEVICE_KEY_PROTECTION_UNSUPPORTED',
+      '设备客户端不支持当前要求的不可导出密钥保护协议，请升级客户端后重试',
+    );
+  }
+}
+
+export class UnsupportedInstallationKeyAlgorithmException extends CodedBadRequest {
+  constructor() {
+    super(
+      'DEVICE_INSTALLATION_KEY_ALGORITHM_UNSUPPORTED',
+      '设备安装密钥算法不受支持，请升级客户端后重试',
+    );
+  }
+}
+
 export class ActivationNotFoundException extends NotFoundException {
   constructor() {
     super({ code: 'ACTIVATION_NOT_FOUND', message: '激活请求不存在' });
@@ -72,6 +90,33 @@ export class ActivationApprovalRevokedException extends ForbiddenException {
     super({
       code: 'ACTIVATION_APPROVAL_REVOKED',
       message: '批准人的权限、家庭或陪伴对象状态已变化，请重新发起激活',
+    });
+  }
+}
+
+export class ActivationApprovalSnapshotChangedException extends ConflictException {
+  constructor() {
+    super({
+      code: 'ACTIVATION_APPROVAL_SNAPSHOT_CHANGED',
+      message: '待批准设备信息已经变化，请刷新确认页后重试',
+    });
+  }
+}
+
+export class ActivationIdempotencyKeyException extends CodedBadRequest {
+  constructor() {
+    super(
+      'ACTIVATION_IDEMPOTENCY_KEY_INVALID',
+      '批准设备必须提供有效的 Idempotency-Key',
+    );
+  }
+}
+
+export class ActivationIdempotencyConflictException extends ConflictException {
+  constructor() {
+    super({
+      code: 'ACTIVATION_IDEMPOTENCY_CONFLICT',
+      message: '同一 Idempotency-Key 已用于其他设备激活操作',
     });
   }
 }

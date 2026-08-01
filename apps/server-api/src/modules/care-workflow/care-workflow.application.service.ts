@@ -27,7 +27,6 @@ import {
   FamilyTaskAssigneeConflictException,
   FamilyTaskClaimConflictException,
   FamilyTaskNotFoundException,
-  IdempotencyConflictException,
   InvalidMedicationReferenceException,
   InvalidOccurrenceTransitionException,
   InvalidRoutineTypeException,
@@ -42,6 +41,8 @@ import type {
   ConfirmOccurrenceCommand,
   CreateRoutineCommand,
   DeviceConfirmOccurrenceCommand,
+  DeviceFamilyContactRequestCommand,
+  FamilyContactRequestView,
   FamilyTaskView,
   FamilyVerifyOccurrenceCommand,
   FinishFamilyTaskCommand,
@@ -55,6 +56,11 @@ import {
   assertTaskCanFinish,
 } from './domain/family-task-state-machine';
 import { assertOccurrenceTransition } from './domain/occurrence-state-machine';
+import {
+  fingerprintCareCommand,
+  replayCareCommand,
+  saveCareCommand,
+} from './domain/care-command-idempotency';
 import { localMinuteToUtc, parseIsoDate } from './domain/schedule-time';
 import type { CareWorkflowClock } from './ports/care-workflow-clock.port';
 import type { CareWorkflowContentCipher } from './ports/content-cipher.port';
@@ -581,6 +587,186 @@ export class CareWorkflowApplicationService {
     );
   }
 
+  async requestFamilyContactByDevice(
+    principal: DevicePrincipal,
+    command: DeviceFamilyContactRequestCommand,
+  ): Promise<FamilyContactRequestView> {
+    this.assertCompanionCapability(principal);
+    const idempotencyKey = this.requiredText(
+      command.idempotencyKey,
+      'idempotencyKey',
+    );
+    const occurrenceId = command.occurrenceId?.trim() || null;
+    const commandType = 'DEVICE_FAMILY_CONTACT_REQUEST';
+    const commandFingerprint = fingerprintCareCommand({
+      bindingId: principal.bindingId,
+      bindingVersion: principal.bindingVersion,
+      deviceId: principal.deviceId,
+      occurrenceId,
+      recipientId: principal.recipientId,
+      source: command.source,
+    });
+    const dedupeKey = occurrenceId
+      ? `family-contact:occurrence:${occurrenceId}`
+      : `family-contact:device:${principal.bindingId}:${idempotencyKey}`;
+
+    return this.retrySerializable(async (transaction) => {
+      await this.requireActiveCompanionBinding(transaction, principal);
+      const replay = await replayCareCommand<FamilyContactRequestView>(
+        transaction,
+        idempotencyKey,
+        commandType,
+        commandFingerprint,
+        this.cipher,
+      );
+      if (replay) return replay;
+
+      const existingEvent = await transaction.careEvent.findFirst({
+        where: { householdId: principal.householdId, dedupeKey },
+        select: { id: true, routineOccurrenceId: true },
+      });
+      if (existingEvent) {
+        const existingTask = (await transaction.familyTask.findUniqueOrThrow({
+          where: { sourceEventId: existingEvent.id },
+        })) as FamilyTaskRecord;
+        return saveCareCommand(
+          transaction,
+          this.clock.now(),
+          idempotencyKey,
+          commandType,
+          commandFingerprint,
+          {
+            accepted: true,
+            careEventId: existingEvent.id,
+            familyTaskId: existingTask.id,
+            occurrenceId: existingEvent.routineOccurrenceId,
+            taskStatus: existingTask.status,
+          },
+          this.cipher,
+        );
+      }
+
+      let occurrence: Pick<
+        OccurrenceRecord,
+        'id' | 'status' | 'version'
+      > | null = null;
+      if (occurrenceId) {
+        occurrence = await transaction.routineOccurrence.findFirst({
+          where: {
+            id: occurrenceId,
+            householdId: principal.householdId,
+            recipientId: principal.recipientId,
+            status: {
+              in: [
+                OCCURRENCE_STATUS.due,
+                OCCURRENCE_STATUS.awaitingConfirmation,
+                OCCURRENCE_STATUS.needsFamilyReview,
+              ],
+            },
+          },
+          select: { id: true, status: true, version: true },
+        });
+        if (!occurrence) {
+          throw new OccurrenceNotFoundException();
+        }
+        if (occurrence.status !== OCCURRENCE_STATUS.needsFamilyReview) {
+          assertOccurrenceTransition(
+            occurrence.status,
+            OCCURRENCE_STATUS.needsFamilyReview,
+          );
+          const changed = await transaction.routineOccurrence.updateMany({
+            where: {
+              id: occurrence.id,
+              householdId: principal.householdId,
+              recipientId: principal.recipientId,
+              status: occurrence.status,
+              version: occurrence.version,
+            },
+            data: {
+              status: OCCURRENCE_STATUS.needsFamilyReview,
+              version: { increment: 1 },
+            },
+          });
+          if (changed.count !== 1) {
+            throw new CareWorkflowVersionConflictException();
+          }
+        }
+      }
+
+      const now = this.clock.now();
+      const careEvent = await this.createCareEvent(transaction, now, {
+        householdId: principal.householdId,
+        recipientId: principal.recipientId,
+        occurrenceId: occurrence?.id ?? null,
+        sourceId: principal.bindingId,
+        type: 'RECIPIENT_REQUESTED_FAMILY_CONTACT',
+        severity: 'ATTENTION',
+        sourceType: 'COMPANION_DEVICE',
+        title: '长者希望联系家人',
+        summary:
+          '长者通过陪伴设备明确请求家属查看；系统未推断危险、健康状态或日程完成情况。',
+        dedupeKey,
+        payload: {
+          bindingId: principal.bindingId,
+          occurrenceId: occurrence?.id ?? null,
+          requestSource: command.source,
+          inferenceMade: false,
+        },
+      });
+      const task = (await transaction.familyTask.create({
+        data: {
+          id: newUlid(now.getTime()),
+          householdId: principal.householdId,
+          recipientId: principal.recipientId,
+          sourceEventId: careEvent.id,
+          status: FAMILY_TASK_STATUS.open,
+          priority: 'NORMAL',
+          dueAt: now,
+        },
+      })) as FamilyTaskRecord;
+      await this.writeOutbox(transaction, now, {
+        aggregateType: 'CARE_EVENT',
+        aggregateId: careEvent.id,
+        eventType: 'care-event.family-contact-requested',
+        payload: {
+          householdId: principal.householdId,
+          recipientId: principal.recipientId,
+          occurrenceId: occurrence?.id ?? null,
+          bindingId: principal.bindingId,
+          careEventId: careEvent.id,
+          familyTaskId: task.id,
+        },
+      });
+      await this.writeOutbox(transaction, now, {
+        aggregateType: 'FAMILY_TASK',
+        aggregateId: task.id,
+        eventType: 'family-task.opened',
+        payload: {
+          householdId: principal.householdId,
+          recipientId: principal.recipientId,
+          occurrenceId: occurrence?.id ?? null,
+          careEventId: careEvent.id,
+          familyTaskId: task.id,
+        },
+      });
+      return saveCareCommand(
+        transaction,
+        now,
+        idempotencyKey,
+        commandType,
+        commandFingerprint,
+        {
+          accepted: true,
+          careEventId: careEvent.id,
+          familyTaskId: task.id,
+          occurrenceId: occurrence?.id ?? null,
+          taskStatus: task.status,
+        },
+        this.cipher,
+      );
+    });
+  }
+
   async familyVerifyOccurrence(
     principal: CareWorkflowPrincipal,
     householdId: string,
@@ -742,32 +928,50 @@ export class CareWorkflowApplicationService {
         authority,
         occurrence.recipientId,
       );
-      const replay = await transaction.routineConfirmation.findUnique({
-        where: { idempotencyKey },
-        select: { occurrenceId: true, confirmationType: true },
-      });
       const confirmationType = familyVerification
         ? verified
           ? 'FAMILY_VERIFIED'
           : 'FAMILY_REJECTED'
         : 'RECIPIENT_CONFIRMED';
-      if (replay) {
-        if (
-          replay.occurrenceId !== occurrenceId ||
-          replay.confirmationType !== confirmationType
-        ) {
-          throw new IdempotencyConflictException();
-        }
-        return this.toOccurrenceView(occurrence);
-      }
-      if (
-        authority.kind === 'DEVICE' &&
-        'utteranceId' in command &&
-        command.utteranceId
-      ) {
+      const note = command.note?.trim() || null;
+      const bindingId = familyVerification
+        ? null
+        : authority.kind === 'DEVICE'
+          ? actor.bindingId
+          : (command as ConfirmOccurrenceCommand).bindingId?.trim() || null;
+      const utteranceId = familyVerification
+        ? null
+        : (command as ConfirmOccurrenceCommand).utteranceId?.trim() || null;
+      const commandType = familyVerification
+        ? 'FAMILY_VERIFY_OCCURRENCE'
+        : 'CONFIRM_OCCURRENCE';
+      const commandFingerprint = fingerprintCareCommand({
+        actorBindingId: actor.bindingId,
+        actorMemberId: actor.memberId,
+        bindingId,
+        confirmationType,
+        householdId,
+        note,
+        occurrenceId,
+        source: familyVerification
+          ? null
+          : (command as ConfirmOccurrenceCommand).source,
+        utteranceId,
+        verified,
+        version: command.version,
+      });
+      const replay = await replayCareCommand<OccurrenceView>(
+        transaction,
+        idempotencyKey,
+        commandType,
+        commandFingerprint,
+        this.cipher,
+      );
+      if (replay) return replay;
+      if (authority.kind === 'DEVICE' && utteranceId) {
         const utterance = await transaction.conversationUtterance.findFirst({
           where: {
-            id: command.utteranceId,
+            id: utteranceId,
             bindingId: authority.principal.bindingId,
             modelSession: {
               companionSession: {
@@ -817,7 +1021,6 @@ export class CareWorkflowApplicationService {
       if (updated.count !== 1) {
         throw new CareWorkflowVersionConflictException();
       }
-      const note = command.note?.trim() || null;
       const encryptedNote = note ? this.cipher.encrypt(note) : null;
       await transaction.routineConfirmation.create({
         data: {
@@ -828,14 +1031,8 @@ export class CareWorkflowApplicationService {
             ? 'FAMILY_MEMBER'
             : (command as ConfirmOccurrenceCommand).source,
           memberId: actor.memberId,
-          bindingId: familyVerification
-            ? null
-            : authority.kind === 'DEVICE'
-              ? actor.bindingId
-              : ((command as ConfirmOccurrenceCommand).bindingId ?? null),
-          utteranceId: familyVerification
-            ? null
-            : ((command as ConfirmOccurrenceCommand).utteranceId ?? null),
+          bindingId,
+          utteranceId,
           noteCiphertext: encryptedNote
             ? this.toPrismaBytes(encryptedNote.ciphertext)
             : null,
@@ -911,6 +1108,7 @@ export class CareWorkflowApplicationService {
             fromStatus: openTask.status,
             toStatus: closedStatus,
             occurredAt: now,
+            idempotencyKey,
           },
         });
         await this.writeOutbox(transaction, now, {
@@ -942,7 +1140,15 @@ export class CareWorkflowApplicationService {
         where: { id: occurrenceId },
         include: { routine: true },
       })) as OccurrenceRecord;
-      return this.toOccurrenceView(result);
+      return saveCareCommand(
+        transaction,
+        now,
+        idempotencyKey,
+        commandType,
+        commandFingerprint,
+        this.toOccurrenceView(result),
+        this.cipher,
+      );
     });
   }
 
@@ -969,6 +1175,20 @@ export class CareWorkflowApplicationService {
     ) {
       throw new DeviceOccurrenceAccessDeniedException();
     }
+    await this.requireActiveCompanionBinding(transaction, principal);
+    return { memberId: null, bindingId: principal.bindingId };
+  }
+
+  private assertCompanionCapability(principal: DevicePrincipal): void {
+    if (!principal.capabilities.includes('COMPANION')) {
+      throw new DeviceOccurrenceAccessDeniedException();
+    }
+  }
+
+  private async requireActiveCompanionBinding(
+    transaction: TransactionClient,
+    principal: DevicePrincipal,
+  ): Promise<void> {
     const binding = await transaction.companionBinding.findFirst({
       where: {
         id: principal.bindingId,
@@ -987,13 +1207,6 @@ export class CareWorkflowApplicationService {
     if (!binding) {
       throw new DeviceOccurrenceAccessDeniedException();
     }
-    return { memberId: null, bindingId: principal.bindingId };
-  }
-
-  private assertCompanionCapability(principal: DevicePrincipal): void {
-    if (!principal.capabilities.includes('COMPANION')) {
-      throw new DeviceOccurrenceAccessDeniedException();
-    }
   }
 
   private async actOnFamilyTask(
@@ -1003,6 +1216,10 @@ export class CareWorkflowApplicationService {
     action: 'CLAIM' | 'RESOLVE' | 'DISMISS',
     command: ClaimFamilyTaskCommand | FinishFamilyTaskCommand,
   ): Promise<FamilyTaskView> {
+    const idempotencyKey = this.requiredText(
+      command.idempotencyKey,
+      'idempotencyKey',
+    );
     const now = this.clock.now();
     return this.retrySerializable(async (transaction) => {
       const task = (await transaction.familyTask.findFirst({
@@ -1016,6 +1233,30 @@ export class CareWorkflowApplicationService {
         task.recipientId,
         'VIEW_EVENTS',
       );
+      const finish = command as FinishFamilyTaskCommand;
+      const note = action === 'CLAIM' ? null : finish.note?.trim() || null;
+      const resolutionCode =
+        action === 'CLAIM'
+          ? null
+          : this.requiredText(finish.resolutionCode, 'resolutionCode');
+      const commandType = `FAMILY_TASK_${action}`;
+      const commandFingerprint = fingerprintCareCommand({
+        action,
+        actorMemberId: member.id,
+        householdId,
+        note,
+        resolutionCode,
+        taskId,
+        version: command.version,
+      });
+      const replay = await replayCareCommand<FamilyTaskView>(
+        transaction,
+        idempotencyKey,
+        commandType,
+        commandFingerprint,
+        this.cipher,
+      );
+      if (replay) return replay;
       if (task.version !== command.version) {
         throw action === 'CLAIM'
           ? new FamilyTaskClaimConflictException()
@@ -1035,8 +1276,6 @@ export class CareWorkflowApplicationService {
           : action === 'RESOLVE'
             ? FAMILY_TASK_STATUS.resolved
             : FAMILY_TASK_STATUS.dismissed;
-      const finish = command as FinishFamilyTaskCommand;
-      const note = action === 'CLAIM' ? null : finish.note?.trim() || null;
       const encryptedNote = note ? this.cipher.encrypt(note) : null;
       const updated = await transaction.familyTask.updateMany({
         where: {
@@ -1052,10 +1291,7 @@ export class CareWorkflowApplicationService {
             ? {}
             : {
                 resolvedAt: now,
-                resolutionCode: this.requiredText(
-                  finish.resolutionCode,
-                  'resolutionCode',
-                ),
+                resolutionCode,
                 resolutionNoteCiphertext: encryptedNote
                   ? this.toPrismaBytes(encryptedNote.ciphertext)
                   : null,
@@ -1088,6 +1324,7 @@ export class CareWorkflowApplicationService {
             : null,
           encryptionKeyId: encryptedNote?.encryptionKeyId ?? null,
           occurredAt: now,
+          idempotencyKey,
         },
       });
       await this.writeOutbox(transaction, now, {
@@ -1104,7 +1341,15 @@ export class CareWorkflowApplicationService {
       const result = (await transaction.familyTask.findUniqueOrThrow({
         where: { id: taskId },
       })) as FamilyTaskRecord;
-      return this.toFamilyTaskView(result);
+      return saveCareCommand(
+        transaction,
+        now,
+        idempotencyKey,
+        commandType,
+        commandFingerprint,
+        this.toFamilyTaskView(result),
+        this.cipher,
+      );
     });
   }
 
@@ -1114,7 +1359,8 @@ export class CareWorkflowApplicationService {
     command: {
       householdId: string;
       recipientId: string;
-      occurrenceId: string;
+      occurrenceId: string | null;
+      sourceId?: string | null;
       type: string;
       severity: string;
       sourceType: string;
@@ -1133,7 +1379,7 @@ export class CareWorkflowApplicationService {
         type: command.type,
         severity: command.severity,
         sourceType: command.sourceType,
-        sourceId: command.occurrenceId,
+        sourceId: command.sourceId ?? command.occurrenceId,
         routineOccurrenceId: command.occurrenceId,
         titleCiphertext: protectedContent.first,
         summaryCiphertext: protectedContent.second,
@@ -1438,7 +1684,7 @@ export class CareWorkflowApplicationService {
   private isRetryableConflict(error: unknown): boolean {
     return (
       error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === 'P2034'
+      (error.code === 'P2034' || error.code === 'P2002')
     );
   }
 

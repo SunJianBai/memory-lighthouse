@@ -97,6 +97,10 @@ function makeHarness() {
   const clock: HouseholdClock = { now: () => now };
   const tokens = new InvitationTokenService(config);
   const verifiedEmailPolicy = new VerifiedEmailPolicy();
+  const mediaSecurity = {
+    markMemberRevoked: jest.fn(async () => 0),
+    cleanupPendingForMember: jest.fn(async () => undefined),
+  };
   const service = new HouseholdApplicationService(
     prisma as never,
     verifiedEmailPolicy,
@@ -105,9 +109,18 @@ function makeHarness() {
     delivery,
     clock,
     config,
+    mediaSecurity as never,
   );
 
-  return { service, prisma, transaction, policy, delivery, tokens };
+  return {
+    service,
+    prisma,
+    transaction,
+    policy,
+    delivery,
+    tokens,
+    mediaSecurity,
+  };
 }
 
 function householdRecord() {
@@ -233,6 +246,10 @@ describe('HouseholdApplicationService invariants', () => {
         version: { increment: 1 },
       },
     });
+    expect(harness.prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: 'Serializable' },
+    );
   });
 
   it('rejects a member id from another household instead of mutating it', async () => {
@@ -343,6 +360,10 @@ describe('HouseholdApplicationService invariants', () => {
     ).resolves.toMatchObject({ name: '李奶奶', version: 0 });
 
     expect(harness.prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(harness.prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: 'Serializable' },
+    );
     expect(harness.transaction.recipientMember.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         householdMemberId: 'owner-member',
@@ -405,6 +426,69 @@ describe('HouseholdApplicationService invariants', () => {
     expect(persisted.data.tokenHash).toBeInstanceOf(Uint8Array);
     expect(JSON.stringify(persisted.data)).not.toContain(
       harness.delivery.sent[0].rawToken,
+    );
+    expect(harness.prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: 'Serializable' },
+    );
+  });
+
+  it('rechecks invitation authority after a serialization retry', async () => {
+    const harness = makeHarness();
+    harness.prisma.$transaction.mockRejectedValueOnce(
+      Object.assign(new Error('serialization conflict'), { code: 'P2034' }),
+    );
+    harness.policy.requireHouseholdAction.mockRejectedValue(
+      new HouseholdAccessDeniedException(),
+    );
+
+    await expect(
+      harness.service.createInvitation(principal, householdRecord().id, {
+        targetEmail: 'family@example.com',
+        roleCode: 'CAREGIVER',
+      }),
+    ).rejects.toBeInstanceOf(HouseholdAccessDeniedException);
+
+    expect(harness.prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(
+      harness.transaction.householdInvitation.create,
+    ).not.toHaveBeenCalled();
+    expect(harness.delivery.sent).toHaveLength(0);
+  });
+
+  it('updates a Care Recipient with authorization in the same Serializable transaction', async () => {
+    const harness = makeHarness();
+    harness.policy.requireRecipientAction.mockResolvedValue({
+      id: 'owner-member',
+    });
+    harness.transaction.careRecipient.updateMany.mockResolvedValue({
+      count: 1,
+    });
+    harness.transaction.careRecipient.findFirst.mockResolvedValue({
+      ...recipientRecord(),
+      preferredName: '奶奶',
+      version: 1,
+    });
+
+    await expect(
+      harness.service.updateCareRecipient(
+        principal,
+        householdRecord().id,
+        recipientRecord().id,
+        { preferredName: '奶奶', version: 0 },
+      ),
+    ).resolves.toMatchObject({ preferredName: '奶奶', version: 1 });
+
+    expect(harness.policy.requireRecipientAction).toHaveBeenCalledWith(
+      harness.transaction,
+      principal.userId,
+      householdRecord().id,
+      recipientRecord().id,
+      'MANAGE_RECIPIENT',
+    );
+    expect(harness.prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: 'Serializable' },
     );
   });
 

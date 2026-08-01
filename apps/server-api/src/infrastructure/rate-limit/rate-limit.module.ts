@@ -41,6 +41,6 @@ import type { RateLimitConfig } from './rate-limit.types';
     RateLimitApplicationService,
     RateLimitGuard,
   ],
-  exports: [RateLimitApplicationService, RateLimitGuard],
+  exports: [RATE_LIMIT_CONFIG, RateLimitApplicationService, RateLimitGuard],
 })
 export class RateLimitModule {}

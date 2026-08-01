@@ -40,4 +40,7 @@ class CompanionSessionBridge(private val repository: LighthouseRepository) {
 
     suspend fun end(connection: CompanionModelConnection, reason: String) =
         repository.endCompanionSession(connection.companionSessionId, reason)
+
+    fun acknowledgeServerStop(connection: CompanionModelConnection) =
+        repository.clearActiveCompanionSession(connection.companionSessionId)
 }

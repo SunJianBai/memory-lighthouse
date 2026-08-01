@@ -1,20 +1,21 @@
 package com.sun.minicpmo_android
 
 import android.os.Bundle
+import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import com.sun.minicpmo_android.lighthouse.AppGraph
 import com.sun.minicpmo_android.lighthouse.LighthouseViewModel
+import com.sun.minicpmo_android.lighthouse.call.CompanionCallService
 import com.sun.minicpmo_android.lighthouse.ui.LighthouseRoute
 import com.sun.minicpmo_android.ui.theme.LighthouseTheme
 
 class MainActivity : ComponentActivity() {
-    private val graph by lazy { AppGraph(applicationContext) }
+    private val graph by lazy { (application as LighthouseApplication).appGraph }
 
     private val lighthouseViewModel: LighthouseViewModel by viewModels {
-        LighthouseViewModel.factory(applicationContext, graph)
+        LighthouseViewModel.factory(graph)
     }
 
     private val miniCpmViewModel: MainViewModel by viewModels {
@@ -29,12 +30,20 @@ class MainActivity : ComponentActivity() {
                 LighthouseRoute(lighthouseViewModel, miniCpmViewModel)
             }
         }
-        intent?.dataString?.let(lighthouseViewModel::handleActivationQr)
+        handleIntent(intent)
     }
 
-    override fun onNewIntent(intent: android.content.Intent) {
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.dataString?.let(lighthouseViewModel::handleActivationQr)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(value: Intent?) {
+        value?.dataString?.let(lighthouseViewModel::handleActivationQr)
+        lighthouseViewModel.handleCallIntent(
+            value?.action,
+            value?.getStringExtra(CompanionCallService.EXTRA_SESSION_ID),
+        )
     }
 }

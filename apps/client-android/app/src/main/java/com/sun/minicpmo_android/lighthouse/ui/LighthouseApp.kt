@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -83,11 +84,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -111,14 +112,14 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.sun.minicpmo_android.MainViewModel
 import com.sun.minicpmo_android.lighthouse.LighthouseViewModel
+import com.sun.minicpmo_android.lighthouse.call.CompanionMediaHandoffState
+import com.sun.minicpmo_android.lighthouse.call.CompanionMediaStopReason
 import com.sun.minicpmo_android.lighthouse.camera.QrCodeImage
 import com.sun.minicpmo_android.lighthouse.camera.QrScannerView
 import com.sun.minicpmo_android.lighthouse.model.ActivationPresentation
+import com.sun.minicpmo_android.lighthouse.model.ActivationApprovalDetails
 import com.sun.minicpmo_android.lighthouse.model.AppRole
 import com.sun.minicpmo_android.lighthouse.model.CompanionBindingView
 import com.sun.minicpmo_android.lighthouse.model.LighthouseUiState
@@ -139,13 +140,12 @@ fun LighthouseRoute(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val callState by viewModel.callState.collectAsStateWithLifecycle()
+    val mediaHandoffState by viewModel.companionMediaHandoffState.collectAsState()
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val latestCallPhase by rememberUpdatedState(callState.phase)
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var pendingPermissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
-    var remoteHandoffInProgress by remember { mutableStateOf(false) }
+    val remoteHandoffInProgress = mediaHandoffState !is CompanionMediaHandoffState.Idle
     val familyActions = remember(viewModel) {
         FamilyUiActions(
             requestEmailVerification = viewModel::requestEmailVerification,
@@ -154,6 +154,7 @@ fun LighthouseRoute(
             createHousehold = viewModel::createHousehold,
             createRecipient = viewModel::createRecipient,
             createActivation = viewModel::createActivation,
+            loadActivationApprovalDetails = viewModel::loadActivationApprovalDetails,
             approveActivation = viewModel::approveActivation,
             requestCall = viewModel::requestRemoteCall,
             createMemory = viewModel::createMemory,
@@ -189,6 +190,57 @@ fun LighthouseRoute(
         }
     }
 
+    DisposableEffect(viewModel) {
+        viewModel.attachLocalCompanionStopConsumer()
+        onDispose { viewModel.detachLocalCompanionStopConsumer() }
+    }
+
+    LaunchedEffect(mediaHandoffState) {
+        val stopping = mediaHandoffState as? CompanionMediaHandoffState.StoppingLocalCompanion
+            ?: return@LaunchedEffect
+        viewModel.closeAiCompanion()
+        when (stopping.reason) {
+            CompanionMediaStopReason.REMOTE_ANSWER -> miniCpmViewModel.stopForRemoteCall(
+                onStopped = { viewModel.completeLocalCompanionStop(stopping.requestId) },
+                onFailure = { error ->
+                    viewModel.failLocalCompanionStop(stopping.requestId, error)
+                },
+            )
+            CompanionMediaStopReason.SERVER_DIRECTIVE ->
+                miniCpmViewModel.stopForServerDirective {
+                    viewModel.completeLocalCompanionStop(stopping.requestId)
+                }
+        }
+    }
+
+    LaunchedEffect(state.role, state.deviceActivated) {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            state.role == AppRole.COMPANION &&
+            state.deviceActivated &&
+            !context.hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+        }
+    }
+
+    LaunchedEffect(
+        state.pendingSystemAnswerSessionId,
+        state.incomingRemoteSession?.id,
+    ) {
+        val sessionId = state.pendingSystemAnswerSessionId ?: return@LaunchedEffect
+        val incoming = state.incomingRemoteSession?.takeIf { it.id == sessionId }
+            ?: return@LaunchedEffect
+        val permissions = buildList {
+            if (incoming.media.receiveDeviceAudio) add(Manifest.permission.RECORD_AUDIO)
+            if (incoming.media.receiveDeviceVideo) add(Manifest.permission.CAMERA)
+        }
+        withPermissions(permissions) {
+            viewModel.acceptIncomingCall(sessionId)
+            viewModel.consumeSystemAnswerIntent()
+        }
+    }
+
     LaunchedEffect(state.message, state.error) {
         (state.error ?: state.message)?.let {
             snackbar.showSnackbar(it)
@@ -204,36 +256,9 @@ fun LighthouseRoute(
         onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
 
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (
-                event == Lifecycle.Event.ON_STOP &&
-                latestCallPhase in setOf(LiveCallPhase.CONNECTING, LiveCallPhase.CONNECTED)
-            ) {
-                viewModel.onAppBackgrounded()
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
     if (state.aiScreenVisible) {
         MinicpmoAndroidTheme {
             val incoming = state.incomingRemoteSession
-            LaunchedEffect(remoteHandoffInProgress, incoming?.id) {
-                if (!remoteHandoffInProgress) return@LaunchedEffect
-                if (incoming == null) {
-                    remoteHandoffInProgress = false
-                    return@LaunchedEffect
-                }
-                // This effect starts after the handoff composition has removed
-                // MiniCpmRoute, so CameraX releases the camera before LiveKit joins.
-                miniCpmViewModel.stopForRemoteCall {
-                    viewModel.closeAiCompanion()
-                    remoteHandoffInProgress = false
-                    viewModel.acceptIncomingCall()
-                }
-            }
 
             Box(Modifier.fillMaxSize()) {
                 if (remoteHandoffInProgress) {
@@ -258,7 +283,7 @@ fun LighthouseRoute(
                                 }
                             }
                             withPermissions(permissions) {
-                                remoteHandoffInProgress = true
+                                viewModel.acceptIncomingCall()
                             }
                         },
                         onDecline = viewModel::declineIncomingCall,
@@ -702,7 +727,10 @@ private fun FamilyScreen(
     state.activation?.takeIf { it.challengeId != dismissedActivationId }?.let { activation ->
         ActivationDialog(
             activation = activation,
+            approvalDetails = state.activationApprovalDetails
+                ?.takeIf { it.challengeId == activation.challengeId },
             pendingChallengeId = state.pendingDeviceActivation?.challengeId,
+            onLoadApprovalDetails = actions.loadActivationApprovalDetails,
             onApprove = actions.approveActivation,
             onDismiss = { dismissedActivationId = activation.challengeId },
         )
@@ -1115,7 +1143,9 @@ private fun IncomingCallDialog(
 @Composable
 private fun ActivationDialog(
     activation: ActivationPresentation,
+    approvalDetails: ActivationApprovalDetails?,
     pendingChallengeId: String?,
+    onLoadApprovalDetails: (String) -> Unit,
     onApprove: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1142,19 +1172,53 @@ private fun ActivationDialog(
                     "先让陪伴设备扫描或输入动态码，再由家属点击批准。二维码和动态码均为短时一次性凭据。",
                     textAlign = TextAlign.Center,
                 )
+                if (approvalDetails == null) {
+                    Text(
+                        "设备认领后，请先读取并核对型号、系统版本、认领时间和脱敏网络来源。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    OutlinedButton(
+                        onClick = { onLoadApprovalDetails(activation.challengeId) },
+                        modifier = Modifier.height(52.dp),
+                    ) { Text("读取待批准设备信息") }
+                } else {
+                    val deviceName = listOfNotNull(
+                        approvalDetails.device.manufacturer,
+                        approvalDetails.device.model,
+                    ).joinToString(" ").ifBlank { "未报告型号" }
+                    HorizontalDivider()
+                    Text("待批准设备", fontWeight = FontWeight.Bold)
+                    Text(deviceName)
+                    Text("${approvalDetails.device.platform} / ${approvalDetails.device.osVersion ?: "系统版本未知"}")
+                    Text("App ${approvalDetails.device.appVersion ?: "版本未知"}")
+                    Text("密钥算法：${approvalDetails.device.installationKeyAlgorithm}")
+                    Text("认领时间：${approvalDetails.claimedAt}")
+                    Text("网络来源：${approvalNetworkLabel(approvalDetails.claimNetworkSource)}")
+                    Text("安装密钥尾号：…${approvalDetails.device.keyFingerprintSuffix}")
+                }
             }
         },
         confirmButton = {
             Button(
                 onClick = { onApprove(activation.challengeId) },
-                enabled = pendingChallengeId == null || pendingChallengeId == activation.challengeId,
+                enabled = approvalDetails != null &&
+                    (pendingChallengeId == null || pendingChallengeId == activation.challengeId),
                 modifier = Modifier.height(52.dp),
-            ) { Text("设备已认领，批准激活") }
+            ) { Text(if (approvalDetails == null) "请先核对设备信息" else "确认上述信息并批准") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss, modifier = Modifier.height(52.dp)) { Text("稍后处理") }
         },
     )
+}
+
+private fun approvalNetworkLabel(source: String): String = when (source) {
+    "LOCAL_NETWORK" -> "本地或家庭网络（地址已隐藏）"
+    "LOOPBACK" -> "本机测试网络"
+    "PUBLIC_IPV4" -> "公网 IPv4（地址已隐藏）"
+    "PUBLIC_IPV6" -> "公网 IPv6（地址已隐藏）"
+    else -> "网络来源未知"
 }
 
 @Composable

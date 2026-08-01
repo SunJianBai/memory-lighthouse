@@ -17,6 +17,7 @@ interface UserAccessClaims {
   iat: number;
   iss: string;
   jti: string;
+  purpose: 'USER' | 'ADMIN_WEB';
   sid: string;
   sub: string;
 }
@@ -26,6 +27,14 @@ export interface VerifiedAccessClaims {
   sessionId: string;
   tokenId: string;
   expiresAt: Date;
+}
+
+interface AccessTokenProfile {
+  audience: string;
+  issuer: string;
+  purpose: 'USER' | 'ADMIN_WEB';
+  secret: Buffer;
+  ttlSeconds: number;
 }
 
 function encodeJson(value: unknown): string {
@@ -54,6 +63,7 @@ function isClaims(value: unknown): value is UserAccessClaims {
     typeof claims.iat === 'number' &&
     typeof claims.iss === 'string' &&
     typeof claims.jti === 'string' &&
+    (claims.purpose === 'USER' || claims.purpose === 'ADMIN_WEB') &&
     typeof claims.sid === 'string' &&
     typeof claims.sub === 'string'
   );
@@ -67,7 +77,7 @@ export class AccessTokenService {
     @Inject(IDENTITY_CLOCK) private readonly clock: Clock,
   ) {}
 
-  issue(
+  issueUser(
     userId: string,
     sessionId: string,
   ): {
@@ -75,22 +85,56 @@ export class AccessTokenService {
     tokenId: string;
     expiresAt: Date;
   } {
+    return this.issue(userId, sessionId, this.userProfile());
+  }
+
+  issueAdmin(
+    userId: string,
+    sessionId: string,
+  ): {
+    token: string;
+    tokenId: string;
+    expiresAt: Date;
+  } {
+    return this.issue(userId, sessionId, this.adminProfile());
+  }
+
+  verifyUser(token: string): VerifiedAccessClaims | null {
+    return this.verify(token, this.userProfile());
+  }
+
+  verifyAdmin(token: string): VerifiedAccessClaims | null {
+    return this.verify(token, this.adminProfile());
+  }
+
+  private issue(
+    userId: string,
+    sessionId: string,
+    profile: AccessTokenProfile,
+  ): {
+    token: string;
+    tokenId: string;
+    expiresAt: Date;
+  } {
     const nowSeconds = Math.floor(this.clock.now().getTime() / 1000);
-    const expiresAtSeconds = nowSeconds + this.config.accessTokenTtlSeconds;
+    const expiresAtSeconds = nowSeconds + profile.ttlSeconds;
     const tokenId = newUlid(nowSeconds * 1000);
     const header = encodeJson({ alg: 'HS256', typ: 'JWT' });
     const claims = encodeJson({
-      aud: this.config.accessTokenAudience,
+      aud: profile.audience,
       env: this.config.environment,
       exp: expiresAtSeconds,
       iat: nowSeconds,
-      iss: this.config.accessTokenIssuer,
+      iss: profile.issuer,
       jti: tokenId,
+      purpose: profile.purpose,
       sid: sessionId,
       sub: userId,
     } satisfies UserAccessClaims);
     const signingInput = `${header}.${claims}`;
-    const signature = this.sign(signingInput).toString('base64url');
+    const signature = this.sign(signingInput, profile.secret).toString(
+      'base64url',
+    );
 
     return {
       token: `${signingInput}.${signature}`,
@@ -99,7 +143,10 @@ export class AccessTokenService {
     };
   }
 
-  verify(token: string): VerifiedAccessClaims | null {
+  private verify(
+    token: string,
+    profile: AccessTokenProfile,
+  ): VerifiedAccessClaims | null {
     const parts = token.split('.');
     if (parts.length !== 3) {
       return null;
@@ -123,7 +170,10 @@ export class AccessTokenService {
         return null;
       }
 
-      const expectedSignature = this.sign(`${headerPart}.${claimsPart}`);
+      const expectedSignature = this.sign(
+        `${headerPart}.${claimsPart}`,
+        profile.secret,
+      );
       if (
         suppliedSignature.length !== expectedSignature.length ||
         !timingSafeEqual(suppliedSignature, expectedSignature)
@@ -138,8 +188,9 @@ export class AccessTokenService {
 
       const nowSeconds = Math.floor(this.clock.now().getTime() / 1000);
       if (
-        claims.iss !== this.config.accessTokenIssuer ||
-        claims.aud !== this.config.accessTokenAudience ||
+        claims.iss !== profile.issuer ||
+        claims.aud !== profile.audience ||
+        claims.purpose !== profile.purpose ||
         claims.env !== this.config.environment ||
         claims.exp <= nowSeconds ||
         claims.iat > nowSeconds + 30
@@ -158,9 +209,27 @@ export class AccessTokenService {
     }
   }
 
-  private sign(input: string): Buffer {
-    return createHmac('sha256', this.config.accessTokenSecret)
-      .update(input, 'utf8')
-      .digest();
+  private userProfile(): AccessTokenProfile {
+    return {
+      audience: this.config.accessTokenAudience,
+      issuer: this.config.accessTokenIssuer,
+      purpose: 'USER',
+      secret: this.config.accessTokenSecret,
+      ttlSeconds: this.config.accessTokenTtlSeconds,
+    };
+  }
+
+  private adminProfile(): AccessTokenProfile {
+    return {
+      audience: this.config.adminAccessTokenAudience,
+      issuer: this.config.adminAccessTokenIssuer,
+      purpose: 'ADMIN_WEB',
+      secret: this.config.adminAccessTokenSecret,
+      ttlSeconds: this.config.adminAccessTokenTtlSeconds,
+    };
+  }
+
+  private sign(input: string, secret: Buffer): Buffer {
+    return createHmac('sha256', secret).update(input, 'utf8').digest();
   }
 }

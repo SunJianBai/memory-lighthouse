@@ -9,8 +9,26 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
 import java.util.Locale
+
+internal fun deviceInstallationRegistrationPayload(
+    installationPublicKeySpki: String,
+    installationKeyAlgorithm: String,
+    manufacturer: String,
+    model: String,
+    osVersion: String,
+    appVersion: String,
+): JSONObject = JSONObject()
+    .put("installationPublicKeySpki", installationPublicKeySpki)
+    .put("installationKeyAlgorithm", installationKeyAlgorithm)
+    .put("keyProtection", "NON_EXPORTABLE_V1")
+    .put("platform", "ANDROID")
+    .put("manufacturer", manufacturer)
+    .put("model", model)
+    .put("osVersion", osVersion)
+    .put("appVersion", appVersion)
 
 class LighthouseRepository(
     private val settings: AppSettingsRepository,
@@ -21,6 +39,13 @@ class LighthouseRepository(
     private val http = httpClient ?: LighthouseHttpClient(settings::apiBaseUrl)
     private val userRefreshMutex = Mutex()
     private val deviceRefreshMutex = Mutex()
+    private val activeCompanionSessionId = AtomicReference<String?>(null)
+    private val careCommands = CareCommandRetrier(
+        persistence = VaultCareCommandPersistence(vault),
+        namespace = {
+            vault.userCareNamespace()?.let { "user:$it" }.orEmpty()
+        },
+    )
 
     fun apiBaseUrl(): String = settings.apiBaseUrl()
 
@@ -30,11 +55,14 @@ class LighthouseRepository(
 
     fun hasDeviceCredential(): Boolean = vault.deviceCredential() != null
 
+    fun hasActiveCompanionSession(): Boolean = activeCompanionSessionId.get() != null
+
     fun deviceCredentialHouseholdId(): String? = vault.deviceCredential()?.householdId
 
     fun pendingDeviceActivation(): PendingDeviceActivation? = vault.pendingDeviceActivation()
 
     suspend fun login(identifier: String, password: String): UserView {
+        beginExplicitUserSession()
         val result = requireNotNull(
             http.request(
                 method = "POST",
@@ -45,7 +73,7 @@ class LighthouseRepository(
                     .put("clientType", "ANDROID"),
             ),
         )
-        vault.saveUserSession(parseUserSession(result))
+        replaceUserSession(parseUserSession(result))
         return getMe()
     }
 
@@ -55,6 +83,7 @@ class LighthouseRepository(
         password: String,
         displayName: String,
     ): UserView {
+        beginExplicitUserSession()
         val body = JSONObject()
             .put("password", password)
             .put("displayName", displayName.trim())
@@ -62,7 +91,7 @@ class LighthouseRepository(
         email?.trim()?.takeIf(String::isNotBlank)?.let { body.put("email", it) }
         username?.trim()?.takeIf(String::isNotBlank)?.let { body.put("username", it) }
         val result = requireNotNull(http.request("POST", "auth/register", body))
-        vault.saveUserSession(parseUserSession(result))
+        replaceUserSession(parseUserSession(result))
         return getMe()
     }
 
@@ -76,14 +105,14 @@ class LighthouseRepository(
 
     suspend fun logout() {
         runCatching { userRequest("POST", "auth/logout", JSONObject()) }
-        vault.saveUserSession(null)
+        clearUserSession()
     }
 
     suspend fun restoreUser(): UserView? {
         if (!hasUserSession()) return null
         return runCatching { getMe() }.getOrElse {
             if (it is LighthouseApiException && it.status == 401) {
-                vault.saveUserSession(null)
+                clearUserSession()
                 null
             } else {
                 throw it
@@ -93,7 +122,7 @@ class LighthouseRepository(
 
     suspend fun getMe(): UserView = parseUser(
         requireNotNull(userRequest("GET", "me")),
-    )
+    ).also(::saveUserCareNamespace)
 
     suspend fun listHouseholds(): List<HouseholdView> =
         arrayData(userRequest("GET", "households")).mapObjects(::parseHousehold)
@@ -235,31 +264,55 @@ class LighthouseRepository(
         occurrence: OccurrenceView,
         verified: Boolean,
         note: String?,
-    ): OccurrenceView = FamilyJsonMapper.parseOccurrence(
-        requireNotNull(
-            userRequest(
-                "POST",
-                FamilyApiContract.familyVerifyPath(householdId, occurrence.id),
-                FamilyApiContract.familyVerifyBody(
-                    version = occurrence.version,
-                    idempotencyKey = UUID.randomUUID().toString(),
-                    verified = verified,
-                    note = note,
+    ): OccurrenceView {
+        val normalizedNote = note?.trim()?.takeIf(String::isNotBlank)
+        val normalizedCommand = JSONArray()
+            .put("family-verify")
+            .put(householdId)
+            .put(occurrence.id)
+            .put(occurrence.version)
+            .put(verified)
+            .put(normalizedNote ?: JSONObject.NULL)
+            .toString()
+        return careCommands.execute(normalizedCommand) { idempotencyKey ->
+            FamilyJsonMapper.parseOccurrence(
+                requireNotNull(
+                    userRequest(
+                        "POST",
+                        FamilyApiContract.familyVerifyPath(householdId, occurrence.id),
+                        FamilyApiContract.familyVerifyBody(
+                            version = occurrence.version,
+                            idempotencyKey = idempotencyKey,
+                            verified = verified,
+                            note = normalizedNote,
+                        ),
+                        headers = mapOf("Idempotency-Key" to idempotencyKey),
+                    ),
                 ),
-            ),
-        ),
-    )
+            )
+        }
+    }
 
-    suspend fun claimFamilyTask(householdId: String, task: FamilyTaskView): FamilyTaskView =
-        FamilyJsonMapper.parseFamilyTask(
-            requireNotNull(
-                userRequest(
-                    "POST",
-                    FamilyApiContract.familyTaskActionPath(householdId, task.id, "claim"),
-                    FamilyApiContract.claimTaskBody(task.version),
+    suspend fun claimFamilyTask(householdId: String, task: FamilyTaskView): FamilyTaskView {
+        val normalizedCommand = JSONArray()
+            .put("family-task-claim")
+            .put(householdId)
+            .put(task.id)
+            .put(task.version)
+            .toString()
+        return careCommands.execute(normalizedCommand) { idempotencyKey ->
+            FamilyJsonMapper.parseFamilyTask(
+                requireNotNull(
+                    userRequest(
+                        "POST",
+                        FamilyApiContract.familyTaskActionPath(householdId, task.id, "claim"),
+                        FamilyApiContract.claimTaskBody(task.version),
+                        headers = mapOf("Idempotency-Key" to idempotencyKey),
+                    ),
                 ),
-            ),
-        )
+            )
+        }
+    }
 
     suspend fun finishFamilyTask(
         householdId: String,
@@ -269,15 +322,31 @@ class LighthouseRepository(
     ): FamilyTaskView {
         val action = if (resolve) "resolve" else "dismiss"
         val resolutionCode = if (resolve) "FAMILY_CONFIRMED" else "NOT_ACTIONABLE"
-        return FamilyJsonMapper.parseFamilyTask(
-            requireNotNull(
-                userRequest(
-                    "POST",
-                    FamilyApiContract.familyTaskActionPath(householdId, task.id, action),
-                    FamilyApiContract.finishTaskBody(task.version, resolutionCode, note),
+        val normalizedNote = note?.trim()?.takeIf(String::isNotBlank)
+        val normalizedCommand = JSONArray()
+            .put("family-task-$action")
+            .put(householdId)
+            .put(task.id)
+            .put(task.version)
+            .put(resolutionCode)
+            .put(normalizedNote ?: JSONObject.NULL)
+            .toString()
+        return careCommands.execute(normalizedCommand) { idempotencyKey ->
+            FamilyJsonMapper.parseFamilyTask(
+                requireNotNull(
+                    userRequest(
+                        "POST",
+                        FamilyApiContract.familyTaskActionPath(householdId, task.id, action),
+                        FamilyApiContract.finishTaskBody(
+                            task.version,
+                            resolutionCode,
+                            normalizedNote,
+                        ),
+                        headers = mapOf("Idempotency-Key" to idempotencyKey),
+                    ),
                 ),
-            ),
-        )
+            )
+        }
     }
 
     suspend fun listConsents(householdId: String, recipientId: String): List<ConsentStateView> =
@@ -330,33 +399,53 @@ class LighthouseRepository(
         ),
     )
 
-    suspend fun approveActivation(challengeId: String) {
-        userRequest("POST", "activation-challenges/$challengeId/approve", JSONObject())
+    suspend fun activationApprovalDetails(challengeId: String): ActivationApprovalDetails =
+        parseActivationApprovalDetails(
+            requireNotNull(
+                userRequest("GET", "activation-challenges/$challengeId/approval-details"),
+            ),
+        )
+
+    suspend fun approveActivation(challengeId: String, claimSnapshotToken: String) {
+        userRequest(
+            "POST",
+            "activation-challenges/$challengeId/approve",
+            JSONObject().put("claimSnapshotToken", claimSnapshotToken),
+            headers = mapOf("Idempotency-Key" to UUID.randomUUID().toString()),
+        )
     }
 
     suspend fun ensureDeviceInstallation(): DeviceInstallation {
         val installationPublicKeySpki = signer.publicKeySpki()
         val keyFingerprint = signer.publicKeyFingerprint()
+        val installationKeyAlgorithm = signer.keyAlgorithm().protocolId
         vault.deviceInstallation()
-            ?.takeIf { it.keyFingerprint == keyFingerprint }
+            ?.takeIf {
+                it.keyFingerprint == keyFingerprint &&
+                    it.installationKeyAlgorithm == installationKeyAlgorithm &&
+                    it.protocolVersion == "NON_EXPORTABLE_V1"
+            }
             ?.let { return it }
         val result = requireNotNull(
             http.request(
                 "POST",
                 "device-installations",
-                JSONObject()
-                    .put("installationPublicKeySpki", installationPublicKeySpki)
-                    .put("platform", "ANDROID")
-                    .put("manufacturer", Build.MANUFACTURER.take(100))
-                    .put("model", Build.MODEL.take(100))
-                    .put("osVersion", Build.VERSION.RELEASE.take(64))
-                    .put("appVersion", BuildConfig.VERSION_NAME.take(32)),
+                deviceInstallationRegistrationPayload(
+                    installationPublicKeySpki = installationPublicKeySpki,
+                    installationKeyAlgorithm = installationKeyAlgorithm,
+                    manufacturer = Build.MANUFACTURER.take(100),
+                    model = Build.MODEL.take(100),
+                    osVersion = Build.VERSION.RELEASE.take(64),
+                    appVersion = BuildConfig.VERSION_NAME.take(32),
+                ),
             ),
         )
         val installation = DeviceInstallation(
             installationId = result.getString("installationId"),
             serverNonce = result.getString("serverNonce"),
             keyFingerprint = result.getString("keyFingerprint"),
+            installationKeyAlgorithm = installationKeyAlgorithm,
+            protocolVersion = "NON_EXPORTABLE_V1",
         )
         vault.saveDeviceInstallation(installation)
         return installation
@@ -433,14 +522,28 @@ class LighthouseRepository(
         requireNotNull(deviceRequest("GET", "device/context")),
     )
 
-    suspend fun heartbeat() {
-        deviceRequest(
-            "POST",
-            "device/heartbeats",
-            JSONObject()
-                .put("appVersion", BuildConfig.VERSION_NAME)
-                .put("osVersion", Build.VERSION.RELEASE),
-        )
+    suspend fun heartbeat(): DeviceHeartbeatView {
+        val localActiveSessionId = activeCompanionSessionId.get()
+        val body = JSONObject()
+            .put("appVersion", BuildConfig.VERSION_NAME)
+            .put("osVersion", Build.VERSION.RELEASE)
+        localActiveSessionId?.let { body.put("activeCompanionSessionId", it) }
+        val result = requireNotNull(deviceRequest("POST", "device/heartbeats", body))
+        return DeviceHeartbeatView(
+            online = result.optBoolean("online", false),
+            serverTime = result.getString("serverTime"),
+            mediaDirective = DeviceMediaDirective.valueOf(
+                result.optString("mediaDirective", "CONTINUE"),
+            ),
+            activeCompanionSessionId = result.optNullableString(
+                "activeCompanionSessionId",
+            ),
+            reason = result.optNullableString("reason"),
+        ).also { heartbeat ->
+            if (heartbeat.mediaDirective == DeviceMediaDirective.STOP) {
+                localActiveSessionId?.let(::clearActiveCompanionSession)
+            }
+        }
     }
 
     suspend fun startCompanionModel(mode: String): CompanionModelConnection {
@@ -472,7 +575,7 @@ class LighthouseRepository(
                 "MODEL_INPUT_TRANSCRIPTION",
                 false,
             ),
-        )
+        ).also { activeCompanionSessionId.set(companionSessionId) }
     }
 
     suspend fun appendModelEvent(
@@ -510,16 +613,29 @@ class LighthouseRepository(
     }
 
     suspend fun endCompanionSession(companionSessionId: String, reason: String) {
-        deviceRequest(
-            "POST",
-            "device/companion-sessions/$companionSessionId/end",
-            JSONObject().put("reason", reason.take(64)),
-        )
+        try {
+            deviceRequest(
+                "POST",
+                "device/companion-sessions/$companionSessionId/end",
+                JSONObject().put("reason", reason.take(64)),
+            )
+        } finally {
+            clearActiveCompanionSession(companionSessionId)
+        }
+    }
+
+    fun clearActiveCompanionSession(companionSessionId: String) {
+        activeCompanionSessionId.compareAndSet(companionSessionId, null)
+    }
+
+    fun clearActiveCompanionSessionTracking() {
+        activeCompanionSessionId.set(null)
     }
 
     suspend fun requestRemoteSession(
         householdId: String,
         bindingId: String,
+        idempotencyKey: String,
         media: RequestedRemoteMedia = RequestedRemoteMedia(),
     ): RemoteSessionView = parseRemoteSession(
         requireNotNull(
@@ -527,7 +643,7 @@ class LighthouseRepository(
                 "POST",
                 "households/$householdId/remote-sessions",
                 JSONObject().put("bindingId", bindingId).put("media", media.toJson()),
-                mapOf("Idempotency-Key" to UUID.randomUUID().toString()),
+                mapOf("Idempotency-Key" to idempotencyKey),
             ),
         ),
     )
@@ -621,7 +737,7 @@ class LighthouseRepository(
                 )
             } catch (error: LighthouseApiException) {
                 if (error.status == 401) {
-                    vault.saveUserSession(null)
+                    clearUserSession()
                     throw LighthouseApiException(
                         status = 401,
                         code = "SIGNED_OUT",
@@ -631,8 +747,37 @@ class LighthouseRepository(
                 }
                 throw error
             }
-            parseUserSession(result).also(vault::saveUserSession)
+            parseUserSession(result).also(::replaceUserSession)
         }
+
+    private fun replaceUserSession(session: UserSession) {
+        // Refresh-token rotation changes the server session ID. Pending care
+        // commands are account-scoped and must survive that normal rotation.
+        vault.saveUserSession(session)
+    }
+
+    private fun saveUserCareNamespace(user: UserView) {
+        val previous = vault.userCareNamespace()
+        if (previous != null && previous != user.id) {
+            vault.saveCareCommandState(null)
+        }
+        vault.saveUserCareNamespace(user.id)
+    }
+
+    private fun beginExplicitUserSession() {
+        // A deliberate sign-in/register action replaces any previous account
+        // intent. Token refresh never enters this boundary.
+        vault.saveCareCommandState(null)
+        vault.saveUserCareNamespace(null)
+        vault.saveUserSession(null)
+    }
+
+    private fun clearUserSession() {
+        // Logout/terminal refresh failure is an explicit abandonment boundary.
+        vault.saveCareCommandState(null)
+        vault.saveUserCareNamespace(null)
+        vault.saveUserSession(null)
+    }
 
     private suspend fun deviceRequest(
         method: String,
@@ -733,6 +878,25 @@ class LighthouseRepository(
         expiresAt = json.getString("expiresAt"),
     )
 
+    private fun parseActivationApprovalDetails(json: JSONObject): ActivationApprovalDetails {
+        val device = json.getJSONObject("device")
+        return ActivationApprovalDetails(
+            challengeId = json.getString("challengeId"),
+            claimedAt = json.getString("claimedAt"),
+            claimNetworkSource = json.getString("claimNetworkSource"),
+            claimSnapshotToken = json.getString("claimSnapshotToken"),
+            device = ActivationApprovalDevice(
+                platform = device.getString("platform"),
+                installationKeyAlgorithm = device.getString("installationKeyAlgorithm"),
+                manufacturer = device.optNullableString("manufacturer"),
+                model = device.optNullableString("model"),
+                osVersion = device.optNullableString("osVersion"),
+                appVersion = device.optNullableString("appVersion"),
+                keyFingerprintSuffix = device.getString("keyFingerprintSuffix"),
+            ),
+        )
+    }
+
     private fun parseDeviceCredential(json: JSONObject) = DeviceCredential(
         credential = json.getString("credential"),
         credentialId = json.getString("credentialId"),
@@ -788,6 +952,7 @@ class LighthouseRepository(
 
     private fun parseJoinTicket(json: JSONObject) = RemoteJoinTicket(
         sessionId = json.getString("sessionId"),
+        ticketId = json.getString("ticketId"),
         url = json.getString("url"),
         token = json.getString("token"),
         expiresAt = json.getString("expiresAt"),

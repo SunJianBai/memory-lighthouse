@@ -1,4 +1,5 @@
 export type UserClientType = 'WEB' | 'ANDROID';
+export type SessionPurpose = 'USER' | 'ADMIN_WEB';
 
 export interface RequestMetadata {
   ipAddress?: string;
@@ -7,6 +8,14 @@ export interface RequestMetadata {
 
 export interface UserPrincipal {
   kind: 'USER';
+  userId: string;
+  sessionId: string;
+  tokenId: string;
+  status: string;
+}
+
+export interface AdminPrincipal {
+  kind: 'ADMIN';
   userId: string;
   sessionId: string;
   tokenId: string;
@@ -32,6 +41,20 @@ export interface PublicSessionTokenResult extends AccessTokenResult {
   refreshTokenExpiresAt: string;
   sessionId: string;
 }
+
+export interface AdminSessionTokenResult extends AccessTokenResult {
+  purpose: 'ADMIN_WEB';
+  refreshToken: string;
+  refreshTokenExpiresAt: string;
+  sessionId: string;
+}
+
+export type PublicAdminSessionTokenResult = Omit<
+  AdminSessionTokenResult,
+  'refreshToken'
+>;
+
+export type SessionAuthorizationCheck = (userId: string) => Promise<void>;
 
 export interface IdentityView {
   type: string;

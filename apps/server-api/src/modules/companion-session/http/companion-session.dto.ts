@@ -106,6 +106,11 @@ export class EndCompanionSessionDto {
 export class DeviceHeartbeatDto {
   @IsOptional()
   @IsString()
+  @Length(26, 26)
+  activeCompanionSessionId?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(32)
   appVersion?: string;
 

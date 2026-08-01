@@ -1,14 +1,20 @@
-import { defineConfig, env } from "prisma/config";
+import 'dotenv/config';
+import { defineConfig } from 'prisma/config';
 
 // The real server bootstrap may import `dotenv/config` for local development.
 // CI and production inject DATABASE_URL directly into the process environment.
+const cliDatabaseUrl =
+  process.env.DATABASE_URL ??
+  'mysql://generate_only:generate_only@127.0.0.1:3306/openbmb_generate_only';
 
 export default defineConfig({
-  schema: "docs/refactor/database/schema.prisma",
+  // Prisma resolves these paths relative to this config file.
+  schema: 'schema.prisma',
   migrations: {
-    path: "docs/refactor/database/migrations",
+    // The executable migration history has one canonical owner.
+    path: '../../../apps/server-api/prisma/migrations',
   },
   datasource: {
-    url: env("DATABASE_URL"),
+    url: cliDatabaseUrl,
   },
 });

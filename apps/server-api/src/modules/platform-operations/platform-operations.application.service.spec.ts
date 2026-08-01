@@ -28,9 +28,12 @@ const ID = {
 };
 
 const INSPECTION_REASON = '验证模型是否正确使用可信记忆';
+const SOURCE_IP_HASH = Uint8Array.from(
+  Array.from({ length: 32 }, (_, index) => index + 1),
+);
 
 const principal: PlatformPrincipal = {
-  kind: 'USER',
+  kind: 'ADMIN',
   userId: ID.user,
   sessionId: '01K1K000000000000000000008',
   tokenId: '01K1K000000000000000000009',
@@ -229,12 +232,15 @@ function makeService() {
 describe('PlatformOperationsApplicationService content inspection', () => {
   it('decrypts one revision only after grant + consent checks and atomically appends inspection/audit records', async () => {
     const { prisma, encryption, service } = makeService();
-
     const result = await service.inspectMemoryRevision({
       principal,
       grantId: ID.grant,
       memoryId: ID.memory,
-      request: { requestId: 'request-42', userAgent: 'test-agent' },
+      request: {
+        requestId: 'request-42',
+        userAgent: 'test-agent',
+        sourceIpHash: SOURCE_IP_HASH,
+      },
     });
 
     expect(result).toMatchObject({
@@ -282,6 +288,7 @@ describe('PlatformOperationsApplicationService content inspection', () => {
       recipientId: ID.recipient,
       ticketId: ID.grant,
       decision: 'ALLOW',
+      sourceIpHash: SOURCE_IP_HASH,
     });
     const persisted = JSON.stringify({
       inspection: prisma.inspections,
@@ -305,7 +312,10 @@ describe('PlatformOperationsApplicationService content inspection', () => {
           principal,
           grantId: ID.grant,
           memoryId: ID.memory,
-          request: { requestId: 'request-notification-failure' },
+          request: {
+            requestId: 'request-notification-failure',
+            sourceIpHash: SOURCE_IP_HASH,
+          },
         }),
       ).rejects.toThrow(`${failurePoint}-write-failed`);
 
@@ -322,7 +332,7 @@ describe('PlatformOperationsApplicationService content inspection', () => {
       principal,
       grantId: ID.grant,
       memoryId: ID.memory,
-      request: { requestId: 'request-chain' },
+      request: { requestId: 'request-chain', sourceIpHash: SOURCE_IP_HASH },
     };
 
     await service.inspectMemoryRevision(command);
@@ -346,7 +356,10 @@ describe('PlatformOperationsApplicationService content inspection', () => {
         principal,
         grantId: ID.grant,
         memoryId: ID.memory,
-        request: { requestId: 'request-denied' },
+        request: {
+          requestId: 'request-denied',
+          sourceIpHash: SOURCE_IP_HASH,
+        },
       }),
     ).rejects.toBeInstanceOf(ContentInspectionConsentRequiredException);
     expect(encryption.openFields).not.toHaveBeenCalled();
@@ -363,7 +376,10 @@ describe('PlatformOperationsApplicationService content inspection', () => {
         principal,
         grantId: ID.grant,
         memoryId: ID.memory,
-        request: { requestId: 'request-wrong-category' },
+        request: {
+          requestId: 'request-wrong-category',
+          sourceIpHash: SOURCE_IP_HASH,
+        },
       }),
     ).rejects.toBeInstanceOf(InspectionGrantScopeDeniedException);
     expect(encryption.openFields).not.toHaveBeenCalled();
@@ -381,7 +397,10 @@ describe('PlatformOperationsApplicationService content inspection', () => {
       service.approveInspectionGrant({
         principal,
         grantId: ID.grant,
-        request: { requestId: 'request-self-approval' },
+        request: {
+          requestId: 'request-self-approval',
+          sourceIpHash: SOURCE_IP_HASH,
+        },
       }),
     ).rejects.toBeInstanceOf(InspectionGrantSelfApprovalException);
     expect(prisma.inspectionGrant.update).not.toHaveBeenCalled();
@@ -403,7 +422,7 @@ describe('PlatformOperationsApplicationService content inspection', () => {
     const result = await service.approveInspectionGrant({
       principal: approver,
       grantId: ID.grant,
-      request: { requestId: 'request-approved' },
+      request: { requestId: 'request-approved', sourceIpHash: SOURCE_IP_HASH },
     });
 
     expect(result).toMatchObject({
@@ -428,7 +447,10 @@ describe('PlatformOperationsApplicationService content inspection', () => {
       principal,
       grantId: ID.grant,
       utteranceId: '01K1K000000000000000000010',
-      request: { requestId: 'request-utterance' },
+      request: {
+        requestId: 'request-utterance',
+        sourceIpHash: SOURCE_IP_HASH,
+      },
     });
 
     expect(result).toMatchObject({

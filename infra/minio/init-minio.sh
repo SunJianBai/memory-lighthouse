@@ -32,6 +32,8 @@ mc ready local
 mc mb --ignore-existing "local/$MINIO_BUCKET"
 mc version enable "local/$MINIO_BUCKET"
 mc anonymous set none "local/$MINIO_BUCKET"
+mc encrypt set sse-s3 "local/$MINIO_BUCKET"
+mc encrypt info "local/$MINIO_BUCKET" >/dev/null
 
 cat > /tmp/openbmb-policy.json <<EOF
 {
@@ -42,6 +44,7 @@ cat > /tmp/openbmb-policy.json <<EOF
       "Action": [
         "s3:GetBucketLocation",
         "s3:ListBucket",
+        "s3:ListBucketVersions",
         "s3:ListBucketMultipartUploads"
       ],
       "Resource": ["arn:aws:s3:::$MINIO_BUCKET"]
@@ -52,6 +55,7 @@ cat > /tmp/openbmb-policy.json <<EOF
         "s3:GetObject",
         "s3:PutObject",
         "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
         "s3:AbortMultipartUpload",
         "s3:ListMultipartUploadParts"
       ],
@@ -78,4 +82,4 @@ if ! mc ls "app/$MINIO_BUCKET" >/dev/null 2>&1; then
   exit 65
 fi
 
-echo "MinIO bucket and least-privilege application identity are ready"
+echo "MinIO encrypted bucket and least-privilege application identity are ready"

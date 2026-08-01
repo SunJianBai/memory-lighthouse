@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../../infrastructure/database/prisma.module';
 import { MailModule } from '../../infrastructure/mail';
 import { IdentityModule } from '../identity/identity.module';
+import { RealtimeMediaSecurityModule } from '../realtime-communication/realtime-media-security.module';
 import { HouseholdInvitationMailAdapter } from './adapters/household-invitation-mail.adapter';
 import { createHouseholdSecurityConfig } from './config/household-security.config';
 import { InvitationTokenService } from './crypto/invitation-token.service';
@@ -20,7 +21,12 @@ import { HouseholdsController } from './http/households.controller';
 import { SystemHouseholdClock } from './ports/household-clock.port';
 
 @Module({
-  imports: [PrismaModule, MailModule, IdentityModule],
+  imports: [
+    PrismaModule,
+    MailModule,
+    IdentityModule,
+    RealtimeMediaSecurityModule,
+  ],
   controllers: [
     HouseholdsController,
     HouseholdInvitationsController,

@@ -43,7 +43,20 @@ export const REMOTE_POLICY_MODE = {
 export const REMOTE_MEDIA_LEASE_TTL_SECONDS = 90;
 export const REMOTE_RING_TIMEOUT_SECONDS = 60;
 export const REMOTE_CONNECT_TIMEOUT_SECONDS = 180;
-// Self-hosted LiveKit join tokens cannot be centrally revoked before a
-// participant exists. Keep the replay window to the lower end of the
-// documented 1-2 minute range and revoke joined identities on termination.
+// Room creation runs while MySQL holds the remote-session row lock. Keep the
+// provider deadline strictly below the explicit transaction timeout so a slow
+// CreateRoom call cannot outlive that lock and resurrect a terminal room.
+export const LIVEKIT_RPC_TIMEOUT_SECONDS = 3;
+export const REMOTE_ROOM_PROVISIONING_TRANSACTION_TIMEOUT_MS = 8_000;
+export const REMOTE_TERMINATION_TRANSACTION_TIMEOUT_MS = 15_000;
+export const REMOTE_ROOM_PROVISIONING_STALE_SECONDS = 15;
+// Keep initial admission short. Self-hosted LiveKit cannot revoke a refreshed
+// participant token; explicit room creation, disabled auto-create and terminal
+// room deletion prevent such a token from recreating an ended session.
 export const REMOTE_JOIN_TICKET_TTL_SECONDS = 60;
+// A CreateRoom request that timed out client-side may still finish at the
+// provider. Re-delete conservatively through the normal empty-room/token
+// window. Core admission safety does not assume this is a provider completion
+// bound; the session-wide provisioning owner cannot issue a token on timeout.
+export const REMOTE_ROOM_PROVISIONING_FENCE_SECONDS =
+  REMOTE_JOIN_TICKET_TTL_SECONDS + LIVEKIT_RPC_TIMEOUT_SECONDS;

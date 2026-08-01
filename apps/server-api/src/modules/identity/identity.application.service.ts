@@ -12,6 +12,7 @@ import { AccessTokenService } from './crypto/access-token.service';
 import { OpaqueTokenService } from './crypto/opaque-token.service';
 import {
   ACTIVE_USER_STATUSES,
+  ADMIN_SESSION_PURPOSE,
   EMAIL_IDENTITY,
   EMAIL_VERIFICATION_PURPOSE,
   IDENTITY_CLOCK,
@@ -20,6 +21,7 @@ import {
   PASSWORD_HASHER_PORT,
   PASSWORD_RESET_PURPOSE,
   USERNAME_IDENTITY,
+  USER_SESSION_PURPOSE,
 } from './identity.constants';
 import {
   InvalidAccessTokenException,
@@ -40,8 +42,12 @@ import type { NotificationPort } from './ports/notification.port';
 import type { PasswordHasherPort } from './ports/password-hasher.port';
 import type {
   AcceptedResult,
+  AdminPrincipal,
+  AdminSessionTokenResult,
   RequestMetadata,
+  SessionAuthorizationCheck,
   SessionTokenResult,
+  SessionPurpose,
   SessionView,
   UserClientType,
   UserPrincipal,
@@ -67,11 +73,27 @@ export interface RefreshSessionCommand extends RequestMetadata {
   clientType: UserClientType;
 }
 
+export interface AuthenticateAdminCommand extends RequestMetadata {
+  identifier: string;
+  password: string;
+}
+
+export interface RefreshAdminSessionCommand extends RequestMetadata {
+  refreshToken: string;
+}
+
 interface CreatedSession {
   id: string;
   userId: string;
   clientType: string;
+  purpose: string;
+  tokenFamilyId: string;
   expiresAt: Date;
+}
+
+interface RotatedSession {
+  session: CreatedSession;
+  rawRefreshToken: string;
 }
 
 interface IssuedOneTimeToken {
@@ -218,6 +240,7 @@ export class IdentityApplicationService {
           transaction,
           userId,
           command.clientType,
+          USER_SESSION_PURPOSE,
           command,
           now,
         );
@@ -247,43 +270,18 @@ export class IdentityApplicationService {
   async authenticate(
     command: AuthenticateCommand,
   ): Promise<SessionTokenResult> {
-    const normalized = normalizeLoginIdentifier(command.identifier);
-    const identity = await this.prisma.loginIdentity.findUnique({
-      where: {
-        type_normalizedValue: {
-          type: normalized.type,
-          normalizedValue: normalized.normalizedValue,
-        },
-      },
-      include: {
-        user: {
-          include: { passwordCredential: true },
-        },
-      },
-    });
-
-    const passwordHash =
-      identity?.user.passwordCredential?.passwordHash ?? null;
-    const passwordValid = await this.passwordHasher.verify(
+    const userId = await this.authenticateCredentials(
+      command.identifier,
       command.password,
-      passwordHash,
     );
-
-    if (
-      !identity ||
-      !passwordValid ||
-      identity.user.deletedAt ||
-      !this.isLoginAllowed(identity.user.status)
-    ) {
-      throw new InvalidCredentialsException();
-    }
 
     const now = this.clock.now();
     const created = await this.prisma.$transaction((transaction) =>
       this.createSession(
         transaction,
-        identity.userId,
+        userId,
         command.clientType,
+        USER_SESSION_PURPOSE,
         command,
         now,
       ),
@@ -292,102 +290,116 @@ export class IdentityApplicationService {
     return this.toSessionToken(created.session, created.rawRefreshToken);
   }
 
-  async refreshSession(
-    command: RefreshSessionCommand,
-  ): Promise<SessionTokenResult> {
-    const tokenHash = this.opaqueTokens.hashRefreshToken(command.refreshToken);
-    const now = this.clock.now();
-    const previous = await this.prisma.userSession.findUnique({
-      where: { refreshTokenHash: tokenHash },
-      include: { user: true },
-    });
-
-    if (!previous) {
-      throw new InvalidRefreshTokenException();
-    }
-
-    if (
-      previous.clientType !== command.clientType ||
-      previous.revokedAt ||
-      previous.rotatedAt ||
-      previous.expiresAt <= now ||
-      previous.user.deletedAt ||
-      !this.isLoginAllowed(previous.user.status)
-    ) {
-      await this.revokeRefreshFamily(previous.tokenFamilyId, now);
-      throw new InvalidRefreshTokenException();
-    }
-
-    const rawRefreshToken = this.opaqueTokens.generate();
-    const replacementId = newUlid(now.getTime());
-    const replacementExpiresAt = new Date(
-      now.getTime() + this.config.refreshTokenTtlSeconds * 1000,
+  async authenticateAdmin(
+    command: AuthenticateAdminCommand,
+    authorize: SessionAuthorizationCheck,
+  ): Promise<AdminSessionTokenResult> {
+    const userId = await this.authenticateCredentials(
+      command.identifier,
+      command.password,
     );
 
-    let replacement: CreatedSession;
+    await authorize(userId);
+    const now = this.clock.now();
+    const created = await this.prisma.$transaction((transaction) =>
+      this.createSession(
+        transaction,
+        userId,
+        'ADMIN_WEB',
+        ADMIN_SESSION_PURPOSE,
+        command,
+        now,
+      ),
+    );
+    const result = this.toAdminSessionToken(
+      created.session,
+      created.rawRefreshToken,
+    );
+
     try {
-      replacement = await this.prisma.$transaction(async (transaction) => {
-        const claimed = await transaction.userSession.updateMany({
-          where: {
-            id: previous.id,
-            revokedAt: null,
-            rotatedAt: null,
-            expiresAt: { gt: now },
-          },
-          data: {
-            rotatedAt: now,
-            lastUsedAt: now,
-            replacedBySessionId: replacementId,
-          },
-        });
-
-        if (claimed.count !== 1) {
-          throw new RefreshReplayDetected(previous.tokenFamilyId);
-        }
-
-        return transaction.userSession.create({
-          data: {
-            id: replacementId,
-            userId: previous.userId,
-            deviceId: previous.deviceId,
-            refreshTokenHash:
-              this.opaqueTokens.hashRefreshToken(rawRefreshToken),
-            tokenFamilyId: previous.tokenFamilyId,
-            clientType: previous.clientType,
-            issuedAt: now,
-            expiresAt: replacementExpiresAt,
-            ipHash: this.opaqueTokens.hashIpAddress(command.ipAddress),
-            userAgent: this.cleanUserAgent(command.userAgent),
-          },
-        });
-      });
+      await authorize(userId);
     } catch (error) {
-      if (error instanceof RefreshReplayDetected) {
-        await this.revokeRefreshFamily(error.familyId, now);
-        throw new InvalidRefreshTokenException();
-      }
+      await this.revokeAdminSession(userId, created.session.id);
       throw error;
     }
 
-    return this.toSessionToken(replacement, rawRefreshToken);
+    return result;
+  }
+
+  async refreshSession(
+    command: RefreshSessionCommand,
+  ): Promise<SessionTokenResult> {
+    const rotated = await this.rotateSession(
+      command.refreshToken,
+      command.clientType,
+      USER_SESSION_PURPOSE,
+      command,
+    );
+    return this.toSessionToken(rotated.session, rotated.rawRefreshToken);
+  }
+
+  async refreshAdminSession(
+    command: RefreshAdminSessionCommand,
+    authorize: SessionAuthorizationCheck,
+  ): Promise<AdminSessionTokenResult> {
+    const rotated = await this.rotateSession(
+      command.refreshToken,
+      'ADMIN_WEB',
+      ADMIN_SESSION_PURPOSE,
+      command,
+      authorize,
+    );
+    const result = this.toAdminSessionToken(
+      rotated.session,
+      rotated.rawRefreshToken,
+    );
+
+    try {
+      await authorize(rotated.session.userId);
+    } catch {
+      await this.revokeRefreshFamily(
+        rotated.session.tokenFamilyId,
+        this.clock.now(),
+      );
+      throw new InvalidRefreshTokenException();
+    }
+
+    return result;
   }
 
   async revokeSession(userId: string, sessionId: string): Promise<void> {
     await this.prisma.userSession.updateMany({
-      where: { id: sessionId, userId, revokedAt: null },
+      where: {
+        id: sessionId,
+        userId,
+        purpose: USER_SESSION_PURPOSE,
+        revokedAt: null,
+      },
       data: { revokedAt: this.clock.now() },
     });
   }
 
   async revokeAllSessions(userId: string): Promise<void> {
     await this.prisma.userSession.updateMany({
-      where: { userId, revokedAt: null },
+      where: { userId, purpose: USER_SESSION_PURPOSE, revokedAt: null },
+      data: { revokedAt: this.clock.now() },
+    });
+  }
+
+  async revokeAdminSession(userId: string, sessionId: string): Promise<void> {
+    await this.prisma.userSession.updateMany({
+      where: {
+        id: sessionId,
+        userId,
+        purpose: ADMIN_SESSION_PURPOSE,
+        revokedAt: null,
+      },
       data: { revokedAt: this.clock.now() },
     });
   }
 
   async resolvePrincipal(accessToken: string): Promise<UserPrincipal> {
-    const claims = this.accessTokens.verify(accessToken);
+    const claims = this.accessTokens.verifyUser(accessToken);
     if (!claims) {
       throw new InvalidAccessTokenException();
     }
@@ -401,6 +413,7 @@ export class IdentityApplicationService {
     if (
       !session ||
       session.userId !== claims.userId ||
+      session.purpose !== USER_SESSION_PURPOSE ||
       session.revokedAt ||
       session.expiresAt <= now ||
       session.user.deletedAt ||
@@ -418,7 +431,40 @@ export class IdentityApplicationService {
     };
   }
 
-  async getMe(principal: UserPrincipal): Promise<UserView> {
+  async resolveAdminPrincipal(accessToken: string): Promise<AdminPrincipal> {
+    const claims = this.accessTokens.verifyAdmin(accessToken);
+    if (!claims) {
+      throw new InvalidAccessTokenException();
+    }
+
+    const session = await this.prisma.userSession.findUnique({
+      where: { id: claims.sessionId },
+      include: { user: true },
+    });
+    const now = this.clock.now();
+
+    if (
+      !session ||
+      session.userId !== claims.userId ||
+      session.purpose !== ADMIN_SESSION_PURPOSE ||
+      session.revokedAt ||
+      session.expiresAt <= now ||
+      session.user.deletedAt ||
+      !this.isLoginAllowed(session.user.status)
+    ) {
+      throw new InvalidAccessTokenException();
+    }
+
+    return {
+      kind: 'ADMIN',
+      userId: session.userId,
+      sessionId: session.id,
+      tokenId: claims.tokenId,
+      status: session.user.status,
+    };
+  }
+
+  async getMe(principal: { userId: string }): Promise<UserView> {
     const user = await this.prisma.user.findUnique({
       where: { id: principal.userId },
       include: {
@@ -437,7 +483,7 @@ export class IdentityApplicationService {
 
   async listSessions(principal: UserPrincipal): Promise<SessionView[]> {
     const sessions = await this.prisma.userSession.findMany({
-      where: { userId: principal.userId },
+      where: { userId: principal.userId, purpose: USER_SESSION_PURPOSE },
       orderBy: { issuedAt: 'desc' },
       take: 100,
     });
@@ -705,10 +751,173 @@ export class IdentityApplicationService {
     return { completed: true };
   }
 
+  async reauthenticateUser(userId: string, password: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { passwordCredential: true },
+    });
+    const passwordHash = user?.passwordCredential?.passwordHash ?? null;
+    const passwordValid = await this.passwordHasher.verify(
+      password,
+      passwordHash,
+    );
+    if (
+      !user ||
+      !passwordValid ||
+      user.deletedAt ||
+      !this.isLoginAllowed(user.status)
+    ) {
+      throw new InvalidCredentialsException();
+    }
+  }
+
+  private async authenticateCredentials(
+    identifier: string,
+    password: string,
+  ): Promise<string> {
+    const normalized = normalizeLoginIdentifier(identifier);
+    const identity = await this.prisma.loginIdentity.findUnique({
+      where: {
+        type_normalizedValue: {
+          type: normalized.type,
+          normalizedValue: normalized.normalizedValue,
+        },
+      },
+      include: {
+        user: {
+          include: { passwordCredential: true },
+        },
+      },
+    });
+
+    const passwordHash =
+      identity?.user.passwordCredential?.passwordHash ?? null;
+    const passwordValid = await this.passwordHasher.verify(
+      password,
+      passwordHash,
+    );
+
+    if (
+      !identity ||
+      !passwordValid ||
+      identity.user.deletedAt ||
+      !this.isLoginAllowed(identity.user.status)
+    ) {
+      throw new InvalidCredentialsException();
+    }
+
+    return identity.userId;
+  }
+
+  private async rotateSession(
+    refreshToken: string,
+    expectedClientType: UserClientType | 'ADMIN_WEB',
+    expectedPurpose: SessionPurpose,
+    metadata: RequestMetadata,
+    authorize?: SessionAuthorizationCheck,
+  ): Promise<RotatedSession> {
+    const tokenHash = this.opaqueTokens.hashRefreshToken(refreshToken);
+    const now = this.clock.now();
+    const previous = await this.prisma.userSession.findUnique({
+      where: { refreshTokenHash: tokenHash },
+      include: { user: true },
+    });
+
+    if (!previous) {
+      throw new InvalidRefreshTokenException();
+    }
+
+    // A token presented at the wrong authentication boundary is rejected
+    // without mutating the other boundary's session family.
+    if (
+      previous.clientType !== expectedClientType ||
+      previous.purpose !== expectedPurpose
+    ) {
+      throw new InvalidRefreshTokenException();
+    }
+
+    if (
+      previous.revokedAt ||
+      previous.rotatedAt ||
+      previous.expiresAt <= now ||
+      previous.user.deletedAt ||
+      !this.isLoginAllowed(previous.user.status)
+    ) {
+      await this.revokeRefreshFamily(previous.tokenFamilyId, now);
+      throw new InvalidRefreshTokenException();
+    }
+
+    if (authorize) {
+      try {
+        await authorize(previous.userId);
+      } catch {
+        await this.revokeRefreshFamily(previous.tokenFamilyId, now);
+        throw new InvalidRefreshTokenException();
+      }
+    }
+
+    const rawRefreshToken = this.opaqueTokens.generate();
+    const replacementId = newUlid(now.getTime());
+    const replacementExpiresAt = new Date(
+      now.getTime() + this.config.refreshTokenTtlSeconds * 1000,
+    );
+
+    let replacement: CreatedSession;
+    try {
+      replacement = await this.prisma.$transaction(async (transaction) => {
+        const claimed = await transaction.userSession.updateMany({
+          where: {
+            id: previous.id,
+            clientType: expectedClientType,
+            purpose: expectedPurpose,
+            revokedAt: null,
+            rotatedAt: null,
+            expiresAt: { gt: now },
+          },
+          data: {
+            rotatedAt: now,
+            lastUsedAt: now,
+            replacedBySessionId: replacementId,
+          },
+        });
+
+        if (claimed.count !== 1) {
+          throw new RefreshReplayDetected(previous.tokenFamilyId);
+        }
+
+        return transaction.userSession.create({
+          data: {
+            id: replacementId,
+            userId: previous.userId,
+            deviceId: previous.deviceId,
+            refreshTokenHash:
+              this.opaqueTokens.hashRefreshToken(rawRefreshToken),
+            tokenFamilyId: previous.tokenFamilyId,
+            clientType: previous.clientType,
+            purpose: previous.purpose,
+            issuedAt: now,
+            expiresAt: replacementExpiresAt,
+            ipHash: this.opaqueTokens.hashIpAddress(metadata.ipAddress),
+            userAgent: this.cleanUserAgent(metadata.userAgent),
+          },
+        });
+      });
+    } catch (error) {
+      if (error instanceof RefreshReplayDetected) {
+        await this.revokeRefreshFamily(error.familyId, now);
+        throw new InvalidRefreshTokenException();
+      }
+      throw error;
+    }
+
+    return { session: replacement, rawRefreshToken };
+  }
+
   private async createSession(
     transaction: Prisma.TransactionClient,
     userId: string,
-    clientType: UserClientType,
+    clientType: UserClientType | 'ADMIN_WEB',
+    purpose: SessionPurpose,
     metadata: RequestMetadata,
     now: Date,
   ): Promise<{ session: CreatedSession; rawRefreshToken: string }> {
@@ -720,6 +929,7 @@ export class IdentityApplicationService {
         refreshTokenHash: this.opaqueTokens.hashRefreshToken(rawRefreshToken),
         tokenFamilyId: newUlid(now.getTime()),
         clientType,
+        purpose,
         issuedAt: now,
         expiresAt: new Date(
           now.getTime() + this.config.refreshTokenTtlSeconds * 1000,
@@ -777,7 +987,7 @@ export class IdentityApplicationService {
     session: CreatedSession,
     rawRefreshToken: string,
   ): SessionTokenResult {
-    const access = this.accessTokens.issue(session.userId, session.id);
+    const access = this.accessTokens.issueUser(session.userId, session.id);
 
     return {
       accessToken: access.token,
@@ -787,6 +997,23 @@ export class IdentityApplicationService {
       refreshTokenExpiresAt: session.expiresAt.toISOString(),
       sessionId: session.id,
       clientType: session.clientType as UserClientType,
+    };
+  }
+
+  private toAdminSessionToken(
+    session: CreatedSession,
+    rawRefreshToken: string,
+  ): AdminSessionTokenResult {
+    const access = this.accessTokens.issueAdmin(session.userId, session.id);
+
+    return {
+      accessToken: access.token,
+      accessTokenExpiresAt: access.expiresAt.toISOString(),
+      expiresInSeconds: this.config.adminAccessTokenTtlSeconds,
+      refreshToken: rawRefreshToken,
+      refreshTokenExpiresAt: session.expiresAt.toISOString(),
+      sessionId: session.id,
+      purpose: ADMIN_SESSION_PURPOSE,
     };
   }
 

@@ -8,14 +8,19 @@ import {
   CHALLENGE_STATUS,
   DEVICE_ACTIVATION_CLOCK,
   DEVICE_ACTIVATION_SECURITY_CONFIG,
+  DEVICE_KEY_PROTECTION,
   DEVICE_STATUS,
+  INSTALLATION_KEY_ALGORITHM,
 } from './device-activation.constants';
 import type { DeviceActivationSecurityConfig } from './device-activation.config';
 import {
   ActivationApprovalRevokedException,
+  ActivationApprovalSnapshotChangedException,
   ActivationAlreadyConsumedException,
   ActivationAttemptsExceededException,
   ActivationExpiredException,
+  ActivationIdempotencyConflictException,
+  ActivationIdempotencyKeyException,
   ActivationNotFoundException,
   ActivationProofInvalidException,
   ActivationStateConflictException,
@@ -25,6 +30,8 @@ import {
   DeviceRevokedException,
   InvalidDeviceCredentialException,
   RecipientActivationDeniedException,
+  UnsupportedDeviceKeyProtectionException,
+  UnsupportedInstallationKeyAlgorithmException,
   VersionConflictException,
 } from './device-activation.errors';
 import { DeviceAccessTokenService } from './device-access-token.service';
@@ -35,6 +42,7 @@ import {
   DeviceActivationCrypto,
 } from './device-activation.crypto';
 import type {
+  ActivationApprovalDetails,
   ActivationPresentation,
   ActivationProofType,
   ClockPort,
@@ -42,13 +50,23 @@ import type {
   DeviceCredentialPresentation,
   DeviceInstallationView,
   DevicePrincipal,
+  InstallationKeyAlgorithm,
   PublicActivationStatus,
 } from './device-activation.types';
+import {
+  classifyClaimNetworkSource,
+  normalizeClaimNetworkSource,
+} from './device-network-source';
+import { RemoteMediaSecurityCoordinator } from '../realtime-communication/remote-media-security.coordinator';
 
 type DatabaseClient = PrismaService | Prisma.TransactionClient;
 
+const SERIALIZABLE_RETRY_LIMIT = 3;
+
 export interface RegisterDeviceInstallationCommand {
   installationPublicKeySpki: string;
+  installationKeyAlgorithm: InstallationKeyAlgorithm;
+  keyProtection: 'NON_EXPORTABLE_V1';
   platform: 'ANDROID' | 'WEB';
   manufacturer?: string;
   model?: string;
@@ -69,14 +87,19 @@ export interface ClaimActivationChallengeCommand {
   proofType: ActivationProofType;
   proof: string;
   signature: string;
+  ipAddress?: string;
 }
 
 export interface ApproveActivationCommand {
   userId: string;
   challengeId: string;
+  idempotencyKey: string;
+  claimSnapshotToken: string;
 }
 
-export interface CancelActivationCommand extends ApproveActivationCommand {
+export interface CancelActivationCommand {
+  userId: string;
+  challengeId: string;
   reasonCode?: string;
 }
 
@@ -108,7 +131,9 @@ interface ChallengeRecord {
   approvedByMemberId: string | null;
   expiresAt: Date;
   claimedAt: Date | null;
+  claimNetworkSource: string | null;
   approvedAt: Date | null;
+  approvalIdempotencyKey: string | null;
   consumedAt: Date | null;
   attemptCount: number;
   maxAttempts: number;
@@ -137,6 +162,7 @@ interface DeviceCredentialWithBinding {
       id: string;
       status: string;
       installationPublicKey: Uint8Array;
+      installationKeyAlgorithm: string;
     };
   };
 }
@@ -150,6 +176,8 @@ type TransitionError =
   | 'STATE_CONFLICT'
   | 'BINDING_CONFLICT'
   | 'APPROVAL_REVOKED'
+  | 'APPROVAL_SNAPSHOT_CHANGED'
+  | 'IDEMPOTENCY_CONFLICT'
   | 'VERSION_CONFLICT';
 
 @Injectable()
@@ -161,16 +189,30 @@ export class DeviceActivationApplicationService {
     @Inject(DEVICE_ACTIVATION_CLOCK) private readonly clock: ClockPort,
     @Inject(DEVICE_ACTIVATION_SECURITY_CONFIG)
     private readonly config: DeviceActivationSecurityConfig,
+    private readonly mediaSecurity: RemoteMediaSecurityCoordinator,
   ) {}
 
   async registerInstallation(
     command: RegisterDeviceInstallationCommand,
   ): Promise<DeviceInstallationView> {
-    const parsedKey = this.crypto.parseEd25519Spki(
+    if (command.keyProtection !== DEVICE_KEY_PROTECTION.nonExportableV1) {
+      throw new UnsupportedDeviceKeyProtectionException();
+    }
+    if (
+      command.installationKeyAlgorithm !== INSTALLATION_KEY_ALGORITHM.ed25519 &&
+      command.installationKeyAlgorithm !==
+        INSTALLATION_KEY_ALGORITHM.ecdsaP256Sha256
+    ) {
+      throw new UnsupportedInstallationKeyAlgorithmException();
+    }
+    const parsedKey = this.crypto.parseInstallationSpki(
       command.installationPublicKeySpki,
+      command.installationKeyAlgorithm,
     );
     const metadata = {
       platform: command.platform,
+      installationKeyAlgorithm: command.installationKeyAlgorithm,
+      keyProtection: command.keyProtection,
       manufacturer: command.manufacturer?.trim() || null,
       model: command.model?.trim() || null,
       osVersion: command.osVersion?.trim() || null,
@@ -325,6 +367,7 @@ export class DeviceActivationApplicationService {
     command: ClaimActivationChallengeCommand,
   ): Promise<{ claimed: true; challengeId: string }> {
     const now = this.clock.now();
+    const claimNetworkSource = classifyClaimNetworkSource(command.ipAddress);
     const result = await this.prisma.$transaction(async (transaction) => {
       const challenge = (await transaction.deviceActivationChallenge.findUnique(
         {
@@ -348,7 +391,16 @@ export class DeviceActivationApplicationService {
       }
 
       const device = await transaction.device.findUnique({
-        where: { id: command.installationId },
+        where: {
+          id: command.installationId,
+          keyProtection: DEVICE_KEY_PROTECTION.nonExportableV1,
+          installationKeyAlgorithm: {
+            in: [
+              INSTALLATION_KEY_ALGORITHM.ed25519,
+              INSTALLATION_KEY_ALGORITHM.ecdsaP256Sha256,
+            ],
+          },
+        },
       });
       const normalizedProof = this.crypto.normalizeProof(
         command.proofType,
@@ -387,7 +439,8 @@ export class DeviceActivationApplicationService {
         });
         installationProofValid =
           nonceMatches &&
-          this.crypto.verifyEd25519(
+          this.crypto.verifyInstallationSignature(
+            device.installationKeyAlgorithm,
             device.installationPublicKey,
             message,
             command.signature,
@@ -429,6 +482,7 @@ export class DeviceActivationApplicationService {
         },
         data: {
           pendingDeviceId: device.id,
+          claimNetworkSource,
           status: CHALLENGE_STATUS.claimed,
           claimedAt: now,
           version: { increment: 1 },
@@ -456,20 +510,18 @@ export class DeviceActivationApplicationService {
     return { claimed: true, challengeId: result.challengeId };
   }
 
-  async approveActivation(
-    command: ApproveActivationCommand,
-  ): Promise<{ approved: true; approvedAt: string }> {
+  async getActivationApprovalDetails(command: {
+    userId: string;
+    challengeId: string;
+  }): Promise<ActivationApprovalDetails> {
     const now = this.clock.now();
     const result = await this.prisma.$transaction(async (transaction) => {
       const challenge = (await transaction.deviceActivationChallenge.findUnique(
-        {
-          where: { id: command.challengeId },
-        },
+        { where: { id: command.challengeId } },
       )) as ChallengeRecord | null;
-      if (!challenge) {
-        return { error: 'NOT_FOUND' as const };
-      }
-      const memberId = await this.requireActivationAuthority(
+      if (!challenge) return { error: 'NOT_FOUND' as const };
+
+      await this.requireActivationAuthority(
         transaction,
         command.userId,
         challenge.householdId,
@@ -480,42 +532,212 @@ export class DeviceActivationApplicationService {
         challenge,
         now,
       );
-      if (terminalError) {
-        return { error: terminalError };
-      }
+      if (terminalError) return { error: terminalError };
       if (
         challenge.status !== CHALLENGE_STATUS.claimed ||
-        !challenge.pendingDeviceId
+        !challenge.pendingDeviceId ||
+        !challenge.claimedAt
       ) {
         return { error: 'STATE_CONFLICT' as const };
       }
-      const update = await transaction.deviceActivationChallenge.updateMany({
+
+      const device = await transaction.device.findUnique({
         where: {
-          id: challenge.id,
-          version: challenge.version,
-          status: CHALLENGE_STATUS.claimed,
-        },
-        data: {
-          status: CHALLENGE_STATUS.approved,
-          approvedByMemberId: memberId,
-          approvedAt: now,
-          version: { increment: 1 },
+          id: challenge.pendingDeviceId,
+          keyProtection: DEVICE_KEY_PROTECTION.nonExportableV1,
+          installationKeyAlgorithm: {
+            in: [
+              INSTALLATION_KEY_ALGORITHM.ed25519,
+              INSTALLATION_KEY_ALGORITHM.ecdsaP256Sha256,
+            ],
+          },
         },
       });
-      if (update.count !== 1) {
+      if (!device || device.status === DEVICE_STATUS.revoked) {
         return { error: 'STATE_CONFLICT' as const };
       }
-      await this.appendOutbox(transaction, {
-        aggregateId: challenge.id,
-        eventType: 'activation.approved',
-        occurredAt: now,
-        payload: {
-          challengeId: challenge.id,
-          deviceId: challenge.pendingDeviceId,
+      const claimNetworkSource = normalizeClaimNetworkSource(
+        challenge.claimNetworkSource,
+      );
+      const claimSnapshotToken = this.crypto.approvalSnapshotToken({
+        challengeId: challenge.id,
+        challengeVersion: challenge.version,
+        pendingDeviceId: challenge.pendingDeviceId,
+        deviceKeyFingerprint: device.installationKeyFingerprint,
+        deviceMetadata: {
+          platform: device.platform,
+          installationKeyAlgorithm: device.installationKeyAlgorithm,
+          manufacturer: device.manufacturer,
+          model: device.model,
+          osVersion: device.osVersion,
+          appVersion: device.appVersion,
         },
+        claimedAt: challenge.claimedAt,
+        claimNetworkSource,
       });
-      return { approvedAt: now };
+      const encodedFingerprint = Buffer.from(
+        device.installationKeyFingerprint,
+      ).toString('base64url');
+      return {
+        details: {
+          challengeId: challenge.id,
+          status: 'CLAIMED' as const,
+          expiresAt: challenge.expiresAt.toISOString(),
+          claimedAt: challenge.claimedAt.toISOString(),
+          claimNetworkSource,
+          claimSnapshotToken,
+          device: {
+            platform: device.platform,
+            installationKeyAlgorithm:
+              device.installationKeyAlgorithm as InstallationKeyAlgorithm,
+            manufacturer: device.manufacturer,
+            model: device.model,
+            osVersion: device.osVersion,
+            appVersion: device.appVersion,
+            keyFingerprintSuffix: encodedFingerprint.slice(-8),
+          },
+        },
+      };
     });
+
+    if ('error' in result) this.throwTransitionError(result.error!);
+    return result.details;
+  }
+
+  async approveActivation(
+    command: ApproveActivationCommand,
+  ): Promise<{ approved: true; approvedAt: string }> {
+    const idempotencyKey = command.idempotencyKey.trim();
+    if (
+      idempotencyKey.length < 8 ||
+      idempotencyKey.length > 100 ||
+      /[\r\n]/.test(idempotencyKey)
+    ) {
+      throw new ActivationIdempotencyKeyException();
+    }
+    const now = this.clock.now();
+    let result;
+    try {
+      result = await this.prisma.$transaction(async (transaction) => {
+        const challenge =
+          (await transaction.deviceActivationChallenge.findUnique({
+            where: { id: command.challengeId },
+          })) as ChallengeRecord | null;
+        if (!challenge) {
+          return { error: 'NOT_FOUND' as const };
+        }
+        const memberId = await this.requireActivationAuthority(
+          transaction,
+          command.userId,
+          challenge.householdId,
+          challenge.recipientId,
+        );
+        if (
+          challenge.approvalIdempotencyKey === idempotencyKey &&
+          challenge.approvedAt &&
+          (challenge.status === CHALLENGE_STATUS.approved ||
+            challenge.status === CHALLENGE_STATUS.consumed)
+        ) {
+          return { approvedAt: challenge.approvedAt };
+        }
+        const idempotencyReplay =
+          await transaction.deviceActivationChallenge.findUnique({
+            where: { approvalIdempotencyKey: idempotencyKey },
+            select: { id: true },
+          });
+        if (idempotencyReplay) {
+          return { error: 'IDEMPOTENCY_CONFLICT' as const };
+        }
+        const terminalError = await this.expireOrGetTerminalError(
+          transaction,
+          challenge,
+          now,
+        );
+        if (terminalError) {
+          return { error: terminalError };
+        }
+        if (
+          challenge.status !== CHALLENGE_STATUS.claimed ||
+          !challenge.pendingDeviceId ||
+          !challenge.claimedAt
+        ) {
+          return { error: 'STATE_CONFLICT' as const };
+        }
+        const device = await transaction.device.findUnique({
+          where: {
+            id: challenge.pendingDeviceId,
+            keyProtection: DEVICE_KEY_PROTECTION.nonExportableV1,
+            installationKeyAlgorithm: {
+              in: [
+                INSTALLATION_KEY_ALGORITHM.ed25519,
+                INSTALLATION_KEY_ALGORITHM.ecdsaP256Sha256,
+              ],
+            },
+          },
+        });
+        if (!device || device.status === DEVICE_STATUS.revoked) {
+          return { error: 'STATE_CONFLICT' as const };
+        }
+        const expectedSnapshotToken = this.crypto.approvalSnapshotToken({
+          challengeId: challenge.id,
+          challengeVersion: challenge.version,
+          pendingDeviceId: challenge.pendingDeviceId,
+          deviceKeyFingerprint: device.installationKeyFingerprint,
+          deviceMetadata: {
+            platform: device.platform,
+            installationKeyAlgorithm: device.installationKeyAlgorithm,
+            manufacturer: device.manufacturer,
+            model: device.model,
+            osVersion: device.osVersion,
+            appVersion: device.appVersion,
+          },
+          claimedAt: challenge.claimedAt,
+          claimNetworkSource: normalizeClaimNetworkSource(
+            challenge.claimNetworkSource,
+          ),
+        });
+        if (
+          !this.crypto.equalText(
+            command.claimSnapshotToken,
+            expectedSnapshotToken,
+          )
+        ) {
+          return { error: 'APPROVAL_SNAPSHOT_CHANGED' as const };
+        }
+        const update = await transaction.deviceActivationChallenge.updateMany({
+          where: {
+            id: challenge.id,
+            version: challenge.version,
+            status: CHALLENGE_STATUS.claimed,
+          },
+          data: {
+            status: CHALLENGE_STATUS.approved,
+            approvedByMemberId: memberId,
+            approvedAt: now,
+            approvalIdempotencyKey: idempotencyKey,
+            version: { increment: 1 },
+          },
+        });
+        if (update.count !== 1) {
+          return { error: 'STATE_CONFLICT' as const };
+        }
+        await this.appendOutbox(transaction, {
+          aggregateId: challenge.id,
+          eventType: 'activation.approved',
+          occurredAt: now,
+          payload: {
+            challengeId: challenge.id,
+            deviceId: challenge.pendingDeviceId,
+          },
+        });
+        return { approvedAt: now };
+      });
+    } catch (error) {
+      if (this.isUniqueConstraintError(error)) {
+        throw new ActivationIdempotencyConflictException();
+      }
+      throw error;
+    }
 
     if ('error' in result) {
       this.throwTransitionError(result.error!);
@@ -581,163 +803,170 @@ export class DeviceActivationApplicationService {
       now.getTime() + this.config.credentialTtlSeconds * 1000,
     );
 
-    const result = await this.prisma
-      .$transaction(async (transaction) => {
-        const challenge =
-          (await transaction.deviceActivationChallenge.findUnique({
-            where: { id: command.challengeId },
-          })) as ChallengeRecord | null;
-        if (!challenge) {
-          return { error: 'NOT_FOUND' as const };
-        }
-        const terminalError = await this.expireOrGetTerminalError(
-          transaction,
-          challenge,
-          now,
-        );
-        if (terminalError) {
-          return { error: terminalError };
-        }
-        if (
-          challenge.status !== CHALLENGE_STATUS.approved ||
-          !challenge.pendingDeviceId ||
-          !challenge.approvedAt ||
-          !challenge.approvedByMemberId ||
-          challenge.pendingDeviceId !== command.installationId
-        ) {
-          return { error: 'STATE_CONFLICT' as const };
-        }
+    const result = await this.serializable(async (transaction) => {
+      const challenge = (await transaction.deviceActivationChallenge.findUnique(
+        {
+          where: { id: command.challengeId },
+        },
+      )) as ChallengeRecord | null;
+      if (!challenge) {
+        return { error: 'NOT_FOUND' as const };
+      }
+      const terminalError = await this.expireOrGetTerminalError(
+        transaction,
+        challenge,
+        now,
+      );
+      if (terminalError) {
+        return { error: terminalError };
+      }
+      if (
+        challenge.status !== CHALLENGE_STATUS.approved ||
+        !challenge.pendingDeviceId ||
+        !challenge.approvedAt ||
+        !challenge.approvedByMemberId ||
+        challenge.pendingDeviceId !== command.installationId
+      ) {
+        return { error: 'STATE_CONFLICT' as const };
+      }
 
-        // Approval is a point-in-time decision, not a bearer capability. The
-        // exchange re-checks every mutable authorization input so a removed
-        // member or suspended household cannot activate a device later.
-        const approvalAuthority = await transaction.recipientMember.findFirst({
-          where: {
-            householdId: challenge.householdId,
-            recipientId: challenge.recipientId,
-            householdMemberId: challenge.approvedByMemberId,
-            status: 'ACTIVE',
-            canActivateDevice: true,
-            member: {
-              status: 'ACTIVE',
-              household: { status: 'ACTIVE' },
-              user: {
-                status: 'ACTIVE',
-                deletedAt: null,
-                loginIdentities: {
-                  some: { type: 'EMAIL', verifiedAt: { not: null } },
-                },
-              },
-            },
-            recipient: { status: 'ACTIVE', deletedAt: null },
-          },
-          select: { householdMemberId: true },
-        });
-        if (!approvalAuthority) {
-          return { error: 'APPROVAL_REVOKED' as const };
-        }
-
-        const device = await transaction.device.findUnique({
-          where: { id: command.installationId },
-        });
-        if (!device || device.status === DEVICE_STATUS.revoked) {
-          return { error: 'INVALID_PROOF' as const };
-        }
-        const proofValid = this.crypto.verifyEd25519(
-          device.installationPublicKey,
-          buildExchangeProofMessage({
-            challengeId: challenge.id,
-            installationId: device.id,
-            approvedAt: challenge.approvedAt.toISOString(),
-          }),
-          command.signature,
-        );
-        if (!proofValid) {
-          return { error: 'INVALID_PROOF' as const };
-        }
-        const existingBinding = await transaction.companionBinding.findUnique({
-          where: { deviceId: device.id },
-        });
-        if (existingBinding) {
-          return { error: 'BINDING_CONFLICT' as const };
-        }
-
-        const consumed = await transaction.deviceActivationChallenge.updateMany(
-          {
-            where: {
-              id: challenge.id,
-              version: challenge.version,
-              status: CHALLENGE_STATUS.approved,
-            },
-            data: {
-              status: CHALLENGE_STATUS.consumed,
-              consumedAt: now,
-              version: { increment: 1 },
-            },
-          },
-        );
-        if (consumed.count !== 1) {
-          return { error: 'STATE_CONFLICT' as const };
-        }
-
-        await transaction.companionBinding.create({
-          data: {
-            id: bindingId,
-            deviceId: device.id,
-            householdId: challenge.householdId,
-            recipientId: challenge.recipientId,
-            displayName: device.model?.trim() || '守忆灯塔陪伴设备',
-            status: BINDING_STATUS.active,
-            activatedByMemberId: challenge.approvedByMemberId,
-            activatedAt: now,
-          },
-        });
-        await transaction.deviceCredential.create({
-          data: {
-            id: credentialId,
-            bindingId,
-            credentialHash,
-            credentialFamilyId,
-            deviceKeyThumbprint: device.installationKeyFingerprint,
-            issuedAt: now,
-            expiresAt,
-          },
-        });
-        await transaction.deviceBindingEvent.create({
-          data: {
-            id: ulid(now.getTime()),
-            bindingId,
-            eventType: 'ACTIVATED',
-            actorType: 'USER',
-            actorId: challenge.approvedByMemberId,
-            occurredAt: now,
-          },
-        });
-        await transaction.device.update({
-          where: { id: device.id },
-          data: { status: DEVICE_STATUS.active, lastSeenAt: now },
-        });
-        await this.appendOutbox(transaction, {
-          aggregateId: bindingId,
-          eventType: 'device.activated',
-          occurredAt: now,
-          payload: {
-            bindingId,
-            householdId: challenge.householdId,
-            recipientId: challenge.recipientId,
-          },
-        });
-        return {
+      // Approval is a point-in-time decision, not a bearer capability. The
+      // exchange re-checks every mutable authorization input so a removed
+      // member or suspended household cannot activate a device later.
+      const approvalAuthority = await transaction.recipientMember.findFirst({
+        where: {
           householdId: challenge.householdId,
           recipientId: challenge.recipientId,
-        };
-      })
-      .catch((error: unknown) => {
-        if (this.isUniqueConstraintError(error)) {
-          throw new CompanionBindingConflictException();
-        }
-        throw error;
+          householdMemberId: challenge.approvedByMemberId,
+          status: 'ACTIVE',
+          canActivateDevice: true,
+          member: {
+            status: 'ACTIVE',
+            household: { status: 'ACTIVE' },
+            user: {
+              status: 'ACTIVE',
+              deletedAt: null,
+              loginIdentities: {
+                some: { type: 'EMAIL', verifiedAt: { not: null } },
+              },
+            },
+          },
+          recipient: { status: 'ACTIVE', deletedAt: null },
+        },
+        select: { householdMemberId: true },
       });
+      if (!approvalAuthority) {
+        return { error: 'APPROVAL_REVOKED' as const };
+      }
+
+      const device = await transaction.device.findUnique({
+        where: {
+          id: command.installationId,
+          keyProtection: DEVICE_KEY_PROTECTION.nonExportableV1,
+          installationKeyAlgorithm: {
+            in: [
+              INSTALLATION_KEY_ALGORITHM.ed25519,
+              INSTALLATION_KEY_ALGORITHM.ecdsaP256Sha256,
+            ],
+          },
+        },
+      });
+      if (!device || device.status === DEVICE_STATUS.revoked) {
+        return { error: 'INVALID_PROOF' as const };
+      }
+      const proofValid = this.crypto.verifyInstallationSignature(
+        device.installationKeyAlgorithm,
+        device.installationPublicKey,
+        buildExchangeProofMessage({
+          challengeId: challenge.id,
+          installationId: device.id,
+          approvedAt: challenge.approvedAt.toISOString(),
+        }),
+        command.signature,
+      );
+      if (!proofValid) {
+        return { error: 'INVALID_PROOF' as const };
+      }
+      const existingBinding = await transaction.companionBinding.findUnique({
+        where: { deviceId: device.id },
+      });
+      if (existingBinding) {
+        return { error: 'BINDING_CONFLICT' as const };
+      }
+
+      const consumed = await transaction.deviceActivationChallenge.updateMany({
+        where: {
+          id: challenge.id,
+          version: challenge.version,
+          status: CHALLENGE_STATUS.approved,
+        },
+        data: {
+          status: CHALLENGE_STATUS.consumed,
+          consumedAt: now,
+          version: { increment: 1 },
+        },
+      });
+      if (consumed.count !== 1) {
+        return { error: 'STATE_CONFLICT' as const };
+      }
+
+      await transaction.companionBinding.create({
+        data: {
+          id: bindingId,
+          deviceId: device.id,
+          householdId: challenge.householdId,
+          recipientId: challenge.recipientId,
+          displayName: device.model?.trim() || '守忆灯塔陪伴设备',
+          status: BINDING_STATUS.active,
+          activatedByMemberId: challenge.approvedByMemberId,
+          activatedAt: now,
+        },
+      });
+      await transaction.deviceCredential.create({
+        data: {
+          id: credentialId,
+          bindingId,
+          credentialHash,
+          credentialFamilyId,
+          deviceKeyThumbprint: device.installationKeyFingerprint,
+          issuedAt: now,
+          expiresAt,
+        },
+      });
+      await transaction.deviceBindingEvent.create({
+        data: {
+          id: ulid(now.getTime()),
+          bindingId,
+          eventType: 'ACTIVATED',
+          actorType: 'USER',
+          actorId: challenge.approvedByMemberId,
+          occurredAt: now,
+        },
+      });
+      await transaction.device.update({
+        where: { id: device.id },
+        data: { status: DEVICE_STATUS.active, lastSeenAt: now },
+      });
+      await this.appendOutbox(transaction, {
+        aggregateId: bindingId,
+        eventType: 'device.activated',
+        occurredAt: now,
+        payload: {
+          bindingId,
+          householdId: challenge.householdId,
+          recipientId: challenge.recipientId,
+        },
+      });
+      return {
+        householdId: challenge.householdId,
+        recipientId: challenge.recipientId,
+      };
+    }).catch((error: unknown) => {
+      if (this.isUniqueConstraintError(error)) {
+        throw new CompanionBindingConflictException();
+      }
+      throw error;
+    });
 
     if ('error' in result) {
       this.throwTransitionError(result.error!);
@@ -779,7 +1008,16 @@ export class DeviceActivationApplicationService {
           bindingVersion: principal.bindingVersion,
           status: BINDING_STATUS.active,
           revokedAt: null,
-          device: { status: DEVICE_STATUS.active },
+          device: {
+            status: DEVICE_STATUS.active,
+            keyProtection: DEVICE_KEY_PROTECTION.nonExportableV1,
+            installationKeyAlgorithm: {
+              in: [
+                INSTALLATION_KEY_ALGORITHM.ed25519,
+                INSTALLATION_KEY_ALGORITHM.ecdsaP256Sha256,
+              ],
+            },
+          },
           household: { status: 'ACTIVE' },
           recipient: { status: 'ACTIVE', deletedAt: null },
         },
@@ -817,15 +1055,45 @@ export class DeviceActivationApplicationService {
       now.getTime() + this.config.credentialTtlSeconds * 1000,
     );
 
-    const result = await this.prisma.$transaction(async (transaction) => {
-      const credential = (await transaction.deviceCredential.findUnique({
-        where: { credentialHash: candidateHash },
+    const result = await this.serializable(async (transaction) => {
+      const credential = (await transaction.deviceCredential.findFirst({
+        where: {
+          credentialHash: candidateHash,
+          binding: {
+            device: {
+              keyProtection: DEVICE_KEY_PROTECTION.nonExportableV1,
+              installationKeyAlgorithm: {
+                in: [
+                  INSTALLATION_KEY_ALGORITHM.ed25519,
+                  INSTALLATION_KEY_ALGORITHM.ecdsaP256Sha256,
+                ],
+              },
+            },
+          },
+        },
         include: { binding: { include: { device: true } } },
       })) as DeviceCredentialWithBinding | null;
       if (
         !credential ||
         !this.crypto.equalHash(candidateHash, credential.credentialHash)
       ) {
+        return { error: 'INVALID' as const };
+      }
+      // A stale raw credential is not sufficient authority to revoke its
+      // successor family. Authenticate proof-of-possession with the persisted
+      // non-exportable installation key before every replay response that
+      // performs destructive writes.
+      const proofValid = this.crypto.verifyInstallationSignature(
+        credential.binding.device.installationKeyAlgorithm,
+        credential.binding.device.installationPublicKey,
+        buildRefreshProofMessage({
+          credentialId: credential.id,
+          bindingId: credential.binding.id,
+          credentialDigest: this.crypto.digestCredential(rawCredential),
+        }),
+        signature,
+      );
+      if (!proofValid) {
         return { error: 'INVALID' as const };
       }
       if (credential.rotatedAt) {
@@ -842,18 +1110,6 @@ export class DeviceActivationApplicationService {
         return { error: 'REVOKED' as const };
       }
       if (credential.revokedAt || credential.expiresAt <= now) {
-        return { error: 'INVALID' as const };
-      }
-      const proofValid = this.crypto.verifyEd25519(
-        credential.binding.device.installationPublicKey,
-        buildRefreshProofMessage({
-          credentialId: credential.id,
-          bindingId: credential.binding.id,
-          credentialDigest: this.crypto.digestCredential(rawCredential),
-        }),
-        signature,
-      );
-      if (!proofValid) {
         return { error: 'INVALID' as const };
       }
 
@@ -943,7 +1199,7 @@ export class DeviceActivationApplicationService {
     command: UpdateCompanionBindingCommand,
   ): Promise<CompanionBindingView> {
     const now = this.clock.now();
-    const result = await this.prisma.$transaction(async (transaction) => {
+    const result = await this.serializable(async (transaction) => {
       const binding = await transaction.companionBinding.findFirst({
         where: { id: command.bindingId, householdId: command.householdId },
       });
@@ -994,16 +1250,38 @@ export class DeviceActivationApplicationService {
           },
         });
       }
+      const suspendsMedia =
+        statusChanged && command.status === BINDING_STATUS.suspended;
+      if (suspendsMedia) {
+        await this.mediaSecurity.markBindingRevoked(
+          transaction,
+          binding.id,
+          'DEVICE_BINDING_SUSPENDED',
+          now,
+        );
+        await this.mediaSecurity.markCompanionBindingRevoked(
+          transaction,
+          binding.id,
+          'DEVICE_BINDING_SUSPENDED',
+          now,
+        );
+      }
       const updated = await transaction.companionBinding.findUnique({
         where: { id: binding.id },
       });
       return updated
-        ? { binding: updated }
+        ? { binding: updated, suspendsMedia }
         : { error: 'VERSION_CONFLICT' as const };
     });
 
     if ('error' in result) {
       this.throwTransitionError(result.error!);
+    }
+    if (result.suspendsMedia) {
+      await Promise.all([
+        this.mediaSecurity.cleanupPendingForBinding(command.bindingId),
+        this.mediaSecurity.cleanupCompanionLeasesForBinding(command.bindingId),
+      ]);
     }
     return this.toBindingView(result.binding);
   }
@@ -1015,7 +1293,7 @@ export class DeviceActivationApplicationService {
     reasonCode?: string;
   }): Promise<{ revoked: true }> {
     const now = this.clock.now();
-    await this.prisma.$transaction(async (transaction) => {
+    await this.serializable(async (transaction) => {
       const binding = await transaction.companionBinding.findFirst({
         where: { id: command.bindingId, householdId: command.householdId },
       });
@@ -1029,6 +1307,18 @@ export class DeviceActivationApplicationService {
         binding.recipientId,
       );
       if (binding.status === BINDING_STATUS.revoked) {
+        await this.mediaSecurity.markBindingRevoked(
+          transaction,
+          binding.id,
+          'DEVICE_BINDING_REVOKED',
+          now,
+        );
+        await this.mediaSecurity.markCompanionBindingRevoked(
+          transaction,
+          binding.id,
+          'DEVICE_BINDING_REVOKED',
+          now,
+        );
         return;
       }
       await transaction.companionBinding.update({
@@ -1069,7 +1359,23 @@ export class DeviceActivationApplicationService {
           recipientId: binding.recipientId,
         },
       });
+      await this.mediaSecurity.markBindingRevoked(
+        transaction,
+        binding.id,
+        'DEVICE_BINDING_REVOKED',
+        now,
+      );
+      await this.mediaSecurity.markCompanionBindingRevoked(
+        transaction,
+        binding.id,
+        'DEVICE_BINDING_REVOKED',
+        now,
+      );
     });
+    await Promise.all([
+      this.mediaSecurity.cleanupPendingForBinding(command.bindingId),
+      this.mediaSecurity.cleanupCompanionLeasesForBinding(command.bindingId),
+    ]);
     return { revoked: true };
   }
 
@@ -1105,6 +1411,23 @@ export class DeviceActivationApplicationService {
       throw new RecipientActivationDeniedException();
     }
     return authority.householdMemberId;
+  }
+
+  private async serializable<T>(
+    operation: (transaction: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= SERIALIZABLE_RETRY_LIMIT; attempt += 1) {
+      try {
+        return await this.prisma.$transaction(operation, {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        });
+      } catch (error) {
+        if (attempt === SERIALIZABLE_RETRY_LIMIT || !isRetryable(error)) {
+          throw error;
+        }
+      }
+    }
+    throw new Error('Serializable device activation transaction exhausted');
   }
 
   private async expireOrGetTerminalError(
@@ -1183,6 +1506,10 @@ export class DeviceActivationApplicationService {
         throw new CompanionBindingConflictException();
       case 'APPROVAL_REVOKED':
         throw new ActivationApprovalRevokedException();
+      case 'APPROVAL_SNAPSHOT_CHANGED':
+        throw new ActivationApprovalSnapshotChangedException();
+      case 'IDEMPOTENCY_CONFLICT':
+        throw new ActivationIdempotencyConflictException();
       case 'VERSION_CONFLICT':
         throw new VersionConflictException();
       case 'STATE_CONFLICT':
@@ -1224,4 +1551,13 @@ export class DeviceActivationApplicationService {
       error.code === 'P2002'
     );
   }
+}
+
+function isRetryable(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'P2034'
+  );
 }

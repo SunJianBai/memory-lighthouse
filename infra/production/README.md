@@ -45,6 +45,13 @@ MiB，两个静态站各 48 MiB。TX4H4G 已确认有 3.6 GiB RAM、约 1.2 GiB 
 `journalctl -k | grep -i oom`。如果 CampusHub 加 OpenBMB 持续触发 OOM，应升级
 主机，不应简单删除内存上限。
 
+clamd 不部署在 TX4H4G：ClamAV 官方对标准签名库建议约 3 GiB RAM 和额外 5 GiB
+磁盘，同机运行会破坏上述预算。生产使用独立私网扫描节点，建议固定官方
+`clamav/clamav-debian:1.4.5`，将 `StreamMaxLength` 配置为至少 100 MiB，并在网络
+侧只允许 TX4H4G 访问 3310/TCP。clamd TCP 协议本身没有认证或 TLS，绝不能暴露到
+公网。参考 [ClamAV 系统要求](https://docs.clamav.net/) 与
+[ClamD INSTREAM 协议](https://docs.clamav.net/manual/Usage/ClamdProtocol.html)。
+
 首次镜像构建最吃资源：构建脚本强制按 API → 迁移器 → 家属/陪伴 Web → 管理
 Web 串行执行，并把 TypeScript/Node 构建堆限制为 768/640 MiB；后续目标复用
 BuildKit cache。预检要求至少 768 MiB 即时可用 RAM、RAM+空闲 swap 至少 2 GiB，
@@ -83,7 +90,10 @@ BuildKit cache。预检要求至少 768 MiB 即时可用 RAM、RAM+空闲 swap �
    14174、16379、16380、17880、19000、19001。
 4. 当前 ModelBest MiniCPM-o 实时端点不要求 API key。若启用独立 ASR，还需在
    本机 `127.0.0.1:18082` 提供服务；远程家属通话本身不接入 ASR。
-5. 两台不同网络设备完成一次真实 LiveKit 音视频测试。HTTP/WSS 健康检查不能
+5. 提供独立私网 clamd 的主机和端口；防火墙只允许 TX4H4G 访问。生产 preflight
+   会真实执行 `PING` 和空内容 `INSTREAM`，缺配置、签名库未加载或扫描不可用都会
+   阻断部署。扫描失败时资产保持不可下载并由 Outbox Worker 退避重试。
+6. 两台不同网络设备完成一次真实 LiveKit 音视频测试。HTTP/WSS 健康检查不能
    证明云安全组和 NAT 下的 UDP 媒体可达。
 
 ## 1. 静态审阅与校验
@@ -107,12 +117,18 @@ sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env \
 
 ```bash
 sudo groupadd --system openbmb 2>/dev/null || true
-sudo install -d -o root -g openbmb -m 0750 /etc/openbmb
+sudo install -d -o root -g openbmb -m 0750 \
+  /opt/openbmb /opt/openbmb/releases /etc/openbmb
 sudo install -o root -g openbmb -m 0640 \
   infra/production/env/infra.env.example /etc/openbmb/infra.env
 sudo install -o root -g openbmb -m 0640 \
   infra/production/env/api.env.example /etc/openbmb/api.env
 ```
+
+`/opt/openbmb` 是 security floor、pending 和两个发布指针的状态根，必须是
+`root:openbmb` 拥有的真实目录，且组/其他用户不可写；不能由部署账号拥有，也不能是
+符号链接。生产工作流会在传输发布前用 `sudo -n` 复核该条件，不满足就停止。上面的
+`install -d` 可安全修正现有目录的属主和权限，不会删除其中的发布。
 
 编辑两个文件，替换全部 `CHANGE_ME`。基础设施 secret 使用彼此独立的 base64url
 值：
@@ -126,6 +142,25 @@ openssl rand -base64 36 | tr '+/' '-_' | tr -d '=\n'; printf '\n'
 ```bash
 openssl rand -base64 32 | tr -d '\n'; printf '\n'
 ```
+
+`MINIO_KMS_SECRET_KEY` 使用独立的 SSE-S3 静态主密钥，格式是
+`<key-name>:<恰好 32 字节的标准 Base64>`：
+
+```bash
+printf 'openbmb-sse:'; openssl rand -base64 32 | tr -d '\n'; printf '\n'
+```
+
+该值丢失会使现有加密卷不可读，必须进入独立 Secret 备份和恢复演练，但不能写入
+数据库、发布目录或仓库。MinIO 同时设置 Bucket 默认 SSE-S3；应用的预签名 PUT
+仍显式要求 `AES256` 与 `If-None-Match: *`，并在完成上传的 HEAD 中复核。版本化
+Bucket 的普通 DELETE 只创建 Delete Marker，因此应用身份同时仅获
+`ListBucketVersions`/`DeleteObjectVersion` 权限；删除 Worker 会等待上传签名过期，
+再按版本 ID 永久清除并复核。实现依据
+[MinIO 静态 KMS 设置](https://docs.min.io/aistor/reference/aistor-server/settings/server-side-encryption/)、
+[MinIO Bucket SSE-S3](https://docs.min.io/aistor/reference/cli/mc-encrypt/mc-encrypt-set/) 和
+[AWS SSE-S3 请求/HEAD 约定](https://docs.aws.amazon.com/AmazonS3/latest/userguide/specifying-s3-encryption.html)、
+[AWS 版本化对象删除](https://docs.aws.amazon.com/AmazonS3/latest/userguide/DeletingObjectVersions.html)和
+[AWS 条件写入](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)。
 
 不要把 secret 放入发布目录、Git、shell 历史或工单。Compose 只把运行所需的
 数据库用户密码传给 API，不会把 MySQL/MinIO root 凭据传给 API。`api.env` 使用
@@ -160,20 +195,79 @@ Token，从 GHCR 按摘要拉取后写入 Compose 使用的 release-scoped 本�
 `OPENBMB_SKIP_IMAGE_BUILD=true` 且上述完整校验通过；TX4H4G 不提供主机本地生产构建回退。所有生产
 `compose up/run` 都使用 `--pull never`，不会在主机上回退访问 Docker Hub。
 
-发布脚本依次执行：严格预检 → 校验已预装的 release tag 与两份摘要清单 → 对已有系统做 MySQL
-和 MinIO 备份 → 先原子持久化 `current` 栈指针 → 保持 API 停机 → 启动/核对数据与 LiveKit →
-`prisma migrate deploy` → 启动三个应用容器 → 本机 liveness/readiness → 最后原子切换
-`current-app` 应用指针。两个指针有意分阶段切换：断电后宁可由新基础设施继续承载旧应用，
-也不会在重启时根据旧 `current` 延迟降级 MySQL、Redis、MinIO 或 LiveKit。它不运行
-`prisma migrate dev`，也不删除卷。
+发布脚本依次执行：严格预检 → 校验已预装的 release tag 与两份摘要清单 → 对普通新部署做 MySQL
+和 MinIO 备份（续跑 pending 时禁止重复备份）→ 先原子持久化 `current` 栈指针 → 同时停止并核实 API 与 LiveKit → 原子写入
+`/opt/openbmb/security-boundary.pending` → 原子轮换 `/etc/openbmb/infra.env` 中的
+`LIVEKIT_API_SECRET` → 启动/核对数据服务 → 定向清空应用媒体租约和专用 LiveKit Redis
+临时状态 → `prisma migrate deploy` → 启动并核对 LiveKit → 启动三个应用容器 → 本机
+liveness/readiness → 原子切换 `current-app` → 原子提升
+`/opt/openbmb/minimum-security-epoch` → 最后清除 pending。两个状态文件都由 root 持久化；
+release 自带的 `infra/production/compatibility/security-epoch` 是只读兼容性声明。
 
-所有迁移应保持至少一个发布窗口的向后兼容。栈指针持久化后的失败会保留新栈并尝试恢复
-上一个应用镜像；脚本不会猜测如何回滚 schema 或基础设施数据格式。
+`current-app`、minimum epoch 和 pending 的顺序构成持久化安全栅栏。pending 存在时，
+systemd 的 start/reload 和手工应用回滚都拒绝启动应用；即使断电发生在 floor 已提升、
+pending 尚未清除之间，也不会启动低 epoch 镜像。同 epoch 只有在新的不可逆边界尚未开始
+（即此次运行还没有进入 LiveKit 密钥轮换）且不是续跑既有 pending 时，才可在旧应用和
+LiveKit 都重新健康后自动恢复。一旦即将轮换密钥，本次进程先把恢复策略切成 fail-closed；
+即使密钥文件的原子替换已完成但目录 `fsync` 报错，也不会恢复旧应用或清除 pending。
+此后无论 schema 迁移是否已经开始，失败都必须保留 pending、停止应用并前滚。跨 epoch
+失败同样保留新栈和 pending，只尝试以已经轮换的新密钥恢复并核对 LiveKit，必须用相同或
+更高 epoch 的修复发布前滚。
+旧 LiveKit 密钥不写备份、不会在失败处理或回滚中恢复。脚本不运行 `prisma migrate dev`，
+也不删除卷或猜测如何回滚 schema。
+
+自托管 LiveKit 的参与者移除/权限更新不会像 LiveKit Cloud 那样撤销已经签发的 Token；
+连接中的客户端还可能收到刷新 Token，其有效期为 10 分钟或原 Token 剩余有效期（取更长者），详见
+[LiveKit 官方 Token 与 grants 说明](https://docs.livekit.io/frontends/reference/tokens-grants/)。因此只等待
+60 秒或清空 Redis 不足以建立凭据失效边界；每次生产激活都必须在 API 与 LiveKit 同时
+停机后轮换签名密钥，再用新密钥重建 LiveKit 和 API 容器。
 
 部署、备份、应用回滚以及公网切换共用
 `/run/lock/openbmb-operation.lock`。计划备份最多等待 30 分钟，其他互斥操作在锁被
 占用时以退出码 75 快速失败，避免迁移、备份和路由切换相互穿插。systemd 的启动、
 重载与停止同样通过 `service-control.sh` 持有整段操作锁；健康检查不会与部署或回退交叉。
+
+### Prisma P3009 安全迁移恢复
+
+`20260802150000_invalidate_legacy_exportable_device_credentials` 和
+`20260802151000_require_non_exportable_device_key_protection` 失败时，不得凭“看起来已经执行”
+直接运行 `prisma migrate resolve`。保持 pending、API 与 LiveKit 停止，先审阅失败记录：
+
+```bash
+security_migration=20260802150000_invalidate_legacy_exportable_device_credentials
+sudo bash /opt/openbmb/current/infra/production/scripts/compose.sh exec -T mysql sh -ceu '
+  MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql --protocol=socket --user=root \
+    --table "$MYSQL_DATABASE" -e "
+      SELECT migration_name, checksum, started_at, finished_at, rolled_back_at, logs
+      FROM _prisma_migrations
+      WHERE finished_at IS NULL AND rolled_back_at IS NULL
+      ORDER BY started_at DESC;"
+'
+sudo bash /opt/openbmb/current/infra/production/scripts/audit-security-migration-recovery.sh \
+  "$security_migration"
+```
+
+审计器只读，要求恰好一条尚未 resolve 的失败记录、release 中的 SQL checksum 完全匹配、
+pending 存在且 API/LiveKit 已停止。`150000` 的所有数据写入在一个 InnoDB 事务中：最终
+失效条件全部成立时只给出 `--applied` 候选；仍有未失效对象且没有迁移专用终态标记时只
+给出 `--rolled-back` 候选；混合状态拒绝自动判断。`151000` 只有一个原子
+`ALTER TABLE`：两列及三个强制 CHECK 全部满足时给出 `--applied`，全部不存在时给出
+`--rolled-back`，任何半完成形态都拒绝。该策略对应
+[MySQL 原子 DDL](https://dev.mysql.com/doc/refman/8.4/en/atomic-ddl.html) 和
+[Prisma 生产失败迁移恢复](https://docs.prisma.io/docs/orm/prisma-migrate/workflows/patching-and-hotfixing)。
+
+人工复核 `logs` 与审计结果后，只执行审计器打印的那一个候选命令。例如确认为完整回滚时：
+
+```bash
+sudo bash /opt/openbmb/current/infra/production/scripts/compose.sh \
+  --profile tools run --rm --pull never migrate \
+  ../../node_modules/.bin/prisma migrate resolve --rolled-back \
+  20260802150000_invalidate_legacy_exportable_device_credentials
+```
+
+若审计结果是 `--applied`，只把上例改为审计器给出的 `--applied <完整迁移名>`。resolve
+后重新运行同 epoch 或更高 epoch 的完整部署，让 `prisma migrate deploy` 继续并最终由健康
+检查提升 floor、清除 pending；不要单独启动应用，也不要手工删除 `_prisma_migrations` 行。
 
 ## 4. 安装 Caddy（先校验，不启动）
 
@@ -250,9 +344,12 @@ sudo systemctl enable openbmb.service
 sudo systemctl enable --now openbmb-backup.timer
 ```
 
-备份会短暂停止 API，使用事务快照导出 MySQL，并镜像 MinIO 的当前对象状态；
+普通备份在 pending 存在时立即拒绝，不会把安全边界中途状态冒充成恢复点；续跑部署也
+不会再次创建 pre-migration 备份。备份会短暂停止 API，使用事务快照导出 MySQL，并镜像 MinIO 的当前对象状态；
 静态 Web 和 CampusHub 不停。脚本先写隐藏的 `.partial-*` 目录，校验临时 SHA-256
-清单后原子发布目录，最后写入绑定清单摘要的 `.openbmb-backup-complete` 标记；API
+清单后原子发布目录，并把当时的 `/opt/openbmb/minimum-security-epoch` 作为
+`minimum-security-epoch` 纳入同一清单，最后写入绑定清单摘要的
+`.openbmb-backup-complete` 标记；API
 恢复和本机健康检查失败会令备份单元失败，停止备份服务时最多预留 10 分钟完成恢复与
 partial 清理；systemd 的 `ExecStopPost` 还会在脚本被强制终止后按当前两个版本指针
 再次拉起并检查应用。结果为 0700/0600，包含个人敏感信息。必须加密复制
@@ -274,6 +371,8 @@ sudo ROLLBACK_SCHEMA_COMPATIBLE=yes \
 这只切换 API/两个 Web 镜像和独立的 `current-app` 指针；基础设施与配置继续使用
 `current` 指向的 stack release，不回滚数据库、不删除卷。systemd 重启后仍会读取
 `current-app`，不会悄悄恢复成较新的应用，也不会降级 MySQL、Redis、MinIO 或 LiveKit。
+回滚脚本同时要求不存在 pending，且目标 release 的 security epoch 不低于持久化 floor；
+因此跨安全边界后的旧镜像即使 schema 仍兼容，也不能重新启动。同 epoch 回滚仍然允许。
 
 ### 立即撤销公网代理，恢复 CampusHub 直占 80
 

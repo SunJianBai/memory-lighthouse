@@ -4,6 +4,7 @@ import { AccessTokenService } from './crypto/access-token.service';
 import { OpaqueTokenService } from './crypto/opaque-token.service';
 import { IdentityApplicationService } from './identity.application.service';
 import {
+  InvalidAccessTokenException,
   InvalidCredentialsException,
   InvalidOneTimeTokenException,
   InvalidRefreshTokenException,
@@ -24,16 +25,22 @@ const now = new Date('2026-08-01T00:00:00.000Z');
 const config: IdentitySecurityConfig = {
   environment: 'test',
   accessTokenSecret: Buffer.from('a'.repeat(48)),
+  adminAccessTokenSecret: Buffer.from('d'.repeat(48)),
   refreshTokenPepper: Buffer.from('b'.repeat(48)),
   oneTimeTokenPepper: Buffer.from('c'.repeat(48)),
   accessTokenTtlSeconds: 900,
+  adminAccessTokenTtlSeconds: 600,
   refreshTokenTtlSeconds: 2_592_000,
   emailVerificationTtlSeconds: 86_400,
   passwordResetTtlSeconds: 1_800,
   accessTokenIssuer: 'issuer',
   accessTokenAudience: 'audience',
+  adminAccessTokenIssuer: 'admin-issuer',
+  adminAccessTokenAudience: 'admin-audience',
   refreshCookieName: 'refresh',
   refreshCookiePath: '/openBMB/api/v1/auth',
+  adminRefreshCookieName: 'admin-refresh',
+  adminRefreshCookiePath: '/openBMB/api/v1/admin/auth',
   secureCookies: false,
 };
 
@@ -84,7 +91,14 @@ function makeHarness() {
     accessTokens,
   );
 
-  return { service, prisma, passwordHasher, notification, opaqueTokens };
+  return {
+    service,
+    prisma,
+    passwordHasher,
+    notification,
+    opaqueTokens,
+    accessTokens,
+  };
 }
 
 function activePreviousSession(overrides: Record<string, unknown> = {}) {
@@ -94,6 +108,7 @@ function activePreviousSession(overrides: Record<string, unknown> = {}) {
     deviceId: null,
     tokenFamilyId: '01JFAMILY00000000000000000',
     clientType: 'ANDROID',
+    purpose: 'USER',
     issuedAt: now,
     expiresAt: new Date('2026-08-20T00:00:00.000Z'),
     lastUsedAt: null,
@@ -111,6 +126,26 @@ function activePreviousSession(overrides: Record<string, unknown> = {}) {
 }
 
 describe('IdentityApplicationService security paths', () => {
+  it('does not resolve user and admin access tokens across audiences', async () => {
+    const harness = makeHarness();
+    const userToken = harness.accessTokens.issueUser(
+      'operator-1',
+      'user-session-1',
+    );
+    const adminToken = harness.accessTokens.issueAdmin(
+      'operator-1',
+      'admin-session-1',
+    );
+
+    await expect(
+      harness.service.resolveAdminPrincipal(userToken.token),
+    ).rejects.toBeInstanceOf(InvalidAccessTokenException);
+    await expect(
+      harness.service.resolvePrincipal(adminToken.token),
+    ).rejects.toBeInstanceOf(InvalidAccessTokenException);
+    expect(harness.prisma.userSession.findUnique).not.toHaveBeenCalled();
+  });
+
   it('returns the same public error for a missing account and a wrong password', async () => {
     const missing = makeHarness();
     missing.prisma.loginIdentity.findUnique.mockResolvedValue(null);
@@ -153,6 +188,36 @@ describe('IdentityApplicationService security paths', () => {
     );
   });
 
+  it('re-authenticates a sensitive action by user id without a missing-user timing shortcut', async () => {
+    const valid = makeHarness();
+    valid.prisma.user.findUnique.mockResolvedValue({
+      id: 'user-1',
+      status: 'ACTIVE',
+      deletedAt: null,
+      passwordCredential: { passwordHash: Uint8Array.from([7]) },
+    });
+    valid.passwordHasher.verify.mockResolvedValue(true);
+
+    await expect(
+      valid.service.reauthenticateUser('user-1', 'current-password'),
+    ).resolves.toBeUndefined();
+    expect(valid.passwordHasher.verify.mock.calls).toContainEqual([
+      'current-password',
+      Uint8Array.from([7]),
+    ]);
+
+    const missing = makeHarness();
+    missing.prisma.user.findUnique.mockResolvedValue(null);
+    missing.passwordHasher.verify.mockResolvedValue(false);
+    await expect(
+      missing.service.reauthenticateUser('missing', 'current-password'),
+    ).rejects.toBeInstanceOf(InvalidCredentialsException);
+    expect(missing.passwordHasher.verify.mock.calls).toContainEqual([
+      'current-password',
+      null,
+    ]);
+  });
+
   it('does not reveal which registration identity violated a unique constraint', async () => {
     const harness = makeHarness();
     harness.prisma.$transaction.mockRejectedValue({
@@ -177,6 +242,193 @@ describe('IdentityApplicationService security paths', () => {
     expect(response).not.toContain('PrivateName');
     expect(response).not.toContain('email');
     expect(response).not.toContain('username');
+  });
+
+  it('checks platform authorization before and after issuing an admin session', async () => {
+    const harness = makeHarness();
+    harness.prisma.loginIdentity.findUnique.mockResolvedValue({
+      userId: 'operator-1',
+      user: {
+        passwordCredential: { passwordHash: Uint8Array.from([1]) },
+        status: 'ACTIVE',
+        deletedAt: null,
+      },
+    });
+    harness.passwordHasher.verify.mockResolvedValue(true);
+    harness.prisma.userSession.create.mockResolvedValue({
+      id: 'admin-session-1',
+      userId: 'operator-1',
+      clientType: 'ADMIN_WEB',
+      purpose: 'ADMIN_WEB',
+      tokenFamilyId: 'admin-family-1',
+      expiresAt: new Date('2026-08-20T00:00:00.000Z'),
+    });
+    const authorize = jest.fn(async () => undefined);
+
+    const result = await harness.service.authenticateAdmin(
+      {
+        identifier: 'operator@example.com',
+        password: 'correct-password',
+      },
+      authorize,
+    );
+
+    expect(authorize).toHaveBeenCalledTimes(2);
+    expect(authorize).toHaveBeenNthCalledWith(1, 'operator-1');
+    expect(authorize).toHaveBeenNthCalledWith(2, 'operator-1');
+    expect(harness.prisma.userSession.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: 'operator-1',
+        clientType: 'ADMIN_WEB',
+        purpose: 'ADMIN_WEB',
+      }),
+    });
+    expect(result).toMatchObject({
+      purpose: 'ADMIN_WEB',
+      sessionId: 'admin-session-1',
+      accessToken: expect.any(String),
+      refreshToken: expect.any(String),
+    });
+  });
+
+  it('revokes a newly issued admin session when the role disappears in the post-check', async () => {
+    const harness = makeHarness();
+    harness.prisma.loginIdentity.findUnique.mockResolvedValue({
+      userId: 'operator-1',
+      user: {
+        passwordCredential: { passwordHash: Uint8Array.from([1]) },
+        status: 'ACTIVE',
+        deletedAt: null,
+      },
+    });
+    harness.passwordHasher.verify.mockResolvedValue(true);
+    harness.prisma.userSession.create.mockResolvedValue({
+      id: 'admin-session-1',
+      userId: 'operator-1',
+      clientType: 'ADMIN_WEB',
+      purpose: 'ADMIN_WEB',
+      tokenFamilyId: 'admin-family-1',
+      expiresAt: new Date('2026-08-20T00:00:00.000Z'),
+    });
+    harness.prisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+    const authorizationLost = new Error('platform role revoked');
+    const authorize = jest
+      .fn<(userId: string) => Promise<void>>()
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(authorizationLost);
+
+    await expect(
+      harness.service.authenticateAdmin(
+        {
+          identifier: 'operator@example.com',
+          password: 'correct-password',
+        },
+        authorize,
+      ),
+    ).rejects.toBe(authorizationLost);
+    expect(harness.prisma.userSession.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'admin-session-1',
+        userId: 'operator-1',
+        purpose: 'ADMIN_WEB',
+        revokedAt: null,
+      },
+      data: { revokedAt: now },
+    });
+  });
+
+  it('rejects a user refresh token at the admin boundary without revoking the user family', async () => {
+    const harness = makeHarness();
+    harness.prisma.userSession.findUnique.mockResolvedValue(
+      activePreviousSession({ clientType: 'WEB' }),
+    );
+    const authorize = jest.fn(async () => undefined);
+
+    await expect(
+      harness.service.refreshAdminSession(
+        { refreshToken: 'ordinary-user-refresh-token' },
+        authorize,
+      ),
+    ).rejects.toBeInstanceOf(InvalidRefreshTokenException);
+    expect(authorize).not.toHaveBeenCalled();
+    expect(harness.prisma.userSession.updateMany).not.toHaveBeenCalled();
+    expect(harness.prisma.userSession.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects an admin refresh token at the user boundary without revoking the admin family', async () => {
+    const harness = makeHarness();
+    harness.prisma.userSession.findUnique.mockResolvedValue(
+      activePreviousSession({
+        clientType: 'ADMIN_WEB',
+        purpose: 'ADMIN_WEB',
+      }),
+    );
+
+    await expect(
+      harness.service.refreshSession({
+        refreshToken: 'admin-refresh-token',
+        clientType: 'WEB',
+      }),
+    ).rejects.toBeInstanceOf(InvalidRefreshTokenException);
+    expect(harness.prisma.userSession.updateMany).not.toHaveBeenCalled();
+    expect(harness.prisma.userSession.create).not.toHaveBeenCalled();
+  });
+
+  it('revokes an admin refresh family when its platform role is no longer current', async () => {
+    const harness = makeHarness();
+    harness.prisma.userSession.findUnique.mockResolvedValue(
+      activePreviousSession({
+        clientType: 'ADMIN_WEB',
+        purpose: 'ADMIN_WEB',
+      }),
+    );
+    harness.prisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+    const authorize = jest.fn(async () => {
+      throw new Error('platform role revoked');
+    });
+
+    await expect(
+      harness.service.refreshAdminSession(
+        { refreshToken: 'admin-refresh-token' },
+        authorize,
+      ),
+    ).rejects.toBeInstanceOf(InvalidRefreshTokenException);
+    expect(harness.prisma.userSession.updateMany).toHaveBeenCalledWith({
+      where: {
+        tokenFamilyId: '01JFAMILY00000000000000000',
+        revokedAt: null,
+      },
+      data: { revokedAt: now },
+    });
+    expect(harness.prisma.userSession.create).not.toHaveBeenCalled();
+  });
+
+  it('preserves replay-family revocation for rotated admin refresh tokens', async () => {
+    const harness = makeHarness();
+    harness.prisma.userSession.findUnique.mockResolvedValue(
+      activePreviousSession({
+        clientType: 'ADMIN_WEB',
+        purpose: 'ADMIN_WEB',
+        rotatedAt: new Date('2026-08-01T00:00:01.000Z'),
+      }),
+    );
+    harness.prisma.userSession.updateMany.mockResolvedValue({ count: 2 });
+    const authorize = jest.fn(async () => undefined);
+
+    await expect(
+      harness.service.refreshAdminSession(
+        { refreshToken: 'replayed-admin-refresh-token' },
+        authorize,
+      ),
+    ).rejects.toBeInstanceOf(InvalidRefreshTokenException);
+    expect(harness.prisma.userSession.updateMany).toHaveBeenCalledWith({
+      where: {
+        tokenFamilyId: '01JFAMILY00000000000000000',
+        revokedAt: null,
+      },
+      data: { revokedAt: now },
+    });
+    expect(authorize).not.toHaveBeenCalled();
   });
 
   it('revokes the whole family when a rotated refresh token is replayed', async () => {

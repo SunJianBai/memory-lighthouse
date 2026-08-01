@@ -6,10 +6,12 @@
 
 - 邮箱或用户名密码登录、注册、Android refresh token 轮换；访问令牌和设备凭据使用 Android Keystore AES-GCM 加密保存。
 - 家庭、长者和陪伴设备概览；生成二维码/动态激活码并批准设备。
-- 陪伴设备生成独立 Ed25519 安装密钥，按服务端 canonical proof 完成认领、交换和设备凭据轮换。
+- 陪伴设备在 Android Keystore 中生成不可导出的独立签名密钥，安装登记显式声明实际 `installationKeyAlgorithm` 与 `keyProtection=NON_EXPORTABLE_V1`，按服务端 canonical proof 完成认领、交换和设备凭据轮换；私钥不会进入 SharedPreferences、文件或应用进程可导出的 PKCS#8。保护字段是官方客户端版本门槛，不是硬件远程证明。
 - MiniCPM-o 语音/视频双工；先在服务端建立 `CompanionSession` / `ModelSession`，再使用服务端下发的 Realtime URL 与提示词；获授权时上报模型文字和运行事件。
-- 家属发起来电、陪伴端轮询发现来电、现场接听/拒绝/挂断；双方通过服务端一次性 join ticket 接入 LiveKit。
-- 远程通话不使用录制、数据发布或转写接口；应用切到后台时主动关停摄像头、麦克风和连接。
+- 家属发起来电后，专用陪伴模式以前台服务和加密设备凭据轮询发现；Core Telecom 与不可滑除的 `CallStyle` 通知提供接听、拒绝和挂断，双方通过服务端一次性 join ticket 接入 LiveKit。
+- 发现服务只声明 `specialUse`，不访问摄像头或麦克风。只有现场明确接听后才启动独立的 `camera|microphone` 前台服务；拒接、挂断、撤权、远端结束和异常都会释放媒体。
+- 通话由 Application 级协调器持有，Activity 退到后台、锁屏或重建不会主动挂断；进程重建只恢复来电发现，绝不会根据服务端的 `ACCEPTED` 状态静默重开媒体。
+- 远程通话不使用录制、数据发布或转写接口。
 - 长者界面使用 18–30sp 文字、至少 48dp 触控目标、高对比语义色和明确来电提示。
 
 ## 构建
@@ -37,3 +39,10 @@ https://sun227454.online/openBMB/api/v1
 - 音视频通话需要 LiveKit 服务端下发的 `url` 可从 Android 设备访问，并开放相应 WebRTC/TURN 端口。
 - MiniCPM-o 运行需要服务端 `MINICPM_REALTIME_URL` 指向可用的 MiniCPM-o 4.5 Realtime Provider。
 - Android 12+ 真机需由用户在开始陪伴、扫码或现场接听时授予摄像头/麦克风权限。
+- Android 13+ 还需授予通知权限，才能稳定显示来电 `CallStyle` 通知。
+
+## 设备签名算法兼容性
+
+客户端优先尝试 Android Keystore Ed25519（API 33+）；若设备 Keystore 不提供该算法，则使用 API 23+ 广泛支持、同样不可导出的 EC P-256。P-256 安装登记声明 `installationKeyAlgorithm=ECDSA_P256_SHA256`，服务端只接受 `prime256v1` SPKI，并对 claim、exchange、refresh 的同一 canonical message 验证 DER 编码的 `SHA256withECDSA` 签名。两种算法都不会回退到软件私钥或明文持久化。
+
+从旧版可导出 Ed25519 私钥实现升级时，客户端会删除旧密钥材料；本次协议升级还会删除 v2 Keystore alias 并以 v3 alias 生成新密钥，使 APK 回滚不能复用迁移前安装。仅设备侧的旧安装、凭据和待激活状态失效，用户登录保留，设备必须重新由家属批准激活。

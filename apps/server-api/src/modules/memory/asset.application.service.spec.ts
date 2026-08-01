@@ -9,6 +9,7 @@ import type { UserPrincipal } from '../identity/identity.types';
 import { AssetApplicationService } from './asset.application.service';
 import {
   AssetScanPendingException,
+  AssetUnavailableException,
   AssetUploadMismatchException,
 } from './memory.errors';
 import type {
@@ -158,6 +159,7 @@ describe('AssetApplicationService', () => {
           contentLength: Number(asset.byteSize),
           contentType: asset.mimeType,
           checksumSha256Base64: Buffer.from(asset.sha256).toString('base64'),
+          serverSideEncryption: 'AES256',
           metadata: {
             'asset-id': asset.id,
             'household-id': asset.householdId,
@@ -166,6 +168,11 @@ describe('AssetApplicationService', () => {
           },
         };
       }),
+      readObject: jest.fn(async () => ({
+        content: (async function* () {
+          yield Buffer.alloc(0);
+        })(),
+      })),
       createDownloadGrant: jest.fn(async () => ({
         url: 'https://minio.test/download',
         expiresAt: new Date('2026-08-01T10:01:00.000Z'),
@@ -240,10 +247,20 @@ describe('AssetApplicationService', () => {
     });
     expect(completed.status).toBe('ACTIVE');
     expect(completed.scanStatus).toBe('PENDING');
+    expect(state.outbox).toHaveLength(1);
+    expect(state.outbox[0]).toMatchObject({
+      eventType: 'asset.scan-requested',
+    });
     await expect(
       service.authorizeDownload(principal.userId, householdId, intent.asset.id),
     ).rejects.toBeInstanceOf(AssetScanPendingException);
 
+    await service.recordScanResult(intent.asset.id, 'FAILED');
+    await expect(
+      service.authorizeDownload(principal.userId, householdId, intent.asset.id),
+    ).rejects.toBeInstanceOf(AssetUnavailableException);
+
+    await service.recordScanResult(intent.asset.id, 'CLEAN');
     await service.recordScanResult(intent.asset.id, 'CLEAN');
     await expect(
       service.authorizeDownload(principal.userId, householdId, intent.asset.id),
@@ -261,7 +278,14 @@ describe('AssetApplicationService', () => {
     );
     expect(firstDelete.status).toBe('PENDING_DELETE');
     expect(secondDelete).toEqual(firstDelete);
-    expect(state.outbox).toHaveLength(1);
+    expect(state.outbox).toHaveLength(2);
+    expect(state.outbox[1]).toMatchObject({
+      eventType: 'asset.delete-requested',
+    });
+    expect(state.outbox[1].availableAt).toBeInstanceOf(Date);
+    expect(
+      (state.outbox[1].availableAt as Date).getTime(),
+    ).toBeGreaterThanOrEqual(state.assets[0].createdAt.getTime() + 360_000);
 
     await service.deletePendingAsset(intent.asset.id);
     await service.deletePendingAsset(intent.asset.id);
@@ -274,6 +298,7 @@ describe('AssetApplicationService', () => {
       contentLength: 1_024,
       contentType: 'image/jpeg',
       checksumSha256Base64: Buffer.alloc(32, 0x01).toString('base64'),
+      serverSideEncryption: 'AES256',
       metadata: {
         'asset-id': 'another-asset',
         'household-id': householdId,
@@ -292,6 +317,34 @@ describe('AssetApplicationService', () => {
       }),
     ).rejects.toBeInstanceOf(AssetUploadMismatchException);
     expect(state.assets[0].status).toBe('PENDING_UPLOAD');
+  });
+
+  it('does not publish an object whose HEAD lacks SSE-S3 AES256', async () => {
+    const test = setup();
+    const intent = await begin(test.service);
+    const asset = test.state.assets[0];
+    jest.mocked(test.storage.headObject).mockResolvedValueOnce({
+      contentLength: Number(asset.byteSize),
+      contentType: asset.mimeType,
+      checksumSha256Base64: Buffer.from(asset.sha256).toString('base64'),
+      serverSideEncryption: null,
+      metadata: {
+        'asset-id': asset.id,
+        'household-id': asset.householdId,
+        'uploaded-by-member-id': asset.uploadedByMemberId,
+        sha256: Buffer.from(asset.sha256).toString('hex'),
+      },
+    });
+
+    await expect(
+      test.service.completeUpload({
+        principal,
+        householdId,
+        assetId: intent.asset.id,
+        version: 0,
+      }),
+    ).rejects.toBeInstanceOf(AssetUploadMismatchException);
+    expect(test.state.assets[0].status).toBe('PENDING_UPLOAD');
   });
 
   it('denies cross-household asset paths before object storage access', async () => {

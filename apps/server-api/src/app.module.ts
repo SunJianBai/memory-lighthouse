@@ -30,7 +30,7 @@ import { RealtimeCommunicationModule } from './modules/realtime-communication/re
     CareWorkflowModule,
     CompanionSessionModule,
     RealtimeCommunicationModule,
-    PlatformOperationsModule,
+    PlatformOperationsModule.register(process.env.NODE_ENV),
   ],
 })
 export class AppModule {}

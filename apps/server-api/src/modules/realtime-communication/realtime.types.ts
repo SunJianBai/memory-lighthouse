@@ -25,6 +25,7 @@ export interface RemoteAvailabilityView {
   bindingId: string;
   online: boolean;
   busy: boolean;
+  companionActive: boolean;
   answerMode: 'ONSITE_ANSWER';
   lastSeenAt: string | null;
 }
@@ -48,6 +49,7 @@ export interface RemoteSessionView {
 
 export interface RemoteJoinTicketView {
   sessionId: string;
+  ticketId: string;
   participantId: string;
   participantIdentity: string;
   url: string;
@@ -70,9 +72,13 @@ export interface LiveKitJoinTicketCommand {
 }
 
 export interface VerifiedLiveKitWebhook {
+  eventId: string;
   event: string;
   roomName: string | null;
   participantIdentity: string | null;
+  participantSid: string | null;
+  participantId: string | null;
+  participantTicketId: string | null;
   trackSource: 'microphone' | 'camera' | 'unknown' | null;
   occurredAt: Date;
 }

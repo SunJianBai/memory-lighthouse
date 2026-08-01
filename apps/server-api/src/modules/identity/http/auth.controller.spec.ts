@@ -14,16 +14,22 @@ jest.mock('../identity.application.service', () => ({
 const config: IdentitySecurityConfig = {
   environment: 'test',
   accessTokenSecret: Buffer.from('a'.repeat(48)),
+  adminAccessTokenSecret: Buffer.from('d'.repeat(48)),
   refreshTokenPepper: Buffer.from('b'.repeat(48)),
   oneTimeTokenPepper: Buffer.from('c'.repeat(48)),
   accessTokenTtlSeconds: 900,
+  adminAccessTokenTtlSeconds: 600,
   refreshTokenTtlSeconds: 2_592_000,
   emailVerificationTtlSeconds: 86_400,
   passwordResetTtlSeconds: 1_800,
   accessTokenIssuer: 'issuer',
   accessTokenAudience: 'audience',
+  adminAccessTokenIssuer: 'admin-issuer',
+  adminAccessTokenAudience: 'admin-audience',
   refreshCookieName: 'refresh',
   refreshCookiePath: '/openBMB/api/v1/auth',
+  adminRefreshCookieName: 'admin-refresh',
+  adminRefreshCookiePath: '/openBMB/api/v1/admin/auth',
   secureCookies: false,
 };
 

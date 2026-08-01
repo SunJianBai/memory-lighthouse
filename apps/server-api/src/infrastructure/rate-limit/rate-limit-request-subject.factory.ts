@@ -98,6 +98,9 @@ export class RateLimitRequestSubjectFactory {
   ): string | undefined {
     const body = asRecord(request.body);
     const params = asRecord(request.params);
+    const principal = asRecord(
+      (request as Request & { userPrincipal?: unknown }).userPrincipal,
+    );
     switch (kind) {
       case 'ip':
         return this.clientIp(request);
@@ -125,9 +128,20 @@ export class RateLimitRequestSubjectFactory {
           asNonEmptyString(params?.challengeId) ??
           asNonEmptyString(body?.challengeId)
         );
+      case 'recipient-id':
+        return asNonEmptyString(params?.recipientId);
       case 'device-credential':
         return (
           asNonEmptyString(body?.credential) ?? this.bearerCredential(request)
+        );
+      case 'user-account':
+        return asNonEmptyString(principal?.userId);
+      case 'user-session':
+        return asNonEmptyString(principal?.sessionId);
+      case 'binding-id':
+        return (
+          asNonEmptyString(body?.bindingId) ??
+          asNonEmptyString(params?.bindingId)
         );
     }
   }

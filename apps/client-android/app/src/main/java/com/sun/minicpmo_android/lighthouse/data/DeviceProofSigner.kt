@@ -1,13 +1,18 @@
 package com.sun.minicpmo_android.lighthouse.data
 
-import java.security.KeyFactory
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import java.security.AlgorithmParameters
 import java.security.KeyPairGenerator
+import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.PrivateKey
+import java.security.PublicKey
 import java.security.Signature
-import java.security.spec.PKCS8EncodedKeySpec
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECGenParameterSpec
+import java.security.spec.ECParameterSpec
 import java.util.Base64
-import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.util.Locale
 
 enum class ActivationProofType { QR_SECRET, DYNAMIC_CODE }
@@ -94,17 +99,48 @@ object DeviceProofProtocol {
     }
 }
 
+enum class DeviceProofKeyAlgorithm(
+    val protocolId: String,
+    val signatureAlgorithm: String,
+) {
+    ED25519("ED25519", "Ed25519"),
+    ECDSA_P256_SHA256("ECDSA_P256_SHA256", "SHA256withECDSA"),
+}
+
+/**
+ * Installation proof signer backed by a non-exportable Android Keystore key.
+ *
+ * Android API 33+ exposes Ed25519 in AndroidKeyStore. Older supported versions
+ * use a non-exportable P-256 key and declare that algorithm during installation
+ * registration. There is no software or persisted-private-key fallback.
+ */
 class DeviceProofSigner(private val secureStore: SecureStore) {
-    private val ed25519Provider by lazy { BouncyCastleProvider() }
+    val legacyKeyMaterialPurged: Boolean
+
+    init {
+        // Remove material created by the pre-Keystore implementation without
+        // loading it back into the application process. Protocol-v2 Keystore
+        // aliases are also deleted so rolling the APK back cannot reuse an
+        // installation that predates the server-side capability gate.
+        val androidKeyStore = keyStore()
+        val legacyKeystoreAliasPresent = LEGACY_KEYSTORE_ALIASES.any(androidKeyStore::containsAlias)
+        legacyKeyMaterialPurged = secureStore.contains(LEGACY_EXPORTED_PRIVATE_KEY_PREF) ||
+            secureStore.contains(LEGACY_PUBLIC_SPKI) ||
+            legacyKeystoreAliasPresent
+        secureStore.remove(LEGACY_EXPORTED_PRIVATE_KEY_PREF)
+        secureStore.remove(LEGACY_PUBLIC_SPKI)
+        LEGACY_KEYSTORE_ALIASES.forEach { deleteInvalidAlias(androidKeyStore, it) }
+    }
+
     @Synchronized
     fun publicKeySpki(): String {
-        ensureKeyPair()
-        return requireNotNull(secureStore.get(KEY_PUBLIC_SPKI))
+        val key = ensureKey()
+        return DeviceProofProtocol.base64Url(key.publicKeySpki)
     }
 
     @Synchronized
     fun publicKeyFingerprint(): String {
-        val encoded = Base64.getUrlDecoder().decode(publicKeySpki())
+        val encoded = ensureKey().publicKeySpki
         return try {
             DeviceProofProtocol.base64Url(
                 MessageDigest.getInstance("SHA-256").digest(encoded),
@@ -116,41 +152,163 @@ class DeviceProofSigner(private val secureStore: SecureStore) {
 
     @Synchronized
     fun sign(message: ByteArray): String {
-        ensureKeyPair()
-        val encoded = Base64.getUrlDecoder().decode(
-            requireNotNull(secureStore.get(KEY_PRIVATE_PKCS8)),
-        )
-        return try {
-            val privateKey = KeyFactory.getInstance(ALGORITHM, ed25519Provider)
-                .generatePrivate(PKCS8EncodedKeySpec(encoded))
-            DeviceProofProtocol.base64Url(sign(privateKey, message))
-        } finally {
-            encoded.fill(0)
-        }
-    }
-
-    private fun sign(privateKey: PrivateKey, message: ByteArray): ByteArray =
-        Signature.getInstance(ALGORITHM, ed25519Provider).run {
+        val key = ensureKey()
+        val privateKey = keyStore().getKey(key.alias, null) as? PrivateKey
+            ?: error("Android Keystore device proof key is unavailable")
+        val signature = Signature.getInstance(key.algorithm.signatureAlgorithm).run {
             initSign(privateKey)
             update(message)
             sign()
         }
-
-    private fun ensureKeyPair() {
-        if (
-            secureStore.get(KEY_PUBLIC_SPKI) != null &&
-            secureStore.get(KEY_PRIVATE_PKCS8) != null
-        ) {
-            return
-        }
-        val pair = KeyPairGenerator.getInstance(ALGORITHM, ed25519Provider).generateKeyPair()
-        secureStore.put(KEY_PUBLIC_SPKI, DeviceProofProtocol.base64Url(pair.public.encoded))
-        secureStore.put(KEY_PRIVATE_PKCS8, DeviceProofProtocol.base64Url(pair.private.encoded))
+        return DeviceProofProtocol.base64Url(signature)
     }
 
+    @Synchronized
+    fun keyAlgorithm(): DeviceProofKeyAlgorithm = ensureKey().algorithm
+
+    private fun ensureKey(): KeyDescriptor {
+        val keyStore = keyStore()
+        for ((algorithm, alias) in listOf(
+            DeviceProofKeyAlgorithm.ED25519 to ED25519_ALIAS,
+            DeviceProofKeyAlgorithm.ECDSA_P256_SHA256 to P256_ALIAS,
+        )) {
+            loadValidDescriptor(keyStore, algorithm, alias)?.let { return it }
+        }
+
+        val preferred = generateAndLoad(
+            algorithm = DeviceProofKeyAlgorithm.ED25519,
+            alias = ED25519_ALIAS,
+            generate = ::generateEd25519,
+        )
+        if (preferred != null) return preferred
+
+        return requireNotNull(
+            generateAndLoad(
+                algorithm = DeviceProofKeyAlgorithm.ECDSA_P256_SHA256,
+                alias = P256_ALIAS,
+                generate = ::generateP256,
+            ),
+        ) { "Android Keystore cannot create a supported device proof key" }
+    }
+
+    private fun generateEd25519() {
+        val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, KEYSTORE_PROVIDER)
+        generator.initialize(
+            KeyGenParameterSpec.Builder(
+                ED25519_ALIAS,
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
+            )
+                .setAlgorithmParameterSpec(ECGenParameterSpec("ed25519"))
+                .setDigests(KeyProperties.DIGEST_NONE)
+                .build(),
+        )
+        generator.generateKeyPair()
+    }
+
+    private fun generateP256() {
+        val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, KEYSTORE_PROVIDER)
+        generator.initialize(
+            KeyGenParameterSpec.Builder(
+                P256_ALIAS,
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
+            )
+                .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+                .build(),
+        )
+        generator.generateKeyPair()
+    }
+
+    private fun generateAndLoad(
+        algorithm: DeviceProofKeyAlgorithm,
+        alias: String,
+        generate: () -> Unit,
+    ): KeyDescriptor? = runCatching {
+        generate()
+        requireNotNull(loadValidDescriptor(keyStore(), algorithm, alias))
+    }.getOrElse {
+        deleteInvalidAlias(keyStore(), alias)
+        null
+    }
+
+    private fun loadValidDescriptor(
+        keyStore: KeyStore,
+        algorithm: DeviceProofKeyAlgorithm,
+        alias: String,
+    ): KeyDescriptor? {
+        if (!keyStore.containsAlias(alias)) return null
+        return runCatching {
+            val publicKey = requireNotNull(keyStore.getCertificate(alias)) {
+                "Android Keystore device proof certificate is unavailable"
+            }.publicKey
+            val privateKey = keyStore.getKey(alias, null) as? PrivateKey
+                ?: error("Android Keystore device proof private key is unavailable")
+            require(validateDescriptor(algorithm, publicKey, privateKey)) {
+                "Android Keystore device proof alias has an incompatible algorithm"
+            }
+            KeyDescriptor(
+                algorithm = algorithm,
+                alias = alias,
+                publicKeySpki = publicKey.encoded,
+            )
+        }.getOrElse {
+            deleteInvalidAlias(keyStore, alias)
+            null
+        }
+    }
+
+    private fun validateDescriptor(
+        algorithm: DeviceProofKeyAlgorithm,
+        publicKey: PublicKey,
+        privateKey: PrivateKey,
+    ): Boolean = when (algorithm) {
+        DeviceProofKeyAlgorithm.ED25519 ->
+            publicKey.algorithm.isEd25519Name() &&
+                privateKey.algorithm.isEd25519Name()
+        DeviceProofKeyAlgorithm.ECDSA_P256_SHA256 ->
+            publicKey is ECPublicKey &&
+                privateKey.algorithm.equals("EC", ignoreCase = true) &&
+                publicKey.params.matchesP256()
+    }
+
+    private fun String.isEd25519Name(): Boolean =
+        ED25519_JCA_NAMES.any { equals(it, ignoreCase = true) }
+
+    private fun ECParameterSpec.matchesP256(): Boolean {
+        val expected = AlgorithmParameters.getInstance("EC").run {
+            init(ECGenParameterSpec("secp256r1"))
+            getParameterSpec(ECParameterSpec::class.java)
+        }
+        return curve == expected.curve &&
+            generator == expected.generator &&
+            order == expected.order &&
+            cofactor == expected.cofactor
+    }
+
+    private fun deleteInvalidAlias(keyStore: KeyStore, alias: String) {
+        runCatching {
+            if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+        }
+    }
+
+    private fun keyStore() = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+
+    private data class KeyDescriptor(
+        val algorithm: DeviceProofKeyAlgorithm,
+        val alias: String,
+        val publicKeySpki: ByteArray,
+    )
+
     private companion object {
-        const val ALGORITHM = "Ed25519"
-        const val KEY_PUBLIC_SPKI = "device-ed25519-public-spki-v1"
-        const val KEY_PRIVATE_PKCS8 = "device-ed25519-private-pkcs8-v1"
+        const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+        const val ED25519_ALIAS = "memory-lighthouse-device-proof-ed25519-v3"
+        const val P256_ALIAS = "memory-lighthouse-device-proof-p256-v3"
+        const val LEGACY_PUBLIC_SPKI = "device-ed25519-public-spki-v1"
+        const val LEGACY_EXPORTED_PRIVATE_KEY_PREF = "device-ed25519-private-pkcs8-v1"
+        val LEGACY_KEYSTORE_ALIASES = listOf(
+            "memory-lighthouse-device-proof-ed25519-v2",
+            "memory-lighthouse-device-proof-p256-v2",
+        )
+        val ED25519_JCA_NAMES = setOf("Ed25519", "EdDSA")
     }
 }

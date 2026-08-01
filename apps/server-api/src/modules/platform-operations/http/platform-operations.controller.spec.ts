@@ -8,7 +8,7 @@ import { PlatformOperationsController } from './platform-operations.controller';
 describe('PlatformOperationsController identity', () => {
   it('returns the authenticated user with current database-backed roles and capabilities', async () => {
     const principal: PlatformPrincipal = {
-      kind: 'USER',
+      kind: 'ADMIN',
       userId: 'admin-user',
       sessionId: 'session-1',
       tokenId: 'token-1',

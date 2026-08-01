@@ -15,6 +15,8 @@ import {
   type FormEvent,
 } from "react";
 import { apiClient, readableError } from "../../api/api-client";
+import { IdempotentCommandRegistry } from "../../api/idempotent-command";
+import { useAuth } from "../../auth/auth-context";
 import type {
   CareEventView,
   FamilyTaskView,
@@ -32,6 +34,7 @@ const showTime = (minutes: number) =>
   `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 
 export const RoutinesApiPage = () => {
+  const { user } = useAuth();
   const workspace = useWorkspace();
   const [routines, setRoutines] = useState<RoutineView[]>([]);
   const [tasks, setTasks] = useState<FamilyTaskView[]>([]);
@@ -46,6 +49,15 @@ export const RoutinesApiPage = () => {
   const [instructions, setInstructions] = useState("");
   const [question, setQuestion] = useState("");
   const [time, setTime] = useState("08:30");
+  const careCommands = useMemo(
+    () =>
+      new IdempotentCommandRegistry(undefined, {
+        persist: true,
+        namespace: user?.id ?? "anonymous",
+        scope: "family-care",
+      }),
+    [user?.id],
+  );
 
   const load = useCallback(async () => {
     if (!workspace.householdId || !workspace.recipientId) {
@@ -144,9 +156,23 @@ export const RoutinesApiPage = () => {
               resolutionCode:
                 action === "resolve" ? "FAMILY_CONFIRMED" : "NOT_ACTIONABLE",
             };
-      const updated = await apiClient.request<FamilyTaskView>(
-        `/households/${workspace.householdId}/family-tasks/${task.id}/${action}`,
-        { method: "POST", body },
+      const updated = await careCommands.execute(
+        JSON.stringify([
+          "family-task",
+          workspace.householdId,
+          task.id,
+          action,
+          body,
+        ]),
+        (idempotencyKey) =>
+          apiClient.request<FamilyTaskView>(
+            `/households/${workspace.householdId}/family-tasks/${task.id}/${action}`,
+            {
+              method: "POST",
+              headers: { "Idempotency-Key": idempotencyKey },
+              body,
+            },
+          ),
       );
       setTasks((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
@@ -171,16 +197,29 @@ export const RoutinesApiPage = () => {
     setBusyId(occurrence.id);
     setError("");
     try {
-      const updated = await apiClient.request<OccurrenceView>(
-        `/households/${workspace.householdId}/occurrences/${occurrence.id}/family-verify`,
-        {
-          method: "POST",
-          body: {
-            version: occurrence.version,
-            idempotencyKey: crypto.randomUUID(),
-            verified,
-          },
-        },
+      const normalizedCommand = JSON.stringify([
+        "family-verify",
+        workspace.householdId,
+        occurrence.id,
+        occurrence.version,
+        verified,
+        null,
+      ]);
+      const updated = await careCommands.execute(
+        normalizedCommand,
+        (idempotencyKey) =>
+          apiClient.request<OccurrenceView>(
+            `/households/${workspace.householdId}/occurrences/${occurrence.id}/family-verify`,
+            {
+              method: "POST",
+              headers: { "Idempotency-Key": idempotencyKey },
+              body: {
+                version: occurrence.version,
+                idempotencyKey,
+                verified,
+              },
+            },
+          ),
       );
       setOccurrences((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),

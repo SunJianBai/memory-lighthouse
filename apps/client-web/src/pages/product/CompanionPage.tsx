@@ -22,6 +22,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
+import { flushSync } from "react-dom";
 import { readableError } from "../../api/api-client";
 import type {
   CompanionSessionStartView,
@@ -31,7 +32,10 @@ import type {
 import { navigate } from "../../app/navigation";
 import { useAuth } from "../../auth/auth-context";
 import { BrandMark } from "../../components/BrandMark";
-import { CareExperience } from "../../components/CareExperience";
+import {
+  CareExperience,
+  type CareExperienceHandle,
+} from "../../components/CareExperience";
 import {
   deviceSession,
   parseQrActivation,
@@ -43,6 +47,13 @@ import {
   LiveMediaConnection,
   type LiveMediaStatus,
 } from "../../realtime/live-media";
+import {
+  acceptRemoteWithAuthoritativeHandoff,
+  guardActiveCompanionHeartbeat,
+  guardCompanionWrite,
+  shouldKeepCompanionActive,
+  shouldStopForMediaDirective,
+} from "../../realtime/remote-answer-handoff";
 import { useAppState } from "../../state/app-state";
 
 type BarcodeResult = { rawValue?: string };
@@ -177,14 +188,84 @@ export const CompanionPage = () => {
   const [scanning, setScanning] = useState(false);
   const scannerVideo = useRef<HTMLVideoElement | null>(null);
   const scannerStream = useRef<MediaStream | null>(null);
+  const careExperience = useRef<CareExperienceHandle | null>(null);
   const activeCompanionId = useRef("");
+  const heartbeatRequestSequence = useRef(0);
+  const heartbeatAppliedSequence = useRef(0);
   const exchangeStarted = useRef(false);
   const [incoming, setIncoming] = useState<RemoteSessionView | null>(null);
   const [callStatus, setCallStatus] = useState<LiveMediaStatus>("idle");
   const [callDetail, setCallDetail] = useState("");
+  const [serverMediaStopped, setServerMediaStopped] = useState(false);
   const localVideo = useRef<HTMLVideoElement | null>(null);
   const remoteAudio = useRef<HTMLAudioElement | null>(null);
   const liveMedia = useRef(new LiveMediaConnection());
+
+  const stopLocalCompanionRuntime = useCallback(
+    (commitStopped: () => void, reason: string) => {
+      careExperience.current?.stopLocalRuntime(reason);
+      activeCompanionId.current = "";
+      flushSync(commitStopped);
+    },
+    [],
+  );
+
+  const applyHeartbeat = useCallback(
+    (heartbeat: Awaited<ReturnType<typeof deviceSession.heartbeat>>) => {
+      setOnline(true);
+      if (!shouldStopForMediaDirective(heartbeat.mediaDirective)) {
+        setServerMediaStopped(false);
+        return;
+      }
+      stopLocalCompanionRuntime(
+        () => {
+          setServerMediaStopped(true);
+          setNotice(
+            heartbeat.reason
+              ? `陪伴媒体已由服务端停止：${heartbeat.reason}`
+              : "陪伴媒体授权或会话已失效，摄像头、麦克风和模型连接已停止。",
+          );
+        },
+        "server_media_stop",
+      );
+    },
+    [stopLocalCompanionRuntime],
+  );
+
+  const sendHeartbeat = useCallback(async () => {
+    const requestSequence = ++heartbeatRequestSequence.current;
+    const reportedSessionId = activeCompanionId.current || undefined;
+    const heartbeat = await guardActiveCompanionHeartbeat(
+      deviceSession.heartbeat(reportedSessionId),
+      reportedSessionId,
+      (heartbeatError) => {
+        stopLocalCompanionRuntime(
+          () => {
+            setServerMediaStopped(true);
+            setError(readableError(heartbeatError));
+          },
+          "device_heartbeat_failed",
+        );
+      },
+    );
+    if (requestSequence < heartbeatAppliedSequence.current) return;
+    heartbeatAppliedSequence.current = requestSequence;
+    applyHeartbeat(heartbeat);
+  }, [applyHeartbeat, stopLocalCompanionRuntime]);
+
+  const failClosedCompanionWrite = useCallback(
+    (writeError: unknown) => {
+      const message = readableError(writeError);
+      stopLocalCompanionRuntime(
+        () => {
+          setServerMediaStopped(true);
+          setError(message);
+        },
+        "companion_write_rejected",
+      );
+    },
+    [stopLocalCompanionRuntime],
+  );
 
   const loadContext = useCallback(async () => {
     const next = await deviceSession.context();
@@ -193,9 +274,8 @@ export const CompanionPage = () => {
       runtimeStateFromContext(demoState, next, next.careSnapshot),
     );
     setActivated(true);
-    await deviceSession.heartbeat();
-    setOnline(true);
-  }, [demoState]);
+    await sendHeartbeat();
+  }, [demoState, sendHeartbeat]);
 
   useEffect(() => {
     let cancelled = false;
@@ -220,13 +300,11 @@ export const CompanionPage = () => {
   useEffect(() => {
     if (!activated) return;
     const timer = window.setInterval(() => {
-      void deviceSession
-        .heartbeat()
-        .then(() => setOnline(true))
+      void sendHeartbeat()
         .catch(() => setOnline(false));
-    }, 30_000);
+    }, 5_000);
     return () => window.clearInterval(timer);
-  }, [activated]);
+  }, [activated, sendHeartbeat]);
 
   useEffect(() => {
     if (!activated) return;
@@ -276,14 +354,6 @@ export const CompanionPage = () => {
     if (sessionId) await deviceSession.endCompanion(sessionId, reason);
   }, []);
 
-  useEffect(() => {
-    if (incoming) {
-      void stopCompanionServerSession("REMOTE_RINGING").catch((stopError) => {
-        setError(readableError(stopError));
-      });
-    }
-  }, [incoming?.id, stopCompanionServerSession]);
-
   useEffect(
     () => () => {
       scannerStream.current?.getTracks().forEach((track) => track.stop());
@@ -322,9 +392,14 @@ export const CompanionPage = () => {
               : eventType;
             if (statusEvents.has(dedupeKey)) return;
             statusEvents.add(dedupeKey);
-            void deviceSession
-              .appendModelEvent(model.session.id, eventType, errorCode)
-              .catch((eventError) => setError(readableError(eventError)));
+            void guardCompanionWrite(
+              deviceSession.appendModelEvent(
+                model.session.id,
+                eventType,
+                errorCode,
+              ),
+              failClosedCompanionWrite,
+            );
           };
           return {
             prompt: model.prompt.content,
@@ -344,21 +419,27 @@ export const CompanionPage = () => {
                 recordEvent("FIRST_RESPONSE");
               }
               sequenceNo += 1;
-              void deviceSession
-                .appendAssistantUtterance(model.session.id, sequenceNo, text)
-                .catch((utteranceError) =>
-                  setError(readableError(utteranceError)),
-                );
+              void guardCompanionWrite(
+                deviceSession.appendAssistantUtterance(
+                  model.session.id,
+                  sequenceNo,
+                  text,
+                ),
+                failClosedCompanionWrite,
+              );
             },
             onUserTranscriptFinal: context?.consent.decisions
               .MODEL_INPUT_TRANSCRIPTION
               ? (text: string) => {
                   sequenceNo += 1;
-                  void deviceSession
-                    .appendUserTranscript(model.session.id, sequenceNo, text)
-                    .catch((utteranceError) =>
-                      setError(readableError(utteranceError)),
-                    );
+                  void guardCompanionWrite(
+                    deviceSession.appendUserTranscript(
+                      model.session.id,
+                      sequenceNo,
+                      text,
+                    ),
+                    failClosedCompanionWrite,
+                  );
                 }
               : undefined,
             onRuntimeError: (message: string) => {
@@ -392,8 +473,19 @@ export const CompanionPage = () => {
           source,
         );
       },
+      requestFamily: async (
+        source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE" | "COMPANION_TIMEOUT",
+        occurrenceId?: string,
+      ) => {
+        await deviceSession.requestFamilyContact(source, occurrenceId);
+      },
     }),
-    [context, demoState, stopCompanionServerSession],
+    [
+      context,
+      demoState,
+      failClosedCompanionWrite,
+      stopCompanionServerSession,
+    ],
   );
 
   const claim = async (input: ActivationClaim) => {
@@ -511,21 +603,33 @@ export const CompanionPage = () => {
     setBusy(true);
     setError("");
     try {
-      await stopCompanionServerSession("REMOTE_TAKEOVER");
-      if (incoming.status === "RINGING") {
-        const accepted = await deviceSession.acceptRemote(incoming.id);
-        setIncoming(accepted);
-      }
-      const ticket = await deviceSession.remoteTicket(incoming.id);
-      await liveMedia.current.connect(
-        ticket,
-        "DEVICE",
-        { localVideo: localVideo.current, remoteAudio: remoteAudio.current },
-        (status, detail) => {
-          setCallStatus(status);
-          setCallDetail(detail ?? "");
+      await acceptRemoteWithAuthoritativeHandoff({
+        session: incoming,
+        accept: (sessionId) => deviceSession.acceptRemote(sessionId),
+        stopLocalCompanion: async (authoritative) => {
+          // Commit the authoritative state synchronously so CareExperience is
+          // unmounted and releases camera/microphone before LiveKit starts.
+          stopLocalCompanionRuntime(
+            () => setIncoming(authoritative),
+            "remote_assistance_accepted",
+          );
         },
-      );
+        joinMedia: async (authoritative) => {
+          const ticket = await deviceSession.remoteTicket(authoritative.id);
+          await liveMedia.current.connect(
+            ticket,
+            "DEVICE",
+            {
+              localVideo: localVideo.current,
+              remoteAudio: remoteAudio.current,
+            },
+            (status, detail) => {
+              setCallStatus(status);
+              setCallDetail(detail ?? "");
+            },
+          );
+        },
+      });
     } catch (acceptError) {
       setError(readableError(acceptError));
     } finally {
@@ -573,6 +677,37 @@ export const CompanionPage = () => {
       setBusy(false);
     }
   };
+
+  const companionRuntimePanel = (
+    <section className="companion-runtime-shell">
+      <div className="companion-runtime-status">
+        <div>
+          <span className="status-pill success">
+            <Wifi aria-hidden="true" size={16} /> 设备已激活
+          </span>
+          <strong>{context?.recipient.preferredName}的陪伴设备</strong>
+          <p>绑定编号末 6 位：{context?.bindingId.slice(-6)}</p>
+        </div>
+        <div className="inline-boundary">
+          <PhoneCall aria-hidden="true" size={18} /> 来电状态由服务端设备会话接口持续同步；
+          现场接听前，陪伴模型继续运行，远程通话不会占用摄像头或麦克风。
+        </div>
+      </div>
+      {error && (
+        <div className="inline-alert danger" role="alert">
+          <span>{error}</span>
+        </div>
+      )}
+      {runtimeState && (
+        <CareExperience
+          ref={careExperience}
+          runtimeState={runtimeState}
+          sessionCoordinator={coordinator}
+          serverBackedMode
+        />
+      )}
+    </section>
+  );
 
   if (initializing) {
     return (
@@ -739,15 +874,32 @@ export const CompanionPage = () => {
             </div>
           )}
         </section>
-      ) : incoming ? (
-        <section className="incoming-call-screen">
+      ) : (
+        <>
+          {!serverMediaStopped &&
+            shouldKeepCompanionActive(incoming?.status ?? null) &&
+            companionRuntimePanel}
+          {serverMediaStopped && !incoming && (
+            <section className="companion-runtime-shell">
+              <div className="inline-alert danger" role="alert">
+                <ShieldCheck aria-hidden="true" size={20} />
+                <span>{notice || "陪伴媒体已停止，请检查授权后刷新设备上下文。"}</span>
+              </div>
+            </section>
+          )}
+          {incoming && (
+        <section
+          className={`incoming-call-screen${
+            incoming.status === "RINGING" ? " is-overlay" : ""
+          }`}
+        >
           <div className="incoming-pulse">
             <PhoneCall aria-hidden="true" size={42} />
           </div>
           <p className="eyebrow">家庭成员来电</p>
           <h1>{context?.recipient.preferredName}，家人想和你说话</h1>
           <p>
-            只有点击接听后，摄像头和麦克风才会用于这次实时通话。通话不会录音，也不会转写。
+            现场接听前，当前陪伴对话继续运行；只有点击接听后，摄像头和麦克风才会切换给这次实时通话。通话不会录音，也不会转写。
           </p>
           <div
             className={`device-call-media ${callStatus === "connected" ? "is-connected" : "is-pending"}`}
@@ -772,7 +924,7 @@ export const CompanionPage = () => {
             ) : (
               <span className="span-full">
                 <ShieldCheck aria-hidden="true" size={18} />{" "}
-                尚未接听，摄像头和麦克风保持关闭
+                远程通话尚未接听，陪伴模型继续按原授权运行
               </span>
             )}
           </div>
@@ -832,34 +984,8 @@ export const CompanionPage = () => {
             )}
           </div>
         </section>
-      ) : (
-        <section className="companion-runtime-shell">
-          <div className="companion-runtime-status">
-            <div>
-              <span className="status-pill success">
-                <Wifi aria-hidden="true" size={16} /> 设备已激活
-              </span>
-              <strong>{context?.recipient.preferredName}的陪伴设备</strong>
-              <p>绑定编号末 6 位：{context?.bindingId.slice(-6)}</p>
-            </div>
-            <div className="inline-boundary">
-              <PhoneCall aria-hidden="true" size={18} />{" "}
-              来电状态由服务端设备会话接口持续同步，现场接听前不会打开摄像头或麦克风。
-            </div>
-          </div>
-          {error && (
-            <div className="inline-alert danger" role="alert">
-              <span>{error}</span>
-            </div>
           )}
-          {runtimeState && (
-            <CareExperience
-              runtimeState={runtimeState}
-              sessionCoordinator={coordinator}
-              serverBackedMode
-            />
-          )}
-        </section>
+        </>
       )}
     </main>
   );

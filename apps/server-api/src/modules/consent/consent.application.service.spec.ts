@@ -262,9 +262,16 @@ class ConsentPrismaHarness {
 function makeHarness() {
   const prisma = new ConsentPrismaHarness();
   const access = new HouseholdConsentAccessAdapter(new HouseholdAccessPolicy());
+  const mediaSecurity = {
+    markRecipientRevoked: jest.fn(async () => 0),
+    markCompanionConsentRevoked: jest.fn(async () => 0),
+    cleanupPendingForRecipient: jest.fn(async () => undefined),
+    cleanupCompanionLeasesForRecipient: jest.fn(async () => undefined),
+  };
   const consent = new ConsentApplicationService(
     prisma as unknown as PrismaService,
     access,
+    mediaSecurity as never,
   );
   const command = {
     userId: 'user-owner',
@@ -275,7 +282,7 @@ function makeHarness() {
     reason: '陪伴端提供视频能力',
     idempotencyKey: 'grant-camera-0001',
   };
-  return { prisma, consent, command };
+  return { prisma, consent, command, mediaSecurity };
 }
 
 describe('ConsentApplicationService', () => {
@@ -354,6 +361,37 @@ describe('ConsentApplicationService', () => {
       eventType: 'consent.revoked',
       payloadJson: { scope: 'CAMERA_CAPTURE' },
     });
+  });
+
+  it('does not let an old revoke replay terminate media created after a later grant', async () => {
+    const { consent, command, prisma, mediaSecurity } = makeHarness();
+    await consent.grantConsent(command);
+    const revokeCommand = {
+      ...command,
+      reason: '长者暂时停止摄像头',
+      idempotencyKey: 'revoke-camera-replay-0001',
+    };
+    const revoked = await consent.revokeConsent(revokeCommand);
+    await consent.grantConsent({
+      ...command,
+      reason: '长者重新允许摄像头',
+      idempotencyKey: 'grant-camera-after-revoke-0001',
+    });
+    mediaSecurity.markCompanionConsentRevoked.mockClear();
+    mediaSecurity.cleanupCompanionLeasesForRecipient.mockClear();
+
+    await expect(consent.revokeConsent(revokeCommand)).resolves.toEqual(
+      revoked,
+    );
+
+    expect(mediaSecurity.markCompanionConsentRevoked).not.toHaveBeenCalled();
+    expect(
+      mediaSecurity.cleanupCompanionLeasesForRecipient,
+    ).toHaveBeenCalledTimes(1);
+    expect(prisma.events).toHaveLength(3);
+    expect(
+      prisma.states.find((state) => state.scope === command.scope)?.decision,
+    ).toBe('GRANTED');
   });
 
   it('rejects a caregiver without the mapped canManageConsent capability', async () => {

@@ -94,6 +94,20 @@ export type DeviceConfirmOccurrenceCommand = Omit<
   'bindingId'
 >;
 
+export interface DeviceFamilyContactRequestCommand {
+  idempotencyKey: string;
+  source: 'RECIPIENT_BUTTON' | 'RECIPIENT_VOICE' | 'COMPANION_TIMEOUT';
+  occurrenceId?: string | null;
+}
+
+export interface FamilyContactRequestView {
+  accepted: true;
+  careEventId: string;
+  familyTaskId: string;
+  occurrenceId: string | null;
+  taskStatus: string;
+}
+
 export interface FamilyVerifyOccurrenceCommand {
   version: number;
   idempotencyKey: string;
@@ -136,10 +150,12 @@ export interface FamilyTaskView {
 
 export interface ClaimFamilyTaskCommand {
   version: number;
+  idempotencyKey: string;
 }
 
 export interface FinishFamilyTaskCommand {
   version: number;
+  idempotencyKey: string;
   resolutionCode: string;
   note?: string | null;
 }

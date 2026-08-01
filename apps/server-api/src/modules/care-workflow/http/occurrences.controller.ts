@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
   Query,
@@ -18,6 +19,7 @@ import {
   FamilyVerifyOccurrenceDto,
   OccurrenceQueryDto,
 } from './care-workflow.dto';
+import { requireMatchingIdempotencyKey } from './idempotency-key';
 
 @Controller('households/:householdId')
 @UseGuards(UserAccessGuard)
@@ -43,13 +45,20 @@ export class OccurrencesController {
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
     @Param('occurrenceId') occurrenceId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body() body: ConfirmOccurrenceDto,
   ): Promise<OccurrenceView> {
     return this.workflow.confirmOccurrence(
       principal,
       householdId,
       occurrenceId,
-      body,
+      {
+        ...body,
+        idempotencyKey: requireMatchingIdempotencyKey(
+          idempotencyKey,
+          body.idempotencyKey,
+        ),
+      },
     );
   }
 
@@ -58,13 +67,20 @@ export class OccurrencesController {
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
     @Param('occurrenceId') occurrenceId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body() body: FamilyVerifyOccurrenceDto,
   ): Promise<OccurrenceView> {
     return this.workflow.familyVerifyOccurrence(
       principal,
       householdId,
       occurrenceId,
-      body,
+      {
+        ...body,
+        idempotencyKey: requireMatchingIdempotencyKey(
+          idempotencyKey,
+          body.idempotencyKey,
+        ),
+      },
     );
   }
 

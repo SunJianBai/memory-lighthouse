@@ -61,6 +61,14 @@ export interface DeviceContextView {
   };
 }
 
+export interface DeviceHeartbeatView {
+  online: true;
+  serverTime: string;
+  mediaDirective: 'CONTINUE' | 'STOP';
+  activeCompanionSessionId?: string;
+  reason?: string;
+}
+
 export interface CompanionSessionView {
   id: string;
   householdId: string;

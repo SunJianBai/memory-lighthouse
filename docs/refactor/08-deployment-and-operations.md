@@ -70,17 +70,21 @@ APP_ENV
 PUBLIC_API_ORIGIN
 DATABASE_URL
 REDIS_URL
+RATE_LIMIT_KEY_SECRET
 MINIO_ENDPOINT / MINIO_BUCKET / MINIO_ACCESS_KEY / MINIO_SECRET_KEY
 SESSION_SIGNING_KEY / DEVICE_SIGNING_KEY
+AUTH_ADMIN_ACCESS_TOKEN_SECRET
 DATA_KEY_PROVIDER / DATA_KEY_ID
 LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET
 MODEL_PROVIDER / MODEL_REALTIME_URL / MODEL_CHAT_URL
 EMAIL_PROVIDER / EMAIL_FROM
-ADMIN_CONTENT_INSPECTION_ENABLED
+ENABLE_DEVELOPMENT_CONTENT_INSPECTION
+ASSET_LIFECYCLE_WORKER_ENABLED / ASSET_LIFECYCLE_LEASE_MS
+CLAMAV_HOST / CLAMAV_PORT / CLAMAV_SCAN_TIMEOUT_MS
 OTEL_EXPORTER_OTLP_ENDPOINT
 ```
 
-生产环境检测到 `ADMIN_CONTENT_INSPECTION_ENABLED=true` 时默认拒绝启动。
+生产环境检测到 `ENABLE_DEVELOPMENT_CONTENT_INSPECTION=true` 时拒绝启动；无论开关值为何，生产模块都不注册内容检查授权和原文读取 HTTP 控制器，因此相关路径返回 404。`RATE_LIMIT_KEY_SECRET` 必须是至少 32 字节随机值的 canonical base64url，并通过独立 HMAC 域同时用于限流键和审计 IP 伪名。
 
 ### 3.2 Android
 
@@ -138,10 +142,11 @@ Redis 清空后系统允许在线状态短暂丢失，但不能造成授权恢�
 
 - Bucket 按环境隔离，不按家庭创建海量 Bucket。
 - Object Key 使用随机 ID，不含姓名、邮箱、家庭名称或原文件路径。
-- 上传意图限制 MIME、大小、哈希和单次操作。
-- 上传完成后先进入 `PENDING_SCAN`，扫描通过才允许进入模型上下文。
-- 开启服务端加密、版本化和生命周期规则。
-- 数据库标记删除后由 Worker 删除对象；失败持续重试并告警。
+- 上传意图限制 MIME、大小、哈希和单次操作，并要求 `If-None-Match: *`，使同一预签名 URL 不能覆盖已存在对象。
+- 上传完成后保持 `PENDING`，同事务写扫描 Outbox；Worker 也按状态周期补偿发现，扫描通过才允许下载或进入模型上下文。
+- 扫描器必须消费对象真实字节并使用 ClamAV `INSTREAM`；仅检查 HEAD/Metadata 不算恶意内容扫描。clamd 不可用时写 `FAILED`、继续拒绝访问并退避重试。
+- 开启 SSE-S3、版本化和生命周期规则；客户端 PUT 显式要求 `AES256`，完成上传时再次从 HEAD 验证。
+- 数据库标记删除后由带租约 Worker 等待上传 URL 过期，再永久删除该 Key 的全部对象版本与 Delete Marker；二次列举和 HEAD 都确认无内容后写 `DELETED`，失败保留 `PENDING_DELETE` 持续重试并告警。
 - 备份必须同时包含 MySQL 元数据和对象版本，恢复后执行引用一致性扫描。
 
 ## 8. LiveKit 运维
@@ -149,6 +154,9 @@ Redis 清空后系统允许在线状态短暂丢失，但不能造成授权恢�
 - NestJS 是创建业务会话和签发 Join Ticket 的唯一入口。
 - 房间名不可猜测，Token 短 TTL，结束时移除参与者或删除房间。
 - Webhook 验签并幂等处理；Webhook 迟到不能复活终态会话。
+- 自托管 LiveKit 的参与者移除/权限更新不提供 LiveKit Cloud 的 Token 撤销语义；连接中的客户端还可能收到刷新 Token，其有效期为 10 分钟或原 Token 剩余有效期（取更长者）。以 [LiveKit 官方 Token 与 grants 说明](https://docs.livekit.io/frontends/reference/tokens-grants/)为准，不能把 `RemoveParticipant`、等待 60 秒或清空 Redis 当作全局凭据撤销。
+- 涉及全量设备凭据失效的迁移必须在 API 与 LiveKit 同时停机时执行；停机核实后先持久化 `security-boundary.pending`，再原子轮换 `LIVEKIT_API_SECRET`，旧密钥不得备份或在失败/回滚中恢复。随后清除应用 Redis 的媒体租约和专用 LiveKit Redis 的临时房间状态，迁移成功后才使用新密钥重新启动 LiveKit 与 API。
+- 每个 release 声明单调递增的 security epoch。新应用健康后按 `current-app` → `minimum-security-epoch` → 清除 pending 的顺序持久化；pending 存在或应用 epoch 低于 floor 时，systemd start/reload 和应用回滚一律拒绝。跨 epoch 失败只能用相同或更高 epoch 前滚；同 epoch 也不能代表 schema 向后兼容，只有迁移尚未开始且不是续跑既有 pending 时，才可在旧应用与 LiveKit 重新健康后自动恢复，否则必须前滚。
 - 监控房间数、参与者数、加入耗时、丢包、TURN 占比、出入带宽和异常结束。
 - 不启用 Egress，除非未来增加独立录制需求和授权。
 - 网络故障时优先保证双方明确看到“已断开”，而不是维持假在线状态。
@@ -205,4 +213,3 @@ Replay/Fake（测试和演示保底）
 5. Model Provider 故障切回 Replay 或本地 Ascend。
 6. 管理员原文权限误开后的启动阻断、审计查询和通知。
 7. 家庭账号被盗后的会话、设备和远程权限一键撤销。
-

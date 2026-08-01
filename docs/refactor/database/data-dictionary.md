@@ -59,6 +59,7 @@
 | `refresh_token_hash` | `BINARY(32)` | 唯一摘要 |
 | `token_family_id` | `CHAR(26)` | 令牌轮换族 |
 | `client_type` | `VARCHAR(16)` | `WEB/ANDROID/ADMIN_WEB` |
+| `purpose` | `VARCHAR(32)` | 会话用途；`USER` 与 `ADMIN_WEB` 互不换取对方令牌 |
 | `device_id` | `CHAR(26) NULL` | 对应安装，可空 |
 | `issued_at/expires_at/last_used_at` | `DATETIME(3)` | 生命周期 |
 | `rotated_at/revoked_at` | `DATETIME(3) NULL` | 轮换和撤销 |
@@ -124,7 +125,11 @@
 
 ### `devices`
 
-`platform`、`installation_key_fingerprint`、`installation_public_key`、`manufacturer`、`model`、`os_version`、`app_version`、`last_seen_at`、`status`。不保存 IMEI 或 Android ID。
+`platform`、`installation_key_fingerprint`、`installation_public_key`、`installation_key_algorithm`、`key_protection`、`manufacturer`、`model`、`os_version`、`app_version`、`last_seen_at`、`status`。不保存 IMEI 或 Android ID。
+
+`installation_key_algorithm` 只允许 `ED25519` 或 `ECDSA_P256_SHA256`。服务端登记时严格校验 SPKI 类型；后者还必须是 `prime256v1`，后续 claim、exchange、refresh 从该数据库列选择 Ed25519 或 DER ECDSA/SHA-256 验签。迁移前公钥由旧服务严格限定为 Ed25519，因此回填 `ED25519`。
+
+`key_protection` 是客户端在安装登记时声明的协议能力。当前唯一可激活值为 `NON_EXPORTABLE_V1`；迁移前记录写为 `LEGACY_UNVERIFIED` 并保持撤销。两个字段都无数据库默认值，激活认领、批准、凭据交换、短期设备令牌校验和刷新凭据轮换都要求受支持算法及 `NON_EXPORTABLE_V1`。
 
 ### `companion_bindings`
 
@@ -144,7 +149,7 @@
 
 ### `device_activation_challenges`
 
-`public_id`、`flow`、`household_id`、`recipient_id`、`pending_device_id`、`secret_hash`、`code_hash`、`status`、`issued_by_member_id`、`approved_by_member_id`、`expires_at`、`claimed_at`、`approved_at`、`consumed_at`、`attempt_count`、`max_attempts`。
+`public_id`、`flow`、`household_id`、`recipient_id`、`pending_device_id`、`secret_hash`、`code_hash`、`status`、`issued_by_member_id`、`approved_by_member_id`、`expires_at`、`claimed_at`、`claim_network_source`、`approval_idempotency_key`、`approved_at`、`consumed_at`、`attempt_count`、`max_attempts`。`claim_network_source` 只保留公网/局域网等粗粒度类别，不保存 IP；批准前使用包含挑战版本、设备公钥指纹、展示元数据、认领时间和网络类别的 HMAC 快照令牌防止“看到 A、批准 B”。
 
 ### `device_credentials`
 
@@ -221,7 +226,11 @@ Scope 至少包括：`CAMERA`、`MICROPHONE`、`CLOUD_MODEL_PROCESSING`、`SENSI
 
 ### `family_task_actions`
 
-追加记录 `task_id`、`actor_member_id`、`action`、`from_status`、`to_status`、加密 note 和 `occurred_at`。
+追加记录 `task_id`、`actor_member_id`、`action`、`from_status`、`to_status`、加密 note、`occurred_at` 和动作审计用 `idempotency_key`。
+
+### `care_command_receipts`
+
+Care Workflow 所有幂等命令共享的持久化回执：`idempotency_key` 全局唯一，`command_type` 标识命令类别，`command_fingerprint` 是包含主体、目标及完整规范化业务参数的 SHA-256；`result_ciphertext`、`result_nonce`、`encryption_key_id` 加密保存首次成功响应快照，避免照护说明或处置备注形成新增明文副本。相同键只有在完整指纹一致时才重放首次响应；`source`、`utterance_id`、`note`、`resolution_code`、`version` 等任一业务字段变化均返回 `IDEMPOTENCY_CONFLICT`。
 
 ## 9. 陪伴和模型会话
 
@@ -277,11 +286,15 @@ Scope 至少包括：`CAMERA`、`MICROPHONE`、`CLOUD_MODEL_PROCESSING`、`SENSI
 | `requested/accepted/connected/ended_at` | 生命周期 |
 | `ended_by_type/ended_by_id/end_reason` | 结束来源 |
 | `consent_snapshot_json` | 发起时授权快照 |
+| `room_cleanup_status` | `PENDING/COMPLETED`；终态房间删除的持久安全屏障，默认 `PENDING` |
+| `room_cleanup_completed_at` | LiveKit 已确认删除且数据库检查点完成的时间；写入前不得释放媒体租约 |
+| `room_cleanup_not_before` | 首次建房结果不确定时的保守清理完成下限；此前定时任务重复删房并保持媒体隔离，用于回收迟到空房，但票据安全本身由唯一 `PROVISIONING` owner 与 `room_provisioned_at` 不变量保证 |
+| `room_provisioned_at` | 首次 CreateRoom 成功并与会话行同事务提交的时间；非空后后续参与者不得再次调用 CreateRoom，且任何 Join Ticket 都不得早于该检查点交付 |
 | `trace_id/version` | 追踪与并发控制 |
 
 ### `remote_session_participants`
 
-`session_id`、`principal_type`、可选 `user_id/binding_id`、`role`、`client_type`、`joined_at`、`left_at`、`published_audio`、`published_video`。
+`session_id`、`principal_type`、可选 `user_id/binding_id`、`role`、`client_type`、`joined_at`、`left_at`、`published_audio`、`published_video`，以及唯一 `join_ticket_id`、`join_ticket_status`、签发/到期/消费/撤销时间。`join_ticket_consumed_event_id` 和 `livekit_participant_sid` 原子记录首次实际入会的 webhook UUID 与连接 SID，用于区分 webhook 重投和同 JWT/identity 的第二次连接。签发 saga 按 `ISSUING -> PROVISIONING -> ROOM_READY -> ISSUED -> CONSUMED` 前进；只有 `ISSUED` 后 JWT 才能离开服务端。崩溃遗留且未交付的 `ISSUING/ROOM_READY` 可按时间和状态 CAS 复位，过期 `PROVISIONING` 必须与会话失败、撤票和清理屏障同事务处理；终止会话统一转为 `REVOKED`，同一参与者不能重复签发或重复消费。
 
 ### `remote_session_events`
 

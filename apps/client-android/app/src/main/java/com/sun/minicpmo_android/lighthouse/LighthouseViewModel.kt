@@ -1,18 +1,19 @@
 package com.sun.minicpmo_android.lighthouse
 
-import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.core.net.toUri
+import com.sun.minicpmo_android.lighthouse.call.CompanionCallService
+import com.sun.minicpmo_android.lighthouse.call.CompanionMediaHandoffState
+import com.sun.minicpmo_android.lighthouse.call.RemoteCallCoordinator
 import com.sun.minicpmo_android.lighthouse.data.ActivationProofType
 import com.sun.minicpmo_android.lighthouse.data.LighthouseRepository
+import com.sun.minicpmo_android.lighthouse.data.RemoteCallCommandPayload
+import com.sun.minicpmo_android.lighthouse.data.RemoteCallCommandRegistry
 import com.sun.minicpmo_android.lighthouse.model.*
 import com.sun.minicpmo_android.lighthouse.network.LighthouseApiException
-import com.sun.minicpmo_android.lighthouse.realtime.CallSide
-import com.sun.minicpmo_android.lighthouse.realtime.LiveKitCallController
 import com.sun.minicpmo_android.lighthouse.realtime.LiveCallState
-import com.sun.minicpmo_android.lighthouse.realtime.LiveCallPhase
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -26,25 +27,35 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
 
-class LighthouseViewModel(
-    context: Context,
+class LighthouseViewModel internal constructor(
     private val repository: LighthouseRepository,
+    private val callCoordinator: RemoteCallCoordinator,
+    private val remoteCallCommands: RemoteCallCommandRegistry,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(
         LighthouseUiState(apiBaseUrl = repository.apiBaseUrl()),
     )
     val uiState: StateFlow<LighthouseUiState> = _uiState.asStateFlow()
 
-    private val callController = LiveKitCallController(context, viewModelScope)
-    val callState: StateFlow<LiveCallState> = callController.state
+    val callState: StateFlow<LiveCallState> = callCoordinator.liveCallState
+    val companionMediaHandoffState: StateFlow<CompanionMediaHandoffState> =
+        callCoordinator.companionMediaHandoffState
 
-    private var incomingPolling: Job? = null
     private var activationPolling: Job? = null
     private var remotePolling: Job? = null
-    private var heartbeatJob: Job? = null
     private var deferredActivationPayload: String? = null
 
     init {
+        viewModelScope.launch {
+            callCoordinator.state.collect { coordinated ->
+                if (_uiState.value.role == AppRole.COMPANION) {
+                    _uiState.value = _uiState.value.copy(
+                        incomingRemoteSession = coordinated.incoming,
+                        activeRemoteSession = coordinated.active,
+                    )
+                }
+            }
+        }
         restore()
     }
 
@@ -86,17 +97,19 @@ class LighthouseViewModel(
     }
 
     fun logout() = action {
+        val userId = _uiState.value.user?.id
         _uiState.value.activeRemoteSession?.let { session ->
-            runCatching {
-                if (_uiState.value.role == AppRole.COMPANION) {
-                    repository.endDeviceRemoteSession(session.id)
-                } else {
+            if (_uiState.value.role == AppRole.COMPANION) {
+                runCatching { callCoordinator.endCompanionCall(session.id) }
+            } else {
+                runCatching {
                     repository.endFamilyRemoteSession(session.householdId, session.id)
                 }
+                callCoordinator.disconnectFamily("signed_out")
             }
         }
         stopBackgroundJobs()
-        callController.disconnect("signed_out")
+        userId?.let(remoteCallCommands::terminateAllForUser)
         repository.logout()
         _uiState.value = LighthouseUiState(
             restoring = false,
@@ -113,11 +126,13 @@ class LighthouseViewModel(
             aiScreenVisible = false,
             qrScannerVisible = false,
         )
-        if (role == AppRole.COMPANION && _uiState.value.deviceActivated) {
-            startIncomingPolling()
-        } else {
-            incomingPolling?.cancel()
-            incomingPolling = null
+        if (role == AppRole.COMPANION) {
+            val coordinated = callCoordinator.state.value
+            _uiState.value = _uiState.value.copy(
+                incomingRemoteSession = coordinated.incoming,
+                activeRemoteSession = coordinated.active,
+            )
+            if (_uiState.value.deviceActivated) callCoordinator.ensureCompanionDiscoveryRunning()
         }
     }
 
@@ -286,13 +301,31 @@ class LighthouseViewModel(
         val activation = repository.createActivationChallenge(householdId, recipientId)
         _uiState.value = _uiState.value.copy(
             activation = activation,
+            activationApprovalDetails = null,
             message = "激活凭据已生成；陪伴设备认领后仍需家属现场批准",
         )
     }
 
+    fun loadActivationApprovalDetails(challengeId: String) = action {
+        val details = repository.activationApprovalDetails(challengeId)
+        _uiState.value = _uiState.value.copy(
+            activationApprovalDetails = details,
+            message = "请核对设备、认领时间和网络来源后再批准",
+        )
+    }
+
     fun approveActivation(challengeId: String) = action {
-        repository.approveActivation(challengeId)
-        _uiState.value = _uiState.value.copy(message = "已批准设备激活")
+        val details = _uiState.value.activationApprovalDetails
+            ?.takeIf { it.challengeId == challengeId }
+            ?: error("请先读取并核对待批准设备信息")
+        repository.approveActivation(challengeId, details.claimSnapshotToken)
+        val householdId = _uiState.value.selectedHouseholdId
+        _uiState.value = _uiState.value.copy(
+            activation = null,
+            activationApprovalDetails = null,
+            bindings = householdId?.let { repository.listBindings(it) }.orEmpty(),
+            message = "已批准设备激活",
+        )
         startActivationPolling()
     }
 
@@ -352,8 +385,23 @@ class LighthouseViewModel(
     }
 
     fun requestRemoteCall(bindingId: String) = action {
+        val initiatorUserId = _uiState.value.user?.id ?: error("请先登录")
         val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        val session = repository.requestRemoteSession(householdId, bindingId)
+        val media = RequestedRemoteMedia()
+        val payload = RemoteCallCommandPayload(
+            initiatorUserId = initiatorUserId,
+            householdId = householdId,
+            bindingId = bindingId,
+            media = media,
+        )
+        val session = remoteCallCommands.execute(payload) { idempotencyKey ->
+            repository.requestRemoteSession(
+                householdId = householdId,
+                bindingId = bindingId,
+                idempotencyKey = idempotencyKey,
+                media = media,
+            )
+        }
         _uiState.value = _uiState.value.copy(
             activeRemoteSession = session,
             message = "已发起现场接听请求，长者设备明确接听后才能连线",
@@ -361,24 +409,34 @@ class LighthouseViewModel(
         startFamilyRemotePolling(session)
     }
 
-    fun acceptIncomingCall() = action {
-        val incoming = _uiState.value.incomingRemoteSession ?: error("来电已失效")
-        val accepted = repository.acceptDeviceRemoteSession(incoming.id)
+    fun acceptIncomingCall(sessionId: String? = null) = action {
+        val incoming = _uiState.value.incomingRemoteSession
+            ?.takeIf { sessionId == null || it.id == sessionId }
+            ?: error("来电已失效")
+        callCoordinator.acceptIncoming(incoming.id)
         _uiState.value = _uiState.value.copy(
-            incomingRemoteSession = null,
-            activeRemoteSession = accepted,
+            pendingSystemAnswerSessionId = null,
             message = "已现场接听，正在进入通话",
         )
-        val ticket = repository.deviceJoinTicket(accepted.id)
-        callController.connect(ticket, CallSide.DEVICE)
-        startRemoteHeartbeat(accepted.id)
     }
+
+    fun attachLocalCompanionStopConsumer() =
+        callCoordinator.attachLocalCompanionStopConsumer()
+
+    fun detachLocalCompanionStopConsumer() =
+        callCoordinator.detachLocalCompanionStopConsumer()
+
+    fun completeLocalCompanionStop(requestId: Long) =
+        callCoordinator.completeLocalCompanionStop(requestId)
+
+    fun failLocalCompanionStop(requestId: Long, error: Throwable) =
+        callCoordinator.failLocalCompanionStop(requestId, error)
 
     fun declineIncomingCall() = action {
         val incoming = _uiState.value.incomingRemoteSession ?: return@action
-        repository.declineDeviceRemoteSession(incoming.id)
+        callCoordinator.declineIncoming(incoming.id)
         _uiState.value = _uiState.value.copy(
-            incomingRemoteSession = null,
+            pendingSystemAnswerSessionId = null,
             message = "已拒绝本次来电",
         )
     }
@@ -386,28 +444,27 @@ class LighthouseViewModel(
     fun connectFamilyCall() = action {
         val session = _uiState.value.activeRemoteSession ?: error("通话请求不存在")
         val ticket = repository.familyJoinTicket(session.householdId, session.id)
-        callController.connect(ticket, CallSide.FAMILY)
+        callCoordinator.connectFamily(ticket)
     }
 
     fun connectDeviceCall() = action {
         val session = _uiState.value.activeRemoteSession ?: error("通话请求不存在")
-        val ticket = repository.deviceJoinTicket(session.id)
-        callController.connect(ticket, CallSide.DEVICE)
-        startRemoteHeartbeat(session.id)
+        val pending = callCoordinator.state.value.incoming?.takeIf { it.id == session.id }
+            ?: error("通话已连接或不再等待现场接听")
+        callCoordinator.acceptIncoming(pending.id)
     }
 
     fun endRemoteCall() = action {
         val session = _uiState.value.activeRemoteSession
-        callController.disconnect()
-        heartbeatJob?.cancel()
-        heartbeatJob = null
         if (session != null) {
             if (_uiState.value.role == AppRole.COMPANION) {
-                repository.endDeviceRemoteSession(session.id)
+                callCoordinator.endCompanionCall(session.id)
             } else {
                 repository.endFamilyRemoteSession(session.householdId, session.id)
+                callCoordinator.disconnectFamily()
             }
         }
+        _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
         _uiState.value = _uiState.value.copy(activeRemoteSession = null, message = "通话已结束")
     }
 
@@ -415,14 +472,15 @@ class LighthouseViewModel(
         val session = _uiState.value.activeRemoteSession ?: return@action
         repository.cancelFamilyRemoteSession(session.householdId, session.id)
         remotePolling?.cancel()
+        _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
         _uiState.value = _uiState.value.copy(activeRemoteSession = null, message = "已取消呼叫")
     }
 
     fun attachVideoRenderer(renderer: livekit.org.webrtc.SurfaceViewRenderer) =
-        callController.attachRenderer(renderer)
+        callCoordinator.attachRenderer(renderer)
 
     fun detachVideoRenderer(renderer: livekit.org.webrtc.SurfaceViewRenderer) =
-        callController.detachRenderer(renderer)
+        callCoordinator.detachRenderer(renderer)
 
     fun saveApiBaseUrl(url: String) = action {
         repository.saveApiBaseUrl(url)
@@ -436,10 +494,23 @@ class LighthouseViewModel(
         _uiState.value = _uiState.value.copy(message = null, error = null)
     }
 
-    fun onAppBackgrounded() {
-        if (callState.value.phase in setOf(LiveCallPhase.CONNECTING, LiveCallPhase.CONNECTED)) {
-            endRemoteCall()
+    fun handleCallIntent(action: String?, sessionId: String?) {
+        if (sessionId.isNullOrBlank()) return
+        when (action) {
+            CompanionCallService.ACTION_ANSWER -> _uiState.value = _uiState.value.copy(
+                role = AppRole.COMPANION,
+                pendingSystemAnswerSessionId = sessionId,
+                aiScreenVisible = false,
+            )
+            CompanionCallService.ACTION_OPEN_INCOMING -> _uiState.value = _uiState.value.copy(
+                role = AppRole.COMPANION,
+                aiScreenVisible = false,
+            )
         }
+    }
+
+    fun consumeSystemAnswerIntent() {
+        _uiState.value = _uiState.value.copy(pendingSystemAnswerSessionId = null)
     }
 
     private fun restore() = viewModelScope.launch {
@@ -573,13 +644,13 @@ class LighthouseViewModel(
         )
         if (repository.hasDeviceCredential() && accountCanUseDevice) {
             val context = repository.getDeviceContext()
-            repository.heartbeat()
+            callCoordinator.recordDeviceHeartbeat()
             _uiState.value = _uiState.value.copy(
                 deviceActivated = true,
                 companionContext = context,
                 pendingDeviceActivation = null,
             )
-            if (_uiState.value.role == AppRole.COMPANION) startIncomingPolling()
+            callCoordinator.ensureCompanionDiscoveryRunning()
         } else if (repository.hasDeviceCredential()) {
             _uiState.value = _uiState.value.copy(
                 message = "这台陪伴设备属于另一个家庭；请使用该家庭成员账号登录",
@@ -607,14 +678,14 @@ class LighthouseViewModel(
                                 return@launch
                             }
                             val context = repository.getDeviceContext()
-                            repository.heartbeat()
+                            callCoordinator.recordDeviceHeartbeat()
                             _uiState.value = _uiState.value.copy(
                                 deviceActivated = true,
                                 pendingDeviceActivation = null,
                                 companionContext = context,
                                 message = "设备激活完成，已绑定 ${context.recipientName}",
                             )
-                            startIncomingPolling()
+                            callCoordinator.ensureCompanionDiscoveryRunning()
                             return@launch
                         }
                     }
@@ -624,51 +695,6 @@ class LighthouseViewModel(
                             return@launch
                         }
                     }
-                delay(3_000)
-            }
-        }
-    }
-
-    private fun startIncomingPolling() {
-        if (!_uiState.value.deviceActivated) return
-        incomingPolling?.cancel()
-        incomingPolling = viewModelScope.launch {
-            while (isActive && _uiState.value.role == AppRole.COMPANION) {
-                runCatching {
-                    repository.heartbeat()
-                    repository.currentDeviceRemoteSession()
-                }.onSuccess { session ->
-                    when {
-                        session == null -> {
-                            if (_uiState.value.activeRemoteSession != null) {
-                                heartbeatJob?.cancel()
-                                heartbeatJob = null
-                                callController.disconnect("对方已结束通话")
-                                _uiState.value = _uiState.value.copy(
-                                    incomingRemoteSession = null,
-                                    activeRemoteSession = null,
-                                    message = "远程通话已结束",
-                                )
-                            } else {
-                                _uiState.value = _uiState.value.copy(incomingRemoteSession = null)
-                            }
-                        }
-                        session.status == "RINGING" -> _uiState.value = _uiState.value.copy(incomingRemoteSession = session)
-                        session.status in ACTIVE_REMOTE_STATUSES -> _uiState.value =
-                            _uiState.value.copy(activeRemoteSession = session, incomingRemoteSession = null)
-                    }
-                }.onFailure { error ->
-                    if (error is LighthouseApiException && error.code == "DEVICE_NOT_ACTIVATED") {
-                        _uiState.value = _uiState.value.copy(
-                            deviceActivated = false,
-                            companionContext = null,
-                            incomingRemoteSession = null,
-                            activeRemoteSession = null,
-                            error = error.message,
-                        )
-                        return@launch
-                    }
-                }
                 delay(3_000)
             }
         }
@@ -688,7 +714,8 @@ class LighthouseViewModel(
                 _uiState.value = _uiState.value.copy(activeRemoteSession = current)
             }
             if (current.status in TERMINAL_REMOTE_STATUSES) {
-                callController.disconnect(current.endReason ?: "通话已结束")
+                _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
+                callCoordinator.disconnectFamily(current.endReason ?: "通话已结束")
                 _uiState.value = _uiState.value.copy(
                     activeRemoteSession = null,
                     message = when (current.status) {
@@ -697,16 +724,6 @@ class LighthouseViewModel(
                         else -> "远程通话已结束"
                     },
                 )
-            }
-        }
-    }
-
-    private fun startRemoteHeartbeat(sessionId: String) {
-        heartbeatJob?.cancel()
-        heartbeatJob = viewModelScope.launch {
-            while (isActive) {
-                runCatching { repository.remoteHeartbeat(sessionId) }
-                delay(15_000)
             }
         }
     }
@@ -726,8 +743,9 @@ class LighthouseViewModel(
 
     private fun handleActionFailure(error: Throwable) {
         if (error is LighthouseApiException && error.code == "SIGNED_OUT") {
+            _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
             stopBackgroundJobs()
-            callController.disconnect("signed_out")
+            callCoordinator.disconnectFamily("signed_out")
             _uiState.value = LighthouseUiState(
                 restoring = false,
                 apiBaseUrl = repository.apiBaseUrl(),
@@ -756,16 +774,13 @@ class LighthouseViewModel(
     }
 
     private fun stopBackgroundJobs() {
-        listOf(incomingPolling, activationPolling, remotePolling, heartbeatJob).forEach { it?.cancel() }
-        incomingPolling = null
+        listOf(activationPolling, remotePolling).forEach { it?.cancel() }
         activationPolling = null
         remotePolling = null
-        heartbeatJob = null
     }
 
     override fun onCleared() {
         stopBackgroundJobs()
-        callController.disconnect("client_closed")
         super.onCleared()
     }
 
@@ -779,7 +794,6 @@ class LighthouseViewModel(
             "APPOINTMENT",
             "OTHER",
         )
-        private val ACTIVE_REMOTE_STATUSES = setOf("ACCEPTED", "CONNECTING", "ACTIVE", "ENDING")
         private val TERMINAL_REMOTE_STATUSES = setOf(
             "DECLINED",
             "CANCELLED",
@@ -789,11 +803,15 @@ class LighthouseViewModel(
             "REVOKED",
         )
 
-        fun factory(context: Context, graph: AppGraph): ViewModelProvider.Factory =
+        fun factory(graph: AppGraph): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                    LighthouseViewModel(context.applicationContext, graph.repository) as T
+                    LighthouseViewModel(
+                        graph.repository,
+                        graph.callCoordinator,
+                        graph.remoteCallCommands,
+                    ) as T
             }
     }
 }

@@ -5,6 +5,11 @@ export const IDENTITY_SECURITY_CONFIG = Symbol('IDENTITY_SECURITY_CONFIG');
 
 export const USER_ACCESS_TOKEN_AUDIENCE = 'memory-lighthouse-user';
 export const USER_ACCESS_TOKEN_ISSUER = 'memory-lighthouse-server';
+export const ADMIN_ACCESS_TOKEN_AUDIENCE = 'memory-lighthouse-admin';
+export const ADMIN_ACCESS_TOKEN_ISSUER = 'memory-lighthouse-server/admin';
+
+export const USER_SESSION_PURPOSE = 'USER';
+export const ADMIN_SESSION_PURPOSE = 'ADMIN_WEB';
 
 export const EMAIL_IDENTITY = 'EMAIL';
 export const USERNAME_IDENTITY = 'USERNAME';
