@@ -1,10 +1,13 @@
 import type { PrismaService } from '../../infrastructure/database/prisma.service';
 import type { HouseholdAccessPolicy } from '../household/domain/household-access.policy';
+import type { DevicePrincipal } from '../device-activation/device-activation.types';
 import type { UserPrincipal } from '../identity/identity.types';
 import { CareWorkflowApplicationService } from './care-workflow.application.service';
 import { OCCURRENCE_STATUS } from './care-workflow.constants';
 import {
+  DeviceOccurrenceAccessDeniedException,
   FamilyTaskClaimConflictException,
+  InvalidOccurrenceTransitionException,
   OccurrenceNotFoundException,
 } from './care-workflow.errors';
 import type { CareWorkflowClock } from './ports/care-workflow-clock.port';
@@ -17,6 +20,18 @@ const principal: UserPrincipal = {
   sessionId: 'session-1',
   tokenId: 'token-1',
   status: 'ACTIVE',
+};
+const devicePrincipal: DevicePrincipal = {
+  kind: 'DEVICE',
+  tokenId: 'device-token-1',
+  credentialId: 'device-credential-1',
+  credentialFamilyId: 'device-family-1',
+  deviceId: 'device-1',
+  bindingId: 'binding-1',
+  householdId: 'household-1',
+  recipientId: 'recipient-1',
+  bindingVersion: 3,
+  capabilities: ['COMPANION'],
 };
 
 const cipher: CareWorkflowContentCipher = {
@@ -91,6 +106,9 @@ function harness(options?: {
     : null;
   let finalStatus = current.status;
   const transaction = {
+    companionBinding: {
+      findFirst: jest.fn().mockResolvedValue({ id: devicePrincipal.bindingId }),
+    },
     routineOccurrence: {
       findFirst: jest.fn().mockResolvedValue(current),
       updateMany: jest.fn().mockImplementation(({ data }) => {
@@ -131,6 +149,12 @@ function harness(options?: {
     outboxEvent: { create: jest.fn().mockResolvedValue({}) },
   };
   const prisma = {
+    companionBinding: {
+      findFirst: jest.fn().mockResolvedValue({ id: devicePrincipal.bindingId }),
+    },
+    routineOccurrence: {
+      findMany: jest.fn().mockResolvedValue([]),
+    },
     $transaction: jest
       .fn()
       .mockImplementation(async (work) => work(transaction)),
@@ -242,6 +266,177 @@ describe('CareWorkflowApplicationService occurrence closure', () => {
       ),
     ).rejects.toBeInstanceOf(OccurrenceNotFoundException);
     expect(test.policy.requireRecipientAction).not.toHaveBeenCalled();
+  });
+
+  it('lets the active companion binding confirm for its own recipient without a member identity', async () => {
+    const test = harness();
+
+    const view = await test.service.confirmOccurrenceByDevice(
+      devicePrincipal,
+      'occurrence-1',
+      {
+        version: 0,
+        idempotencyKey: 'device-confirm-1',
+        source: 'RECIPIENT_VOICE',
+        note: '长者明确说已完成',
+      },
+    );
+
+    expect(view.status).toBe(OCCURRENCE_STATUS.confirmed);
+    expect(test.policy.requireRecipientAction).not.toHaveBeenCalled();
+    expect(test.transaction.companionBinding.findFirst).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: devicePrincipal.bindingId,
+        bindingVersion: devicePrincipal.bindingVersion,
+        deviceId: devicePrincipal.deviceId,
+        householdId: devicePrincipal.householdId,
+        recipientId: devicePrincipal.recipientId,
+        status: 'ACTIVE',
+        revokedAt: null,
+      }),
+      select: { id: true },
+    });
+    expect(test.transaction.routineConfirmation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          confirmationType: 'RECIPIENT_CONFIRMED',
+          source: 'RECIPIENT_VOICE',
+          memberId: null,
+          bindingId: devicePrincipal.bindingId,
+        }),
+      }),
+    );
+    expect(test.transaction.familyTask.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('hides another recipient occurrence from a companion device', async () => {
+    const test = harness();
+    test.transaction.routineOccurrence.findFirst.mockImplementation(
+      ({ where }) =>
+        Promise.resolve(
+          where.householdId === test.current.householdId &&
+            where.recipientId === test.current.recipientId
+            ? test.current
+            : null,
+        ),
+    );
+
+    await expect(
+      test.service.confirmOccurrenceByDevice(
+        { ...devicePrincipal, recipientId: 'recipient-2' },
+        'occurrence-1',
+        {
+          version: 0,
+          idempotencyKey: 'wrong-recipient',
+          source: 'RECIPIENT_BUTTON',
+        },
+      ),
+    ).rejects.toBeInstanceOf(OccurrenceNotFoundException);
+    expect(test.transaction.companionBinding.findFirst).not.toHaveBeenCalled();
+    expect(test.transaction.routineConfirmation.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a token without the companion capability before changing state', async () => {
+    const test = harness();
+
+    await expect(
+      test.service.confirmOccurrenceByDevice(
+        { ...devicePrincipal, capabilities: ['REMOTE_ASSISTANCE'] },
+        'occurrence-1',
+        {
+          version: 0,
+          idempotencyKey: 'wrong-capability',
+          source: 'RECIPIENT_BUTTON',
+        },
+      ),
+    ).rejects.toBeInstanceOf(DeviceOccurrenceAccessDeniedException);
+    expect(test.prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the active binding inside the confirmation transaction', async () => {
+    const test = harness();
+    test.transaction.companionBinding.findFirst.mockResolvedValue(null);
+
+    await expect(
+      test.service.confirmOccurrenceByDevice(devicePrincipal, 'occurrence-1', {
+        version: 0,
+        idempotencyKey: 'revoked-binding',
+        source: 'RECIPIENT_BUTTON',
+      }),
+    ).rejects.toBeInstanceOf(DeviceOccurrenceAccessDeniedException);
+    expect(test.transaction.routineConfirmation.create).not.toHaveBeenCalled();
+  });
+
+  it('does not let the device bypass family review after escalation', async () => {
+    const test = harness({
+      occurrenceStatus: OCCURRENCE_STATUS.needsFamilyReview,
+      openTask: true,
+    });
+
+    await expect(
+      test.service.confirmOccurrenceByDevice(devicePrincipal, 'occurrence-1', {
+        version: 0,
+        idempotencyKey: 'late-device-confirm',
+        source: 'RECIPIENT_VOICE',
+      }),
+    ).rejects.toBeInstanceOf(InvalidOccurrenceTransitionException);
+    expect(
+      test.transaction.routineOccurrence.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(test.transaction.routineConfirmation.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('CareWorkflowApplicationService device occurrence refresh', () => {
+  it('returns the current actionable projection with refreshed status and version', async () => {
+    const test = harness();
+    const refreshed = {
+      ...test.current,
+      status: OCCURRENCE_STATUS.awaitingConfirmation,
+      version: 4,
+    };
+    const confirmed = {
+      ...occurrence(OCCURRENCE_STATUS.confirmed),
+      id: 'confirmed-occurrence',
+    };
+    test.prisma.routineOccurrence.findMany.mockResolvedValue([
+      refreshed,
+      confirmed,
+    ]);
+
+    const result =
+      await test.service.listCurrentOccurrencesForDevice(devicePrincipal);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: refreshed.id,
+      status: OCCURRENCE_STATUS.awaitingConfirmation,
+      version: 4,
+      routineTitle: '早餐后服用家属录入的药物',
+      instructions: '家属录入：早餐后按标签服用',
+      contentProvenance: 'FAMILY_ENTERED_VERBATIM',
+    });
+    expect(test.prisma.routineOccurrence.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          householdId: devicePrincipal.householdId,
+          recipientId: devicePrincipal.recipientId,
+          routine: { status: 'ACTIVE', deletedAt: null },
+          schedule: { active: true },
+        }),
+        take: 32,
+      }),
+    );
+  });
+
+  it('rejects refresh after the companion binding is no longer active', async () => {
+    const test = harness();
+    test.prisma.companionBinding.findFirst.mockResolvedValue(null);
+
+    await expect(
+      test.service.listCurrentOccurrencesForDevice(devicePrincipal),
+    ).rejects.toBeInstanceOf(DeviceOccurrenceAccessDeniedException);
+    expect(test.prisma.routineOccurrence.findMany).not.toHaveBeenCalled();
   });
 });
 

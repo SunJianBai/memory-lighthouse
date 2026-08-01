@@ -89,6 +89,11 @@ export interface ConfirmOccurrenceCommand {
   utteranceId?: string | null;
 }
 
+export type DeviceConfirmOccurrenceCommand = Omit<
+  ConfirmOccurrenceCommand,
+  'bindingId'
+>;
+
 export interface FamilyVerifyOccurrenceCommand {
   version: number;
   idempotencyKey: string;

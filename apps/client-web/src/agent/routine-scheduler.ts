@@ -4,9 +4,7 @@ const minutesSinceMidnight = (date: Date) =>
   date.getHours() * 60 + date.getMinutes();
 
 const scheduledMinutes = (routine: Routine) => {
-  const [hours = 0, minutes = 0] = routine.scheduledTime
-    .split(":")
-    .map(Number);
+  const [hours = 0, minutes = 0] = routine.scheduledTime.split(":").map(Number);
   return hours * 60 + minutes;
 };
 
@@ -16,6 +14,17 @@ export const findDueRoutine = (
 ): Routine | undefined => {
   const currentMinutes = minutesSinceMidnight(now);
   return routines.find((routine) => {
+    if (routine.scheduledAtUtc) {
+      const scheduledAt = new Date(routine.scheduledAtUtc).getTime();
+      return (
+        routine.enabled &&
+        ["DUE", "AWAITING_CONFIRMATION"].includes(
+          routine.occurrenceStatus ?? "",
+        ) &&
+        Number.isFinite(scheduledAt) &&
+        now.getTime() >= scheduledAt
+      );
+    }
     if (!routine.enabled || !routine.weekdays.includes(now.getDay())) {
       return false;
     }
@@ -32,6 +41,18 @@ export const findNextRoutine = (
   let best: { routine: Routine; distance: number } | undefined;
 
   for (const routine of enabled) {
+    if (routine.scheduledAtUtc) {
+      const distance =
+        new Date(routine.scheduledAtUtc).getTime() - now.getTime();
+      if (
+        Number.isFinite(distance) &&
+        distance >= 0 &&
+        (!best || distance < best.distance)
+      ) {
+        best = { routine, distance };
+      }
+      continue;
+    }
     for (let dayOffset = 0; dayOffset < 7; dayOffset += 1) {
       const candidate = new Date(now);
       candidate.setHours(0, 0, 0, 0);
@@ -51,6 +72,7 @@ export const findNextRoutine = (
 };
 
 export const routineOccurrenceKey = (routine: Routine, date: Date) =>
+  routine.occurrenceId ??
   `${routine.id}:${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
 
 export const shouldNotifyFamily = (
@@ -62,10 +84,10 @@ export const shouldNotifyFamily = (
     return false;
   }
   const routine = routines.find(
-    (candidate) =>
-      candidate.id === agent.activeRoutineId && candidate.enabled,
+    (candidate) => candidate.id === agent.activeRoutineId && candidate.enabled,
   );
   if (!routine) return false;
+  if (routine.occurrenceId) return false;
   const transitionedAt = new Date(agent.lastTransitionAt).getTime();
   if (!Number.isFinite(transitionedAt)) return false;
   return (

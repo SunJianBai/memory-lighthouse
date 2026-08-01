@@ -53,6 +53,48 @@ describe("routine scheduler", () => {
     );
   });
 
+  it("uses the server occurrence timestamp and id for a materialized reminder", () => {
+    const occurrence: Routine = {
+      ...morning,
+      id: "routine-1",
+      occurrenceId: "occurrence-1",
+      occurrenceVersion: 2,
+      occurrenceStatus: "AWAITING_CONFIRMATION",
+      scheduledAtUtc: "2026-08-01T00:30:00.000Z",
+    };
+
+    expect(
+      findDueRoutine([occurrence], new Date("2026-08-01T00:31:00.000Z")),
+    ).toBe(occurrence);
+    expect(
+      routineOccurrenceKey(occurrence, new Date("2026-08-01T00:31:00.000Z")),
+    ).toBe("occurrence-1");
+  });
+
+  it("leaves escalation timing to the server for materialized occurrences", () => {
+    const occurrence: Routine = {
+      ...morning,
+      occurrenceId: "occurrence-1",
+      occurrenceStatus: "AWAITING_CONFIRMATION",
+      scheduledAtUtc: "2026-08-01T00:30:00.000Z",
+    };
+    const agent = {
+      phase: "awaiting_confirmation" as const,
+      activeRoutineId: occurrence.id,
+      reminderCount: 1,
+      lastTransitionAt: "2026-08-01T00:30:00.000Z",
+      message: "等待确认",
+    };
+
+    expect(
+      shouldNotifyFamily(
+        agent,
+        [occurrence],
+        new Date("2026-08-01T02:30:00.000Z"),
+      ),
+    ).toBe(false);
+  });
+
   it("notifies family only after the active routine timeout", () => {
     const agent = {
       phase: "awaiting_confirmation" as const,

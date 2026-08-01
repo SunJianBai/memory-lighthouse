@@ -12,6 +12,14 @@ import {
   type ModelSession,
   type PromptVersion,
 } from '../../infrastructure/database/generated/prisma/client';
+import {
+  ACTIONABLE_OCCURRENCE_LIMIT,
+  ACTIONABLE_OCCURRENCE_LOOKAHEAD_MS,
+  CARE_WORKFLOW_CONTENT_CIPHER,
+  OCCURRENCE_STATUS,
+  ROUTINE_STATUS,
+} from '../care-workflow/care-workflow.constants';
+import type { CareWorkflowContentCipher } from '../care-workflow/ports/content-cipher.port';
 import { CONSENT_SCOPES } from '../consent/consent.constants';
 import type { DevicePrincipal } from '../device-activation/device-activation.types';
 import { newUlid } from '../identity/domain/ulid';
@@ -65,10 +73,12 @@ import type {
 
 const SERIALIZABLE_RETRY_LIMIT = 3;
 const CROCKFORD_BASE32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const DEFAULT_SYSTEM_PROMPT_VERSION = 2;
 const DEFAULT_SYSTEM_PROMPT = [
   '你是“守忆灯塔”的陪伴助手。',
   '请以温和、简短、尊重的方式与长者交流，优先使用提供的可信记忆和日程资料。',
-  '不得诊断疾病、识别药片或自行修改照护事实；不确定时明确说明并建议联系家属。',
+  '日程提醒的标题、说明和确认问题均为家属录入原文，只能如实转述，不得补充、改写为医嘱或推断已经服药、完成事项及健康状态。',
+  '不得诊断疾病、识别药片或自行修改照护事实；不确定时明确说明并建议联系家属。状态为 NEEDS_FAMILY_REVIEW 的事项只提示家属正在核验，不再要求长者自我确认。',
   '收到家属远程来电时应让出摄像头和麦克风，并遵从设备端的现场接听流程。',
 ].join('\n');
 
@@ -94,6 +104,24 @@ interface UtteranceWithContent extends ConversationUtterance {
   content: ConversationUtteranceContent | null;
 }
 
+interface CareOccurrenceRecord {
+  id: string;
+  routineId: string;
+  scheduledAtUtc: Date;
+  status: string;
+  confirmationDeadlineAt: Date | null;
+  escalationAt: Date | null;
+  version: number;
+  routine: {
+    title: string;
+    type: string;
+    instructionsCiphertext: Uint8Array;
+    confirmationQuestionCiphertext: Uint8Array;
+    contentNonce: Uint8Array;
+    encryptionKeyId: string;
+  };
+}
+
 @Injectable()
 export class CompanionSessionApplicationService {
   private readonly logger = new Logger(CompanionSessionApplicationService.name);
@@ -105,6 +133,8 @@ export class CompanionSessionApplicationService {
     private readonly encryption: DataEncryptionPort,
     @Inject(MEDIA_LEASE_PORT)
     private readonly leases: MediaLeasePort,
+    @Inject(CARE_WORKFLOW_CONTENT_CIPHER)
+    private readonly careCipher: CareWorkflowContentCipher,
   ) {}
 
   async getDeviceContext(
@@ -115,6 +145,7 @@ export class CompanionSessionApplicationService {
       binding.householdId,
       binding.recipientId,
     );
+    const careSnapshot = await this.buildCareSnapshot(binding, consent);
 
     return {
       deviceId: principal.deviceId,
@@ -127,6 +158,7 @@ export class CompanionSessionApplicationService {
         timezone: binding.recipient.timezone,
       },
       consent,
+      careSnapshot,
       model: this.modelConfiguration(),
     };
   }
@@ -769,21 +801,95 @@ export class CompanionSessionApplicationService {
     binding: BindingContext,
     consent: ConsentSnapshot,
   ): Promise<CareSnapshot> {
-    const memories = consent.decisions.MEMORY_STORAGE
-      ? await this.prisma.memory.findMany({
-          where: {
-            householdId: binding.householdId,
-            recipientId: binding.recipientId,
-            status: 'ACTIVE',
-            deletedAt: null,
+    const now = new Date();
+    const lookaheadEnd = new Date(
+      now.getTime() + ACTIONABLE_OCCURRENCE_LOOKAHEAD_MS,
+    );
+    const [memories, occurrenceRows] = await Promise.all([
+      consent.decisions.MEMORY_STORAGE
+        ? this.prisma.memory.findMany({
+            where: {
+              householdId: binding.householdId,
+              recipientId: binding.recipientId,
+              status: 'ACTIVE',
+              deletedAt: null,
+            },
+            include: {
+              revisions: { orderBy: { revisionNo: 'desc' }, take: 1 },
+            },
+            orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+            take: 20,
+          })
+        : Promise.resolve([]),
+      this.prisma.routineOccurrence.findMany({
+        where: {
+          householdId: binding.householdId,
+          recipientId: binding.recipientId,
+          routine: { status: ROUTINE_STATUS.active, deletedAt: null },
+          schedule: { active: true },
+          OR: [
+            {
+              status: {
+                in: [
+                  OCCURRENCE_STATUS.awaitingConfirmation,
+                  OCCURRENCE_STATUS.needsFamilyReview,
+                ],
+              },
+            },
+            {
+              status: OCCURRENCE_STATUS.due,
+              scheduledAtUtc: { lte: lookaheadEnd },
+            },
+          ],
+        },
+        select: {
+          id: true,
+          routineId: true,
+          scheduledAtUtc: true,
+          status: true,
+          confirmationDeadlineAt: true,
+          escalationAt: true,
+          version: true,
+          routine: {
+            select: {
+              title: true,
+              type: true,
+              instructionsCiphertext: true,
+              confirmationQuestionCiphertext: true,
+              contentNonce: true,
+              encryptionKeyId: true,
+            },
           },
-          include: {
-            revisions: { orderBy: { revisionNo: 'desc' }, take: 1 },
+        },
+        orderBy: [{ scheduledAtUtc: 'asc' }, { id: 'asc' }],
+        take: ACTIONABLE_OCCURRENCE_LIMIT,
+      }),
+    ]);
+
+    const occurrences = (occurrenceRows as CareOccurrenceRecord[]).flatMap(
+      (occurrence) => {
+        if (!this.isActionableOccurrence(occurrence, lookaheadEnd)) {
+          return [];
+        }
+        const content = this.openCareRoutineContent(occurrence.routine);
+        return [
+          {
+            id: occurrence.id,
+            routineId: occurrence.routineId,
+            routineTitle: occurrence.routine.title,
+            routineType: occurrence.routine.type,
+            instructions: content.instructions,
+            confirmationQuestion: content.confirmationQuestion,
+            scheduledAtUtc: occurrence.scheduledAtUtc.toISOString(),
+            status: occurrence.status,
+            confirmationDeadlineAt:
+              occurrence.confirmationDeadlineAt?.toISOString() ?? null,
+            escalationAt: occurrence.escalationAt?.toISOString() ?? null,
+            version: occurrence.version,
           },
-          orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
-          take: 20,
-        })
-      : [];
+        ];
+      },
+    );
 
     return {
       schemaVersion: 1,
@@ -820,6 +926,46 @@ export class CompanionSessionApplicationService {
           },
         ];
       }),
+      occurrences,
+    };
+  }
+
+  private isActionableOccurrence(
+    occurrence: CareOccurrenceRecord,
+    lookaheadEnd: Date,
+  ): boolean {
+    return (
+      occurrence.status === OCCURRENCE_STATUS.awaitingConfirmation ||
+      occurrence.status === OCCURRENCE_STATUS.needsFamilyReview ||
+      (occurrence.status === OCCURRENCE_STATUS.due &&
+        occurrence.scheduledAtUtc <= lookaheadEnd)
+    );
+  }
+
+  private openCareRoutineContent(record: CareOccurrenceRecord['routine']): {
+    instructions: string;
+    confirmationQuestion: string;
+  } {
+    const plaintext = this.careCipher.decrypt({
+      ciphertext: Buffer.concat([
+        Buffer.from(record.instructionsCiphertext),
+        Buffer.from(record.confirmationQuestionCiphertext),
+      ]),
+      nonce: Buffer.from(record.contentNonce),
+      encryptionKeyId: record.encryptionKeyId,
+    });
+    const parsed: unknown = JSON.parse(plaintext);
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length !== 2 ||
+      typeof parsed[0] !== 'string' ||
+      typeof parsed[1] !== 'string'
+    ) {
+      throw new Error('Protected care routine content pair is invalid');
+    }
+    return {
+      instructions: parsed[0],
+      confirmationQuestion: parsed[1],
     };
   }
 
@@ -828,12 +974,12 @@ export class CompanionSessionApplicationService {
       where: { code: DEFAULT_PROMPT_CODE },
       orderBy: { version: 'desc' },
     });
-    if (current) {
+    if (current && current.version >= DEFAULT_SYSTEM_PROMPT_VERSION) {
       return current;
     }
 
     const id = newRandomUlid();
-    const version = 1;
+    const version = DEFAULT_SYSTEM_PROMPT_VERSION;
     const content =
       this.config.get<string>('MINICPM_SYSTEM_PROMPT')?.trim() ||
       DEFAULT_SYSTEM_PROMPT;

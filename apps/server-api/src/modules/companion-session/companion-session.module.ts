@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { PrismaModule } from '../../infrastructure/database/prisma.module';
+import { CareWorkflowModule } from '../care-workflow/care-workflow.module';
 import { DeviceActivationModule } from '../device-activation/device-activation.module';
 import { MemoryModule } from '../memory/memory.module';
 import { RealtimeCommunicationModule } from '../realtime-communication/realtime-communication.module';
@@ -12,6 +13,7 @@ import { TranscriptRetentionRunner } from './transcript-retention.runner';
 @Module({
   imports: [
     PrismaModule,
+    CareWorkflowModule,
     DeviceActivationModule,
     MemoryModule,
     RealtimeCommunicationModule,

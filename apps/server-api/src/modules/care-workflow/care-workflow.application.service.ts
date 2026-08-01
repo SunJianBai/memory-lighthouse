@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 
 import { Prisma } from '../../infrastructure/database/generated/prisma/client';
 import { PrismaService } from '../../infrastructure/database/prisma.service';
+import type { DevicePrincipal } from '../device-activation/device-activation.types';
 import { HouseholdAccessPolicy } from '../household/domain/household-access.policy';
 import {
   HouseholdAccessDeniedException,
@@ -9,6 +10,8 @@ import {
 } from '../household/household.errors';
 import { newUlid } from '../identity/domain/ulid';
 import {
+  ACTIONABLE_OCCURRENCE_LIMIT,
+  ACTIONABLE_OCCURRENCE_LOOKAHEAD_MS,
   CARE_WORKFLOW_CLOCK,
   CARE_WORKFLOW_CONTENT_CIPHER,
   FAMILY_TASK_STATUS,
@@ -20,6 +23,7 @@ import {
 } from './care-workflow.constants';
 import {
   CareWorkflowVersionConflictException,
+  DeviceOccurrenceAccessDeniedException,
   FamilyTaskAssigneeConflictException,
   FamilyTaskClaimConflictException,
   FamilyTaskNotFoundException,
@@ -37,6 +41,7 @@ import type {
   ClaimFamilyTaskCommand,
   ConfirmOccurrenceCommand,
   CreateRoutineCommand,
+  DeviceConfirmOccurrenceCommand,
   FamilyTaskView,
   FamilyVerifyOccurrenceCommand,
   FinishFamilyTaskCommand,
@@ -146,6 +151,22 @@ interface FamilyTaskRecord {
   createdAt: Date;
   updatedAt: Date;
   version: number;
+}
+
+type OccurrenceConfirmationAuthority =
+  | {
+      kind: 'USER';
+      principal: CareWorkflowPrincipal;
+      householdId: string;
+    }
+  | {
+      kind: 'DEVICE';
+      principal: DevicePrincipal;
+    };
+
+interface OccurrenceConfirmationActor {
+  memberId: string | null;
+  bindingId: string | null;
 }
 
 const ACTIVE_SCHEDULE_INCLUDE = {
@@ -468,6 +489,68 @@ export class CareWorkflowApplicationService {
     return records.map((record) => this.toOccurrenceView(record));
   }
 
+  async listCurrentOccurrencesForDevice(
+    principal: DevicePrincipal,
+  ): Promise<OccurrenceView[]> {
+    this.assertCompanionCapability(principal);
+    const binding = await this.prisma.companionBinding.findFirst({
+      where: {
+        id: principal.bindingId,
+        bindingVersion: principal.bindingVersion,
+        deviceId: principal.deviceId,
+        householdId: principal.householdId,
+        recipientId: principal.recipientId,
+        status: 'ACTIVE',
+        revokedAt: null,
+        device: { status: 'ACTIVE' },
+        household: { status: 'ACTIVE' },
+        recipient: { status: 'ACTIVE', deletedAt: null },
+      },
+      select: { id: true },
+    });
+    if (!binding) {
+      throw new DeviceOccurrenceAccessDeniedException();
+    }
+
+    const lookaheadEnd = new Date(
+      this.clock.now().getTime() + ACTIONABLE_OCCURRENCE_LOOKAHEAD_MS,
+    );
+    const records = (await this.prisma.routineOccurrence.findMany({
+      where: {
+        householdId: principal.householdId,
+        recipientId: principal.recipientId,
+        routine: { status: ROUTINE_STATUS.active, deletedAt: null },
+        schedule: { active: true },
+        OR: [
+          {
+            status: {
+              in: [
+                OCCURRENCE_STATUS.awaitingConfirmation,
+                OCCURRENCE_STATUS.needsFamilyReview,
+              ],
+            },
+          },
+          {
+            status: OCCURRENCE_STATUS.due,
+            scheduledAtUtc: { lte: lookaheadEnd },
+          },
+        ],
+      },
+      include: { routine: true },
+      orderBy: [{ scheduledAtUtc: 'asc' }, { id: 'asc' }],
+      take: ACTIONABLE_OCCURRENCE_LIMIT,
+    })) as OccurrenceRecord[];
+    return records
+      .filter(
+        (occurrence) =>
+          occurrence.status === OCCURRENCE_STATUS.awaitingConfirmation ||
+          occurrence.status === OCCURRENCE_STATUS.needsFamilyReview ||
+          (occurrence.status === OCCURRENCE_STATUS.due &&
+            occurrence.scheduledAtUtc <= lookaheadEnd),
+      )
+      .map((occurrence) => this.toOccurrenceView(occurrence));
+  }
+
   async confirmOccurrence(
     principal: CareWorkflowPrincipal,
     householdId: string,
@@ -475,8 +558,22 @@ export class CareWorkflowApplicationService {
     command: ConfirmOccurrenceCommand,
   ): Promise<OccurrenceView> {
     return this.confirmOrVerify(
-      principal,
-      householdId,
+      { kind: 'USER', principal, householdId },
+      occurrenceId,
+      command,
+      false,
+      true,
+    );
+  }
+
+  async confirmOccurrenceByDevice(
+    principal: DevicePrincipal,
+    occurrenceId: string,
+    command: DeviceConfirmOccurrenceCommand,
+  ): Promise<OccurrenceView> {
+    this.assertCompanionCapability(principal);
+    return this.confirmOrVerify(
+      { kind: 'DEVICE', principal },
       occurrenceId,
       command,
       false,
@@ -491,8 +588,7 @@ export class CareWorkflowApplicationService {
     command: FamilyVerifyOccurrenceCommand,
   ): Promise<OccurrenceView> {
     return this.confirmOrVerify(
-      principal,
-      householdId,
+      { kind: 'USER', principal, householdId },
       occurrenceId,
       command,
       true,
@@ -611,10 +707,12 @@ export class CareWorkflowApplicationService {
   }
 
   private async confirmOrVerify(
-    principal: CareWorkflowPrincipal,
-    householdId: string,
+    authority: OccurrenceConfirmationAuthority,
     occurrenceId: string,
-    command: ConfirmOccurrenceCommand | FamilyVerifyOccurrenceCommand,
+    command:
+      | ConfirmOccurrenceCommand
+      | DeviceConfirmOccurrenceCommand
+      | FamilyVerifyOccurrenceCommand,
     familyVerification: boolean,
     verified: boolean,
   ): Promise<OccurrenceView> {
@@ -623,18 +721,26 @@ export class CareWorkflowApplicationService {
       'idempotencyKey',
     );
     const now = this.clock.now();
+    const householdId =
+      authority.kind === 'DEVICE'
+        ? authority.principal.householdId
+        : authority.householdId;
     return this.retrySerializable(async (transaction) => {
       const occurrence = (await transaction.routineOccurrence.findFirst({
-        where: { id: occurrenceId, householdId },
+        where: {
+          id: occurrenceId,
+          householdId,
+          ...(authority.kind === 'DEVICE'
+            ? { recipientId: authority.principal.recipientId }
+            : {}),
+        },
         include: { routine: true },
       })) as OccurrenceRecord | null;
       if (!occurrence) throw new OccurrenceNotFoundException();
-      const member = await this.policy.requireRecipientAction(
+      const actor = await this.authorizeOccurrenceConfirmation(
         transaction,
-        principal.userId,
-        householdId,
+        authority,
         occurrence.recipientId,
-        'MANAGE_ROUTINE',
       );
       const replay = await transaction.routineConfirmation.findUnique({
         where: { idempotencyKey },
@@ -653,6 +759,29 @@ export class CareWorkflowApplicationService {
           throw new IdempotencyConflictException();
         }
         return this.toOccurrenceView(occurrence);
+      }
+      if (
+        authority.kind === 'DEVICE' &&
+        'utteranceId' in command &&
+        command.utteranceId
+      ) {
+        const utterance = await transaction.conversationUtterance.findFirst({
+          where: {
+            id: command.utteranceId,
+            bindingId: authority.principal.bindingId,
+            modelSession: {
+              companionSession: {
+                bindingId: authority.principal.bindingId,
+                householdId,
+                recipientId: authority.principal.recipientId,
+              },
+            },
+          },
+          select: { id: true },
+        });
+        if (!utterance) {
+          throw new DeviceOccurrenceAccessDeniedException();
+        }
       }
       if (occurrence.version !== command.version) {
         throw new CareWorkflowVersionConflictException();
@@ -698,10 +827,12 @@ export class CareWorkflowApplicationService {
           source: familyVerification
             ? 'FAMILY_MEMBER'
             : (command as ConfirmOccurrenceCommand).source,
-          memberId: member.id,
+          memberId: actor.memberId,
           bindingId: familyVerification
             ? null
-            : ((command as ConfirmOccurrenceCommand).bindingId ?? null),
+            : authority.kind === 'DEVICE'
+              ? actor.bindingId
+              : ((command as ConfirmOccurrenceCommand).bindingId ?? null),
           utteranceId: familyVerification
             ? null
             : ((command as ConfirmOccurrenceCommand).utteranceId ?? null),
@@ -729,22 +860,30 @@ export class CareWorkflowApplicationService {
           ? '已记录明确确认。此记录不代表医疗判断。'
           : '家属明确核验为未完成。',
         dedupeKey: `occurrence:${occurrenceId}:${confirmationType}`,
-        payload: { confirmationType, actorMemberId: member.id },
+        payload: {
+          confirmationType,
+          ...(actor.memberId ? { actorMemberId: actor.memberId } : {}),
+          ...(actor.bindingId ? { actorBindingId: actor.bindingId } : {}),
+        },
       });
       // The escalation task points to its own source event, not the new closure
       // event, so find it through the occurrence event when present.
-      const openTask = (await transaction.familyTask.findFirst({
-        where: {
-          householdId,
-          recipientId: occurrence.recipientId,
-          status: { in: [FAMILY_TASK_STATUS.open, FAMILY_TASK_STATUS.claimed] },
-          sourceEvent: { routineOccurrenceId: occurrenceId },
-        },
-      })) as FamilyTaskRecord | null;
-      if (openTask) {
+      const openTask = actor.memberId
+        ? ((await transaction.familyTask.findFirst({
+            where: {
+              householdId,
+              recipientId: occurrence.recipientId,
+              status: {
+                in: [FAMILY_TASK_STATUS.open, FAMILY_TASK_STATUS.claimed],
+              },
+              sourceEvent: { routineOccurrenceId: occurrenceId },
+            },
+          })) as FamilyTaskRecord | null)
+        : null;
+      if (openTask && actor.memberId) {
         if (
           openTask.assigneeMemberId &&
-          openTask.assigneeMemberId !== member.id
+          openTask.assigneeMemberId !== actor.memberId
         ) {
           throw new FamilyTaskAssigneeConflictException();
         }
@@ -755,7 +894,7 @@ export class CareWorkflowApplicationService {
           where: { id: openTask.id },
           data: {
             status: closedStatus,
-            assigneeMemberId: openTask.assigneeMemberId ?? member.id,
+            assigneeMemberId: openTask.assigneeMemberId ?? actor.memberId,
             resolvedAt: now,
             resolutionCode: verified
               ? 'FAMILY_VERIFIED_COMPLETE'
@@ -767,7 +906,7 @@ export class CareWorkflowApplicationService {
           data: {
             id: newUlid(now.getTime()),
             taskId: openTask.id,
-            actorMemberId: member.id,
+            actorMemberId: actor.memberId,
             action: familyVerification ? 'FAMILY_VERIFY' : 'AUTO_CLOSE',
             fromStatus: openTask.status,
             toStatus: closedStatus,
@@ -805,6 +944,56 @@ export class CareWorkflowApplicationService {
       })) as OccurrenceRecord;
       return this.toOccurrenceView(result);
     });
+  }
+
+  private async authorizeOccurrenceConfirmation(
+    transaction: TransactionClient,
+    authority: OccurrenceConfirmationAuthority,
+    recipientId: string,
+  ): Promise<OccurrenceConfirmationActor> {
+    if (authority.kind === 'USER') {
+      const member = await this.policy.requireRecipientAction(
+        transaction,
+        authority.principal.userId,
+        authority.householdId,
+        recipientId,
+        'MANAGE_ROUTINE',
+      );
+      return { memberId: member.id, bindingId: null };
+    }
+
+    const principal = authority.principal;
+    if (
+      recipientId !== principal.recipientId ||
+      !principal.capabilities.includes('COMPANION')
+    ) {
+      throw new DeviceOccurrenceAccessDeniedException();
+    }
+    const binding = await transaction.companionBinding.findFirst({
+      where: {
+        id: principal.bindingId,
+        bindingVersion: principal.bindingVersion,
+        deviceId: principal.deviceId,
+        householdId: principal.householdId,
+        recipientId: principal.recipientId,
+        status: 'ACTIVE',
+        revokedAt: null,
+        device: { status: 'ACTIVE' },
+        household: { status: 'ACTIVE' },
+        recipient: { status: 'ACTIVE', deletedAt: null },
+      },
+      select: { id: true },
+    });
+    if (!binding) {
+      throw new DeviceOccurrenceAccessDeniedException();
+    }
+    return { memberId: null, bindingId: principal.bindingId };
+  }
+
+  private assertCompanionCapability(principal: DevicePrincipal): void {
+    if (!principal.capabilities.includes('COMPANION')) {
+      throw new DeviceOccurrenceAccessDeniedException();
+    }
   }
 
   private async actOnFamilyTask(

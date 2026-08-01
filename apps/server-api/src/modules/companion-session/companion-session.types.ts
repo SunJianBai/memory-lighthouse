@@ -21,6 +21,20 @@ export interface CareMemorySnapshot {
   revisionNo: number;
 }
 
+export interface CareRoutineOccurrenceSnapshot {
+  id: string;
+  routineId: string;
+  routineTitle: string;
+  routineType: string;
+  instructions: string;
+  confirmationQuestion?: string;
+  scheduledAtUtc: string;
+  status: string;
+  confirmationDeadlineAt: string | null;
+  escalationAt: string | null;
+  version: number;
+}
+
 export interface CareSnapshot {
   schemaVersion: 1;
   recipient: {
@@ -29,6 +43,7 @@ export interface CareSnapshot {
     timezone: string;
   };
   memories: CareMemorySnapshot[];
+  occurrences: CareRoutineOccurrenceSnapshot[];
 }
 
 export interface DeviceContextView {
@@ -38,6 +53,7 @@ export interface DeviceContextView {
   recipientId: string;
   recipient: CareSnapshot['recipient'];
   consent: ConsentSnapshot;
+  careSnapshot: CareSnapshot;
   model: {
     provider: string;
     model: string;

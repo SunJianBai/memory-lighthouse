@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { PrismaModule } from '../../infrastructure/database/prisma.module';
+import { DeviceActivationModule } from '../device-activation/device-activation.module';
 import { HouseholdModule } from '../household/household.module';
 import { IdentityModule } from '../identity/identity.module';
 import { AesGcmContentCipherAdapter } from './adapters/aes-gcm-content-cipher.adapter';
@@ -12,16 +13,23 @@ import {
   OCCURRENCE_SCHEDULER,
 } from './care-workflow.constants';
 import { FamilyTasksController } from './http/family-tasks.controller';
+import { DeviceOccurrencesController } from './http/device-occurrences.controller';
 import { OccurrencesController } from './http/occurrences.controller';
 import { RoutinesController } from './http/routines.controller';
 import { PrismaOccurrenceScheduler } from './occurrence-scheduler.application';
 import { SystemCareWorkflowClock } from './ports/care-workflow-clock.port';
 
 @Module({
-  imports: [PrismaModule, IdentityModule, HouseholdModule],
+  imports: [
+    PrismaModule,
+    DeviceActivationModule,
+    IdentityModule,
+    HouseholdModule,
+  ],
   controllers: [
     RoutinesController,
     OccurrencesController,
+    DeviceOccurrencesController,
     FamilyTasksController,
   ],
   providers: [
@@ -37,6 +45,10 @@ import { SystemCareWorkflowClock } from './ports/care-workflow-clock.port';
     { provide: OCCURRENCE_SCHEDULER, useExisting: PrismaOccurrenceScheduler },
     CareWorkflowSchedulerRunner,
   ],
-  exports: [CareWorkflowApplicationService, OCCURRENCE_SCHEDULER],
+  exports: [
+    CareWorkflowApplicationService,
+    CARE_WORKFLOW_CONTENT_CIPHER,
+    OCCURRENCE_SCHEDULER,
+  ],
 })
 export class CareWorkflowModule {}

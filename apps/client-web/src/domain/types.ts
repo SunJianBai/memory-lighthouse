@@ -10,19 +10,9 @@ export type AppRoute =
   | "settings";
 
 export type MemoryKind =
-  | "person"
-  | "medication"
-  | "routine"
-  | "preference"
-  | "place"
-  | "story";
+  "person" | "medication" | "routine" | "preference" | "place" | "story";
 
-export type AssetKind =
-  | "face"
-  | "medicine"
-  | "place"
-  | "document"
-  | "voice";
+export type AssetKind = "face" | "medicine" | "place" | "document" | "voice";
 
 export type CareEventType =
   | "routine_due"
@@ -82,10 +72,7 @@ export type MedicationMemory = {
 };
 
 export type RoutineCategory =
-  | "medication"
-  | "hydration"
-  | "departure"
-  | "daily";
+  "medication" | "hydration" | "departure" | "daily";
 
 export type Routine = {
   id: string;
@@ -99,6 +86,10 @@ export type Routine = {
   graceMinutes: number;
   familyNoticeMinutes: number;
   enabled: boolean;
+  occurrenceId?: string;
+  occurrenceVersion?: number;
+  occurrenceStatus?: string;
+  scheduledAtUtc?: string;
 };
 
 export type MemoryItem = {

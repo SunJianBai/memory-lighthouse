@@ -46,23 +46,51 @@ import {
 import { useAppState } from "../../state/app-state";
 
 type BarcodeResult = { rawValue?: string };
-type BarcodeDetectorLike = { detect: (source: HTMLVideoElement) => Promise<BarcodeResult[]> };
-type BarcodeDetectorConstructor = new (options: { formats: string[] }) => BarcodeDetectorLike;
+type BarcodeDetectorLike = {
+  detect: (source: HTMLVideoElement) => Promise<BarcodeResult[]>;
+};
+type BarcodeDetectorConstructor = new (options: {
+  formats: string[];
+}) => BarcodeDetectorLike;
 
-const knownMemoryKinds = new Set<MemoryKind>(["person", "medication", "routine", "preference", "place", "story"]);
+const knownMemoryKinds = new Set<MemoryKind>([
+  "person",
+  "medication",
+  "routine",
+  "preference",
+  "place",
+  "story",
+]);
 const memoryKind = (value: string): MemoryKind => {
   const normalized = value.toLowerCase() as MemoryKind;
   return knownMemoryKinds.has(normalized) ? normalized : "story";
 };
+
+const routineCategory = (value: string) => {
+  if (value === "MEDICATION") return "medication" as const;
+  if (value === "HYDRATION") return "hydration" as const;
+  if (value === "APPOINTMENT") return "departure" as const;
+  return "daily" as const;
+};
+
+const occurrenceClock = (scheduledAtUtc: string, timezone: string) =>
+  new Intl.DateTimeFormat("zh-CN", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(scheduledAtUtc));
 
 const runtimeStateFromContext = (
   base: AppState,
   context: DeviceContextView,
   snapshot?: CompanionSessionStartView["careSnapshot"],
 ): AppState => {
-  const provider = context.model.provider.toLowerCase().includes("local") || context.model.provider.toLowerCase().includes("ascend")
-    ? "local"
-    : "cloud";
+  const provider =
+    context.model.provider.toLowerCase().includes("local") ||
+    context.model.provider.toLowerCase().includes("ascend")
+      ? "local"
+      : "cloud";
   return {
     ...base,
     initialized: true,
@@ -76,7 +104,26 @@ const runtimeStateFromContext = (
     },
     trustedPeople: [],
     medications: [],
-    routines: [],
+    routines: (snapshot?.occurrences ?? []).map((occurrence) => ({
+      id: occurrence.routineId,
+      title: occurrence.routineTitle,
+      category: routineCategory(occurrence.routineType),
+      scheduledTime: occurrenceClock(
+        occurrence.scheduledAtUtc,
+        context.recipient.timezone,
+      ),
+      weekdays: [new Date(occurrence.scheduledAtUtc).getDay()],
+      instructions: occurrence.instructions,
+      confirmationQuestion:
+        occurrence.confirmationQuestion || "完成后请明确告诉我，好吗？",
+      graceMinutes: 5,
+      familyNoticeMinutes: 15,
+      enabled: ["DUE", "AWAITING_CONFIRMATION"].includes(occurrence.status),
+      occurrenceId: occurrence.id,
+      occurrenceVersion: occurrence.version,
+      occurrenceStatus: occurrence.status,
+      scheduledAtUtc: occurrence.scheduledAtUtc,
+    })),
     memories: (snapshot?.memories ?? []).map((memory) => ({
       id: memory.id,
       kind: memoryKind(memory.kind),
@@ -93,8 +140,12 @@ const runtimeStateFromContext = (
       localStorageApproved: false,
       cameraApproved: Boolean(context.consent.decisions.CAMERA_CAPTURE),
       microphoneApproved: Boolean(context.consent.decisions.MICROPHONE_CAPTURE),
-      sensitiveMemoryApproved: Boolean(context.consent.decisions.MEMORY_STORAGE),
-      cloudProcessingApproved: Boolean(context.consent.decisions.MODEL_PROCESSING),
+      sensitiveMemoryApproved: Boolean(
+        context.consent.decisions.MEMORY_STORAGE,
+      ),
+      cloudProcessingApproved: Boolean(
+        context.consent.decisions.MODEL_PROCESSING,
+      ),
       acceptedAt: context.consent.capturedAt,
     },
     provider: {
@@ -138,7 +189,9 @@ export const CompanionPage = () => {
   const loadContext = useCallback(async () => {
     const next = await deviceSession.context();
     setContext(next);
-    setRuntimeState(runtimeStateFromContext(demoState, next));
+    setRuntimeState(
+      runtimeStateFromContext(demoState, next, next.careSnapshot),
+    );
     setActivated(true);
     await deviceSession.heartbeat();
     setOnline(true);
@@ -146,7 +199,8 @@ export const CompanionPage = () => {
 
   useEffect(() => {
     let cancelled = false;
-    void deviceSession.initialize()
+    void deviceSession
+      .initialize()
       .then(async () => {
         if (!deviceSession.hasCredential()) return;
         try {
@@ -158,13 +212,18 @@ export const CompanionPage = () => {
       .finally(() => {
         if (!cancelled) setInitializing(false);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [loadContext]);
 
   useEffect(() => {
     if (!activated) return;
     const timer = window.setInterval(() => {
-      void deviceSession.heartbeat().then(() => setOnline(true)).catch(() => setOnline(false));
+      void deviceSession
+        .heartbeat()
+        .then(() => setOnline(true))
+        .catch(() => setOnline(false));
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [activated]);
@@ -175,7 +234,10 @@ export const CompanionPage = () => {
     const unsubscribe = adapter.subscribe(({ session }) => {
       if (session.bindingId === deviceSession.bindingId) setIncoming(session);
     });
-    return () => { unsubscribe(); adapter.close(); };
+    return () => {
+      unsubscribe();
+      adapter.close();
+    };
   }, [activated]);
 
   useEffect(() => {
@@ -222,72 +284,117 @@ export const CompanionPage = () => {
     }
   }, [incoming?.id, stopCompanionServerSession]);
 
-  useEffect(() => () => {
-    scannerStream.current?.getTracks().forEach((track) => track.stop());
-    void liveMedia.current.disconnect();
-    void stopCompanionServerSession("PAGE_UNMOUNTED").catch(() => undefined);
-  }, [stopCompanionServerSession]);
-
-  const coordinator = useMemo(() => ({
-    start: async (mode: "AUDIO" | "AUDIO_VIDEO") => {
-      const started = await deviceSession.startCompanion(mode);
-      activeCompanionId.current = started.session.id;
-      if (context) setRuntimeState(runtimeStateFromContext(demoState, context, started.careSnapshot));
-      try {
-        const model = await deviceSession.startModel(started.session.id);
-        let sequenceNo = 0;
-        let firstResponseRecorded = false;
-        const statusEvents = new Set<string>();
-        const recordEvent = (
-          eventType:
-            | "CONNECTING"
-            | "CONNECTED"
-            | "QUEUED"
-            | "FIRST_RESPONSE"
-            | "PROVIDER_ERROR"
-            | "DISCONNECTED",
-          errorCode?: string,
-        ) => {
-          const dedupeKey = errorCode ? `${eventType}:${errorCode}` : eventType;
-          if (statusEvents.has(dedupeKey)) return;
-          statusEvents.add(dedupeKey);
-          void deviceSession.appendModelEvent(model.session.id, eventType, errorCode).catch((eventError) => setError(readableError(eventError)));
-        };
-        return {
-          prompt: model.prompt.content,
-          realtimeWs: model.connection.realtimeUrl,
-          model: model.connection.model,
-          onRuntimeStatus: (status: string) => {
-            if (status === "connecting" || status === "initializing") recordEvent("CONNECTING");
-            if (status === "queued") recordEvent("QUEUED");
-            if (status === "live") recordEvent("CONNECTED");
-            if (status === "closing" || status === "idle") recordEvent("DISCONNECTED");
-          },
-          onAssistantFinal: (text: string) => {
-            if (!firstResponseRecorded) {
-              firstResponseRecorded = true;
-              recordEvent("FIRST_RESPONSE");
-            }
-            sequenceNo += 1;
-            void deviceSession.appendAssistantUtterance(model.session.id, sequenceNo, text).catch((utteranceError) => setError(readableError(utteranceError)));
-          },
-          onRuntimeError: (message: string) => {
-            recordEvent("PROVIDER_ERROR", "WEB_RUNTIME_ERROR");
-            recordEvent("DISCONNECTED");
-            setError(message);
-          },
-        };
-      } catch (modelError) {
-        try {
-          await stopCompanionServerSession("MODEL_START_FAILED");
-        } catch {
-          // Preserve the model-start error; session expiry remains the server fallback.
-        }
-        throw modelError;
-      }
+  useEffect(
+    () => () => {
+      scannerStream.current?.getTracks().forEach((track) => track.stop());
+      void liveMedia.current.disconnect();
+      void stopCompanionServerSession("PAGE_UNMOUNTED").catch(() => undefined);
     },
-    stop: stopCompanionServerSession,
-  }), [context, demoState, stopCompanionServerSession]);
+    [stopCompanionServerSession],
+  );
+
+  const coordinator = useMemo(
+    () => ({
+      start: async (mode: "AUDIO" | "AUDIO_VIDEO") => {
+        const started = await deviceSession.startCompanion(mode);
+        activeCompanionId.current = started.session.id;
+        if (context)
+          setRuntimeState(
+            runtimeStateFromContext(demoState, context, started.careSnapshot),
+          );
+        try {
+          const model = await deviceSession.startModel(started.session.id);
+          let sequenceNo = 0;
+          let firstResponseRecorded = false;
+          const statusEvents = new Set<string>();
+          const recordEvent = (
+            eventType:
+              | "CONNECTING"
+              | "CONNECTED"
+              | "QUEUED"
+              | "FIRST_RESPONSE"
+              | "PROVIDER_ERROR"
+              | "DISCONNECTED",
+            errorCode?: string,
+          ) => {
+            const dedupeKey = errorCode
+              ? `${eventType}:${errorCode}`
+              : eventType;
+            if (statusEvents.has(dedupeKey)) return;
+            statusEvents.add(dedupeKey);
+            void deviceSession
+              .appendModelEvent(model.session.id, eventType, errorCode)
+              .catch((eventError) => setError(readableError(eventError)));
+          };
+          return {
+            prompt: model.prompt.content,
+            realtimeWs: model.connection.realtimeUrl,
+            model: model.connection.model,
+            onRuntimeStatus: (status: string) => {
+              if (status === "connecting" || status === "initializing")
+                recordEvent("CONNECTING");
+              if (status === "queued") recordEvent("QUEUED");
+              if (status === "live") recordEvent("CONNECTED");
+              if (status === "closing" || status === "idle")
+                recordEvent("DISCONNECTED");
+            },
+            onAssistantFinal: (text: string) => {
+              if (!firstResponseRecorded) {
+                firstResponseRecorded = true;
+                recordEvent("FIRST_RESPONSE");
+              }
+              sequenceNo += 1;
+              void deviceSession
+                .appendAssistantUtterance(model.session.id, sequenceNo, text)
+                .catch((utteranceError) =>
+                  setError(readableError(utteranceError)),
+                );
+            },
+            onUserTranscriptFinal: context?.consent.decisions
+              .MODEL_INPUT_TRANSCRIPTION
+              ? (text: string) => {
+                  sequenceNo += 1;
+                  void deviceSession
+                    .appendUserTranscript(model.session.id, sequenceNo, text)
+                    .catch((utteranceError) =>
+                      setError(readableError(utteranceError)),
+                    );
+                }
+              : undefined,
+            onRuntimeError: (message: string) => {
+              recordEvent("PROVIDER_ERROR", "WEB_RUNTIME_ERROR");
+              recordEvent("DISCONNECTED");
+              setError(message);
+            },
+          };
+        } catch (modelError) {
+          try {
+            await stopCompanionServerSession("MODEL_START_FAILED");
+          } catch {
+            // Preserve the model-start error; session expiry remains the server fallback.
+          }
+          throw modelError;
+        }
+      },
+      stop: stopCompanionServerSession,
+      confirmOccurrence: async (
+        occurrenceId: string,
+        source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE",
+      ) => {
+        const current = await deviceSession.currentOccurrences();
+        const occurrence = current.find((item) => item.id === occurrenceId);
+        if (!occurrence) {
+          throw new Error("本次日程已更新，请刷新后重试。");
+        }
+        await deviceSession.confirmOccurrence(
+          occurrence.id,
+          occurrence.version,
+          source,
+        );
+      },
+    }),
+    [context, demoState, stopCompanionServerSession],
+  );
 
   const claim = async (input: ActivationClaim) => {
     setBusy(true);
@@ -309,7 +416,11 @@ export const CompanionPage = () => {
 
   const submitDynamicCode = (event: FormEvent) => {
     event.preventDefault();
-    void claim({ publicId: publicId.trim().toUpperCase(), proofType: "DYNAMIC_CODE", proof: dynamicCode });
+    void claim({
+      publicId: publicId.trim().toUpperCase(),
+      proofType: "DYNAMIC_CODE",
+      proof: dynamicCode,
+    });
   };
 
   const submitQr = (event: FormEvent) => {
@@ -327,7 +438,11 @@ export const CompanionPage = () => {
       try {
         const status = await deviceSession.status(challengeId);
         setChallengeStatus(status.status);
-        if (status.status === "APPROVED" && status.approvedAt && !exchangeStarted.current) {
+        if (
+          status.status === "APPROVED" &&
+          status.approvedAt &&
+          !exchangeStarted.current
+        ) {
           exchangeStarted.current = true;
           setNotice("家属已批准，正在兑换短时访问令牌与轮换设备凭据…");
           await deviceSession.exchange(challengeId, status.approvedAt);
@@ -350,14 +465,21 @@ export const CompanionPage = () => {
   };
 
   const startScanner = async () => {
-    const Detector = (window as typeof window & { BarcodeDetector?: BarcodeDetectorConstructor }).BarcodeDetector;
+    const Detector = (
+      window as typeof window & { BarcodeDetector?: BarcodeDetectorConstructor }
+    ).BarcodeDetector;
     if (!Detector) {
-      setError("当前浏览器不支持二维码识别，请粘贴二维码内容，或使用动态码激活");
+      setError(
+        "当前浏览器不支持二维码识别，请粘贴二维码内容，或使用动态码激活",
+      );
       return;
     }
     setError("");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+        audio: false,
+      });
       scannerStream.current = stream;
       setScanning(true);
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
@@ -395,7 +517,15 @@ export const CompanionPage = () => {
         setIncoming(accepted);
       }
       const ticket = await deviceSession.remoteTicket(incoming.id);
-      await liveMedia.current.connect(ticket, "DEVICE", { localVideo: localVideo.current, remoteAudio: remoteAudio.current }, (status, detail) => { setCallStatus(status); setCallDetail(detail ?? ""); });
+      await liveMedia.current.connect(
+        ticket,
+        "DEVICE",
+        { localVideo: localVideo.current, remoteAudio: remoteAudio.current },
+        (status, detail) => {
+          setCallStatus(status);
+          setCallDetail(detail ?? "");
+        },
+      );
     } catch (acceptError) {
       setError(readableError(acceptError));
     } finally {
@@ -405,7 +535,13 @@ export const CompanionPage = () => {
 
   useEffect(() => {
     if (!incoming || callStatus !== "connected") return;
-    const timer = window.setInterval(() => void deviceSession.renewRemoteLease(incoming.id).catch(() => setCallDetail("媒体租约续期失败，请结束通话后重试")), 20_000);
+    const timer = window.setInterval(
+      () =>
+        void deviceSession
+          .renewRemoteLease(incoming.id)
+          .catch(() => setCallDetail("媒体租约续期失败，请结束通话后重试")),
+      20_000,
+    );
     return () => window.clearInterval(timer);
   }, [callStatus, incoming?.id]);
 
@@ -439,70 +575,290 @@ export const CompanionPage = () => {
   };
 
   if (initializing) {
-    return <main id="main-content" className="companion-loading" tabIndex={-1}><BrandMark /><div className="resource-skeleton"><span /><span /></div><p>正在读取陪伴设备安全存储…</p></main>;
+    return (
+      <main id="main-content" className="companion-loading" tabIndex={-1}>
+        <BrandMark />
+        <div className="resource-skeleton">
+          <span />
+          <span />
+        </div>
+        <p>正在读取陪伴设备安全存储…</p>
+      </main>
+    );
   }
 
   return (
     <main id="main-content" className="companion-page" tabIndex={-1}>
       <header className="companion-header">
-        <button className="brand-button" type="button" onClick={() => navigate("home")} aria-label="返回首页"><BrandMark /></button>
+        <button
+          className="brand-button"
+          type="button"
+          onClick={() => navigate("home")}
+          aria-label="返回首页"
+        >
+          <BrandMark />
+        </button>
         <div className="workspace-switcher horizontal" aria-label="切换工作区">
-          <button type="button" onClick={() => navigate("workspace-overview")}><ArrowLeft aria-hidden="true" size={18} /> 家属工作区</button>
-          <button className="is-active" type="button" aria-current="page"><MonitorSmartphone aria-hidden="true" size={18} /> 陪伴设备模式</button>
+          <button type="button" onClick={() => navigate("workspace-overview")}>
+            <ArrowLeft aria-hidden="true" size={18} /> 家属工作区
+          </button>
+          <button className="is-active" type="button" aria-current="page">
+            <MonitorSmartphone aria-hidden="true" size={18} /> 陪伴设备模式
+          </button>
         </div>
-        <div className="companion-account"><span>{online ? <Wifi aria-hidden="true" size={18} /> : <WifiOff aria-hidden="true" size={18} />}{online ? "在线" : "离线"}</span><strong>{user?.displayName}</strong></div>
+        <div className="companion-account">
+          <span>
+            {online ? (
+              <Wifi aria-hidden="true" size={18} />
+            ) : (
+              <WifiOff aria-hidden="true" size={18} />
+            )}
+            {online ? "在线" : "离线"}
+          </span>
+          <strong>{user?.displayName}</strong>
+        </div>
       </header>
 
       {!activated ? (
         <section className="companion-activation-shell">
           <div className="companion-activation-copy">
-            <span><ShieldCheck aria-hidden="true" size={32} /></span>
+            <span>
+              <ShieldCheck aria-hidden="true" size={32} />
+            </span>
             <p className="eyebrow">首次使用</p>
             <h1>把此浏览器激活为陪伴设备</h1>
-            <p>此步骤会在浏览器安全存储中生成独立 Ed25519 安装密钥。一台设备只绑定一位长者，换人需要重新激活。</p>
-            <ol><li>家属端为目标长者生成挑战</li><li>本设备扫码或输入动态码完成 Claim</li><li>家属核对设备后现场批准</li><li>本设备证明私钥持有并兑换凭据</li></ol>
+            <p>
+              此步骤会在浏览器安全存储中生成独立 Ed25519
+              安装密钥。一台设备只绑定一位长者，换人需要重新激活。
+            </p>
+            <ol>
+              <li>家属端为目标长者生成挑战</li>
+              <li>本设备扫码或输入动态码完成 Claim</li>
+              <li>家属核对设备后现场批准</li>
+              <li>本设备证明私钥持有并兑换凭据</li>
+            </ol>
           </div>
           <div className="activation-methods">
             <section className="panel-card">
-              <div className="panel-heading"><div><p className="eyebrow">推荐</p><h2>扫描激活二维码</h2></div><QrCode aria-hidden="true" size={24} /></div>
-              {scanning && <div className="scanner-frame"><video ref={scannerVideo} muted playsInline aria-label="二维码扫描摄像头预览" /><span><ScanLine aria-hidden="true" size={30} /></span></div>}
-              <button className="secondary-button full-width" type="button" disabled={busy} onClick={() => scanning ? stopScanner() : void startScanner()}><Camera aria-hidden="true" size={19} /> {scanning ? "停止扫描" : "打开摄像头扫描"}</button>
-              <form className="stack-form compact" onSubmit={submitQr}><label htmlFor="qr-payload">或粘贴二维码内容</label><textarea id="qr-payload" rows={2} value={qrPayload} onChange={(event) => setQrPayload(event.target.value)} placeholder="memory-lighthouse://activate?..." /><button className="text-button" type="submit" disabled={busy || !qrPayload}><Keyboard aria-hidden="true" size={17} /> 使用粘贴内容</button></form>
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">推荐</p>
+                  <h2>扫描激活二维码</h2>
+                </div>
+                <QrCode aria-hidden="true" size={24} />
+              </div>
+              {scanning && (
+                <div className="scanner-frame">
+                  <video
+                    ref={scannerVideo}
+                    muted
+                    playsInline
+                    aria-label="二维码扫描摄像头预览"
+                  />
+                  <span>
+                    <ScanLine aria-hidden="true" size={30} />
+                  </span>
+                </div>
+              )}
+              <button
+                className="secondary-button full-width"
+                type="button"
+                disabled={busy}
+                onClick={() => (scanning ? stopScanner() : void startScanner())}
+              >
+                <Camera aria-hidden="true" size={19} />{" "}
+                {scanning ? "停止扫描" : "打开摄像头扫描"}
+              </button>
+              <form className="stack-form compact" onSubmit={submitQr}>
+                <label htmlFor="qr-payload">或粘贴二维码内容</label>
+                <textarea
+                  id="qr-payload"
+                  rows={2}
+                  value={qrPayload}
+                  onChange={(event) => setQrPayload(event.target.value)}
+                  placeholder="memory-lighthouse://activate?..."
+                />
+                <button
+                  className="text-button"
+                  type="submit"
+                  disabled={busy || !qrPayload}
+                >
+                  <Keyboard aria-hidden="true" size={17} /> 使用粘贴内容
+                </button>
+              </form>
             </section>
             <section className="panel-card">
-              <div className="panel-heading"><div><p className="eyebrow">备用方式</p><h2>输入动态激活码</h2></div><Keyboard aria-hidden="true" size={24} /></div>
-              <form className="stack-form" onSubmit={submitDynamicCode}><label htmlFor="activation-public-id">公开编号</label><input id="activation-public-id" required value={publicId} onChange={(event) => setPublicId(event.target.value)} placeholder="ML-XXXXXX" autoCapitalize="characters" /><label htmlFor="activation-code">8 位动态码</label><input id="activation-code" required minLength={8} maxLength={8} value={dynamicCode} onChange={(event) => setDynamicCode(event.target.value)} autoCapitalize="characters" /><button className="primary-button full-width" type="submit" disabled={busy}>{busy ? "正在证明设备身份…" : "提交并等待家属批准"}</button></form>
+              <div className="panel-heading">
+                <div>
+                  <p className="eyebrow">备用方式</p>
+                  <h2>输入动态激活码</h2>
+                </div>
+                <Keyboard aria-hidden="true" size={24} />
+              </div>
+              <form className="stack-form" onSubmit={submitDynamicCode}>
+                <label htmlFor="activation-public-id">公开编号</label>
+                <input
+                  id="activation-public-id"
+                  required
+                  value={publicId}
+                  onChange={(event) => setPublicId(event.target.value)}
+                  placeholder="ML-XXXXXX"
+                  autoCapitalize="characters"
+                />
+                <label htmlFor="activation-code">8 位动态码</label>
+                <input
+                  id="activation-code"
+                  required
+                  minLength={8}
+                  maxLength={8}
+                  value={dynamicCode}
+                  onChange={(event) => setDynamicCode(event.target.value)}
+                  autoCapitalize="characters"
+                />
+                <button
+                  className="primary-button full-width"
+                  type="submit"
+                  disabled={busy}
+                >
+                  {busy ? "正在证明设备身份…" : "提交并等待家属批准"}
+                </button>
+              </form>
             </section>
           </div>
-          {challengeStatus && <div className="inline-alert info" role="status"><CheckCircle2 aria-hidden="true" size={20} /><span>激活状态：{challengeStatus}。{notice}</span></div>}
-          {error && <div className="inline-alert danger" role="alert"><span>{error}</span></div>}
+          {challengeStatus && (
+            <div className="inline-alert info" role="status">
+              <CheckCircle2 aria-hidden="true" size={20} />
+              <span>
+                激活状态：{challengeStatus}。{notice}
+              </span>
+            </div>
+          )}
+          {error && (
+            <div className="inline-alert danger" role="alert">
+              <span>{error}</span>
+            </div>
+          )}
         </section>
       ) : incoming ? (
         <section className="incoming-call-screen">
-          <div className="incoming-pulse"><PhoneCall aria-hidden="true" size={42} /></div>
+          <div className="incoming-pulse">
+            <PhoneCall aria-hidden="true" size={42} />
+          </div>
           <p className="eyebrow">家庭成员来电</p>
           <h1>{context?.recipient.preferredName}，家人想和你说话</h1>
-          <p>只有点击接听后，摄像头和麦克风才会用于这次实时通话。通话不会录音，也不会转写。</p>
-          <div className={`device-call-media ${callStatus === "connected" ? "is-connected" : "is-pending"}`}>
-            <video ref={localVideo} muted autoPlay playsInline aria-label="本机摄像头预览" />
+          <p>
+            只有点击接听后，摄像头和麦克风才会用于这次实时通话。通话不会录音，也不会转写。
+          </p>
+          <div
+            className={`device-call-media ${callStatus === "connected" ? "is-connected" : "is-pending"}`}
+          >
+            <video
+              ref={localVideo}
+              muted
+              autoPlay
+              playsInline
+              aria-label="本机摄像头预览"
+            />
             <audio ref={remoteAudio} autoPlay aria-label="家属实时音频" />
             {callStatus === "connected" ? (
-              <><span><Camera aria-hidden="true" size={18} /> 本机画面正在发送</span><span><Mic aria-hidden="true" size={18} /> 双向音频已开启</span></>
+              <>
+                <span>
+                  <Camera aria-hidden="true" size={18} /> 本机画面正在发送
+                </span>
+                <span>
+                  <Mic aria-hidden="true" size={18} /> 双向音频已开启
+                </span>
+              </>
             ) : (
-              <span className="span-full"><ShieldCheck aria-hidden="true" size={18} /> 尚未接听，摄像头和麦克风保持关闭</span>
+              <span className="span-full">
+                <ShieldCheck aria-hidden="true" size={18} />{" "}
+                尚未接听，摄像头和麦克风保持关闭
+              </span>
             )}
           </div>
-          {callDetail && <div className="form-message success" role="status">{callDetail}</div>}
-          {error && <div className="form-message error" role="alert">{error}</div>}
+          {callDetail && (
+            <div className="form-message success" role="status">
+              {callDetail}
+            </div>
+          )}
+          {error && (
+            <div className="form-message error" role="alert">
+              {error}
+            </div>
+          )}
           <div className="incoming-actions">
-            {callStatus !== "connected" ? <><button className="decline-call-button" type="button" disabled={busy} onClick={() => void (incoming.status === "RINGING" ? declineCall() : endCall())}>{incoming.status === "RINGING" ? <PhoneOff aria-hidden="true" size={25} /> : <CircleStop aria-hidden="true" size={25} />} {incoming.status === "RINGING" ? "拒绝" : "结束通话"}</button><button className="accept-call-button" type="button" disabled={busy} onClick={() => void acceptCall()}><PhoneCall aria-hidden="true" size={25} /> {busy ? "正在连接…" : incoming.status === "RINGING" ? "接听" : "加入通话"}</button></> : <button className="decline-call-button" type="button" disabled={busy} onClick={() => void endCall()}><CircleStop aria-hidden="true" size={25} /> 结束通话</button>}
+            {callStatus !== "connected" ? (
+              <>
+                <button
+                  className="decline-call-button"
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    void (incoming.status === "RINGING"
+                      ? declineCall()
+                      : endCall())
+                  }
+                >
+                  {incoming.status === "RINGING" ? (
+                    <PhoneOff aria-hidden="true" size={25} />
+                  ) : (
+                    <CircleStop aria-hidden="true" size={25} />
+                  )}{" "}
+                  {incoming.status === "RINGING" ? "拒绝" : "结束通话"}
+                </button>
+                <button
+                  className="accept-call-button"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void acceptCall()}
+                >
+                  <PhoneCall aria-hidden="true" size={25} />{" "}
+                  {busy
+                    ? "正在连接…"
+                    : incoming.status === "RINGING"
+                      ? "接听"
+                      : "加入通话"}
+                </button>
+              </>
+            ) : (
+              <button
+                className="decline-call-button"
+                type="button"
+                disabled={busy}
+                onClick={() => void endCall()}
+              >
+                <CircleStop aria-hidden="true" size={25} /> 结束通话
+              </button>
+            )}
           </div>
         </section>
       ) : (
         <section className="companion-runtime-shell">
-          <div className="companion-runtime-status"><div><span className="status-pill success"><Wifi aria-hidden="true" size={16} /> 设备已激活</span><strong>{context?.recipient.preferredName}的陪伴设备</strong><p>绑定编号末 6 位：{context?.bindingId.slice(-6)}</p></div><div className="inline-boundary"><PhoneCall aria-hidden="true" size={18} /> 来电状态由服务端设备会话接口持续同步，现场接听前不会打开摄像头或麦克风。</div></div>
-          {error && <div className="inline-alert danger" role="alert"><span>{error}</span></div>}
-          {runtimeState && <CareExperience runtimeState={runtimeState} sessionCoordinator={coordinator} serverBackedMode />}
+          <div className="companion-runtime-status">
+            <div>
+              <span className="status-pill success">
+                <Wifi aria-hidden="true" size={16} /> 设备已激活
+              </span>
+              <strong>{context?.recipient.preferredName}的陪伴设备</strong>
+              <p>绑定编号末 6 位：{context?.bindingId.slice(-6)}</p>
+            </div>
+            <div className="inline-boundary">
+              <PhoneCall aria-hidden="true" size={18} />{" "}
+              来电状态由服务端设备会话接口持续同步，现场接听前不会打开摄像头或麦克风。
+            </div>
+          </div>
+          {error && (
+            <div className="inline-alert danger" role="alert">
+              <span>{error}</span>
+            </div>
+          )}
+          {runtimeState && (
+            <CareExperience
+              runtimeState={runtimeState}
+              sessionCoordinator={coordinator}
+              serverBackedMode
+            />
+          )}
         </section>
       )}
     </main>

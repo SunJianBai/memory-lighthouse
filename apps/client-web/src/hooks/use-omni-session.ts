@@ -37,6 +37,7 @@ export type OmniSessionStartOverrides = {
   model?: string;
   onRuntimeStatus?: (status: RuntimeStatus) => void;
   onAssistantFinal?: (text: string) => void;
+  onUserTranscriptFinal?: (text: string) => void;
   onRuntimeError?: (message: string) => void;
 };
 
@@ -50,7 +51,9 @@ let bundledReferenceAudio: Promise<string | null> | null = null;
 
 const loadBundledReferenceAudio = () => {
   if (!bundledReferenceAudio) {
-    bundledReferenceAudio = fetch(`${import.meta.env.BASE_URL}ref_minicpm_signature.wav`)
+    bundledReferenceAudio = fetch(
+      `${import.meta.env.BASE_URL}ref_minicpm_signature.wav`,
+    )
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.blob();
@@ -69,10 +72,7 @@ const loadBundledReferenceAudio = () => {
   return bundledReferenceAudio;
 };
 
-export const useOmniSession = (
-  appState: AppState,
-  activeRoutine?: Routine,
-) => {
+export const useOmniSession = (appState: AppState, activeRoutine?: Routine) => {
   const runtimeRef = useRef<SessionRuntime | null>(null);
   const previewStreamRef = useRef<MediaStream | null>(null);
   const assistantDraftRef = useRef("");
@@ -127,8 +127,7 @@ export const useOmniSession = (
       setSession((current) => ({
         ...current,
         cameraState: "error",
-        cameraMessage:
-          error instanceof Error ? error.message : "摄像头不可用",
+        cameraMessage: error instanceof Error ? error.message : "摄像头不可用",
       }));
     }
   }, []);
@@ -182,192 +181,200 @@ export const useOmniSession = (
     stop,
   ]);
 
-  const start = useCallback(async (overrides?: OmniSessionStartOverrides): Promise<boolean> => {
-    stop("restart");
-    assistantDraftRef.current = "";
-    userDraftRef.current = "";
-    userTranscriptDoneRef.current = false;
-    const provider = appState.provider.provider;
-    if (provider !== "replay" && !appState.consent.microphoneApproved) {
-      setSession((current) => ({
-        ...current,
-        status: "error",
-        error: "尚未授权麦克风，真实模型会话没有启动",
-      }));
-      return false;
-    }
-    if (provider === "cloud" && !appState.consent.cloudProcessingApproved) {
-      setSession((current) => ({
-        ...current,
-        status: "error",
-        error: "尚未授权公网处理，ModelBest 会话没有启动",
-      }));
-      return false;
-    }
-    if (provider === "replay") {
-      setSession((current) => ({
-        ...current,
-        status: "live",
-        error: "",
-        assistantText: "",
-        userTranscript: "",
-        userTranscriptFinal: false,
-        events: [
-          {
-            direction: "local",
-            type: "replay.ready",
-            detail: "Presenter-controlled deterministic demo mode",
-            tone: "green",
-          },
-        ],
-        signals: initialSignals,
-        providerLabel: "演示回放",
-      }));
-      if (appState.consent.cameraApproved) {
-        await startReplayPreview();
-      }
-      return true;
-    }
-
-    const runtime = new SessionRuntime({
-      onStatus: (status) => {
-        overrides?.onRuntimeStatus?.(status);
-        setSession((current) => ({ ...current, status }));
-      },
-      onQueue: () => undefined,
-      onEvent: (event) =>
+  const start = useCallback(
+    async (overrides?: OmniSessionStartOverrides): Promise<boolean> => {
+      stop("restart");
+      assistantDraftRef.current = "";
+      userDraftRef.current = "";
+      userTranscriptDoneRef.current = false;
+      const provider = appState.provider.provider;
+      if (provider !== "replay" && !appState.consent.microphoneApproved) {
         setSession((current) => ({
           ...current,
-          events: [event, ...current.events].slice(0, 80),
-        })),
-      onAssistant: (output) => {
-        if (output.delta) assistantDraftRef.current += output.delta;
-        if (output.done && output.text) assistantDraftRef.current = output.text;
-        if (output.done && assistantDraftRef.current) {
-          overrides?.onAssistantFinal?.(assistantDraftRef.current);
-        }
-        setSession((current) => ({
-          ...current,
-          assistantText: assistantDraftRef.current,
+          status: "error",
+          error: "尚未授权麦克风，真实模型会话没有启动",
         }));
-        if (
-          output.done &&
-          output.text &&
-          localActionSpeechRef.current &&
-          "speechSynthesis" in window
-        ) {
-          localActionSpeechRef.current = false;
-          const utterance = new SpeechSynthesisUtterance(output.text);
-          utterance.lang = "zh-CN";
-          utterance.rate = 0.88;
+        return false;
+      }
+      if (provider === "cloud" && !appState.consent.cloudProcessingApproved) {
+        setSession((current) => ({
+          ...current,
+          status: "error",
+          error: "尚未授权公网处理，ModelBest 会话没有启动",
+        }));
+        return false;
+      }
+      if (provider === "replay") {
+        setSession((current) => ({
+          ...current,
+          status: "live",
+          error: "",
+          assistantText: "",
+          userTranscript: "",
+          userTranscriptFinal: false,
+          events: [
+            {
+              direction: "local",
+              type: "replay.ready",
+              detail: "Presenter-controlled deterministic demo mode",
+              tone: "green",
+            },
+          ],
+          signals: initialSignals,
+          providerLabel: "演示回放",
+        }));
+        if (appState.consent.cameraApproved) {
+          await startReplayPreview();
+        }
+        return true;
+      }
+
+      const runtime = new SessionRuntime({
+        onStatus: (status) => {
+          overrides?.onRuntimeStatus?.(status);
+          setSession((current) => ({ ...current, status }));
+        },
+        onQueue: () => undefined,
+        onEvent: (event) =>
           setSession((current) => ({
             ...current,
-            signals: { ...current.signals, modelSpeaking: true },
+            events: [event, ...current.events].slice(0, 80),
+          })),
+        onAssistant: (output) => {
+          if (output.delta) assistantDraftRef.current += output.delta;
+          if (output.done && output.text)
+            assistantDraftRef.current = output.text;
+          if (output.done && assistantDraftRef.current) {
+            overrides?.onAssistantFinal?.(assistantDraftRef.current);
+          }
+          setSession((current) => ({
+            ...current,
+            assistantText: assistantDraftRef.current,
           }));
-          browserActionSpeakingRef.current = true;
-          utterance.onend = () => {
+          if (
+            output.done &&
+            output.text &&
+            localActionSpeechRef.current &&
+            "speechSynthesis" in window
+          ) {
+            localActionSpeechRef.current = false;
+            const utterance = new SpeechSynthesisUtterance(output.text);
+            utterance.lang = "zh-CN";
+            utterance.rate = 0.88;
+            setSession((current) => ({
+              ...current,
+              signals: { ...current.signals, modelSpeaking: true },
+            }));
+            browserActionSpeakingRef.current = true;
+            utterance.onend = () => {
+              browserActionSpeakingRef.current = false;
+              setSession((current) => ({
+                ...current,
+                signals: { ...current.signals, modelSpeaking: false },
+              }));
+            };
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(utterance);
+          }
+        },
+        onUserTranscript: (text, done) => {
+          if (text && browserActionSpeakingRef.current) {
             browserActionSpeakingRef.current = false;
+            window.speechSynthesis.cancel();
             setSession((current) => ({
               ...current,
               signals: { ...current.signals, modelSpeaking: false },
             }));
-          };
-          window.speechSynthesis.cancel();
-          window.speechSynthesis.speak(utterance);
-        }
-      },
-      onUserTranscript: (text, done) => {
-        if (text && browserActionSpeakingRef.current) {
-          browserActionSpeakingRef.current = false;
-          window.speechSynthesis.cancel();
+          }
+          userDraftRef.current = done
+            ? text
+            : userTranscriptDoneRef.current
+              ? text
+              : `${userDraftRef.current}${text}`;
+          userTranscriptDoneRef.current = done;
           setSession((current) => ({
             ...current,
-            signals: { ...current.signals, modelSpeaking: false },
+            userTranscript: userDraftRef.current,
+            userTranscriptFinal: done,
           }));
-        }
-        userDraftRef.current = done
-          ? text
-          : userTranscriptDoneRef.current
-            ? text
-            : `${userDraftRef.current}${text}`;
-        userTranscriptDoneRef.current = done;
-        setSession((current) => ({
-          ...current,
-          userTranscript: userDraftRef.current,
-          userTranscriptFinal: done,
-        }));
-      },
-      onMetrics: (metrics) =>
-        setSession((current) => ({
-          ...current,
-          metrics: { ...current.metrics, ...metrics },
-        })),
-      onSignals: (signals) =>
-        setSession((current) => ({
-          ...current,
-          signals: { ...current.signals, ...signals },
-        })),
-      onVideoStream: (videoStream) =>
-        setSession((current) => ({ ...current, videoStream })),
-      onCameraState: (cameraState, cameraMessage = "") =>
-        setSession((current) => ({
-          ...current,
-          cameraState,
-          cameraMessage,
-        })),
-      onError: (error) => {
-        overrides?.onRuntimeError?.(error);
+          if (done && userDraftRef.current.trim()) {
+            overrides?.onUserTranscriptFinal?.(userDraftRef.current.trim());
+          }
+        },
+        onMetrics: (metrics) =>
+          setSession((current) => ({
+            ...current,
+            metrics: { ...current.metrics, ...metrics },
+          })),
+        onSignals: (signals) =>
+          setSession((current) => ({
+            ...current,
+            signals: { ...current.signals, ...signals },
+          })),
+        onVideoStream: (videoStream) =>
+          setSession((current) => ({ ...current, videoStream })),
+        onCameraState: (cameraState, cameraMessage = "") =>
+          setSession((current) => ({
+            ...current,
+            cameraState,
+            cameraMessage,
+          })),
+        onError: (error) => {
+          overrides?.onRuntimeError?.(error);
+          setSession((current) => ({
+            ...current,
+            status: "error",
+            error,
+          }));
+        },
+        onEnded: () => undefined,
+      });
+      runtimeRef.current = runtime;
+      const isLocal = provider === "local";
+      setSession((current) => ({
+        ...current,
+        providerLabel: isLocal ? "本地 Ascend" : "ModelBest 公网",
+        error: "",
+        events: [],
+      }));
+      try {
+        const cameraEnabled = appState.consent.cameraApproved;
+        const referenceAudio = isLocal
+          ? (appState.provider.referenceAudio ??
+            (await loadBundledReferenceAudio()))
+          : null;
+        await runtime.start({
+          provider: isLocal ? "local" : "cloud",
+          mode: cameraEnabled ? "video" : "voice",
+          cameraEnabled,
+          prompt:
+            overrides?.prompt ?? buildAgentPrompt(appState, activeRoutine),
+          muted: false,
+          playbackMuted: false,
+          referenceAudio,
+          realtimeWs:
+            overrides?.realtimeWs ??
+            (isLocal
+              ? appState.provider.localRealtimeWs
+              : appState.provider.cloudRealtimeWs),
+          chatHttp: appState.provider.localChatHttp,
+          cloudBaseUrl: appState.provider.cloudBaseUrl,
+          model: overrides?.model ?? appState.provider.model,
+        });
+        return true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "会话启动失败";
+        overrides?.onRuntimeError?.(message);
         setSession((current) => ({
           ...current,
           status: "error",
-          error,
+          error: message,
         }));
-      },
-      onEnded: () => undefined,
-    });
-    runtimeRef.current = runtime;
-    const isLocal = provider === "local";
-    setSession((current) => ({
-      ...current,
-      providerLabel: isLocal ? "本地 Ascend" : "ModelBest 公网",
-      error: "",
-      events: [],
-    }));
-    try {
-      const cameraEnabled = appState.consent.cameraApproved;
-      const referenceAudio = isLocal
-        ? appState.provider.referenceAudio ??
-          (await loadBundledReferenceAudio())
-        : null;
-      await runtime.start({
-        provider: isLocal ? "local" : "cloud",
-        mode: cameraEnabled ? "video" : "voice",
-        cameraEnabled,
-        prompt: overrides?.prompt ?? buildAgentPrompt(appState, activeRoutine),
-        muted: false,
-        playbackMuted: false,
-        referenceAudio,
-        realtimeWs:
-          overrides?.realtimeWs ??
-          (isLocal
-            ? appState.provider.localRealtimeWs
-            : appState.provider.cloudRealtimeWs),
-        chatHttp: appState.provider.localChatHttp,
-        cloudBaseUrl: appState.provider.cloudBaseUrl,
-        model: overrides?.model ?? appState.provider.model,
-      });
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "会话启动失败";
-      overrides?.onRuntimeError?.(message);
-      setSession((current) => ({
-        ...current,
-        status: "error",
-        error: message,
-      }));
-      return false;
-    }
-  }, [activeRoutine, appState, startReplayPreview, stop]);
+        return false;
+      }
+    },
+    [activeRoutine, appState, startReplayPreview, stop],
+  );
 
   const requestModelAction = useCallback(
     async (instruction: string) => {
@@ -404,8 +411,7 @@ export const useOmniSession = (
         setSession((current) => ({
           ...current,
           status: "error",
-          error:
-            error instanceof Error ? error.message : "模型动作请求失败",
+          error: error instanceof Error ? error.message : "模型动作请求失败",
         }));
         return false;
       }

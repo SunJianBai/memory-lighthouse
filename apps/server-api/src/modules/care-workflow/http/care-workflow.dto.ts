@@ -166,6 +166,30 @@ export class ConfirmOccurrenceDto {
   utteranceId?: string | null;
 }
 
+export class DeviceConfirmOccurrenceDto {
+  @IsInt()
+  @Min(0)
+  version!: number;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(100)
+  idempotencyKey!: string;
+
+  @IsIn(['RECIPIENT_BUTTON', 'RECIPIENT_VOICE'])
+  source!: 'RECIPIENT_BUTTON' | 'RECIPIENT_VOICE';
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  note?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(26)
+  utteranceId?: string | null;
+}
+
 export class FamilyVerifyOccurrenceDto {
   @IsInt()
   @Min(0)

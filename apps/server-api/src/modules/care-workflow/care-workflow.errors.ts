@@ -17,6 +17,15 @@ export class OccurrenceNotFoundException extends NotFoundException {
   }
 }
 
+export class DeviceOccurrenceAccessDeniedException extends ForbiddenException {
+  constructor() {
+    super({
+      code: 'DEVICE_OCCURRENCE_ACCESS_DENIED',
+      message: '当前陪伴设备无权确认此日程实例',
+    });
+  }
+}
+
 export class FamilyTaskNotFoundException extends NotFoundException {
   constructor() {
     super({ code: 'FAMILY_TASK_NOT_FOUND', message: '家属待办不存在' });

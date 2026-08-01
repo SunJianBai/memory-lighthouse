@@ -2,6 +2,7 @@ import { describe, expect, it, jest } from '@jest/globals';
 
 import type { ConfigService } from '@nestjs/config';
 import type { PrismaService } from '../../infrastructure/database/prisma.service';
+import type { CareWorkflowContentCipher } from '../care-workflow/ports/content-cipher.port';
 import type { DataEncryptionPort } from '../memory/ports/data-encryption.port';
 import type { MediaLeasePort } from '../realtime-communication/ports/media-lease.port';
 import { CompanionSessionApplicationService } from './companion-session.application.service';
@@ -77,11 +78,16 @@ function serviceWith(options: {
     release: jest.fn(() => Promise.resolve()),
     current: jest.fn(() => Promise.resolve(null)),
   };
+  const careCipher = {
+    encrypt: jest.fn(),
+    decrypt: jest.fn(),
+  };
   return new CompanionSessionApplicationService(
     prisma as unknown as PrismaService,
     config as unknown as ConfigService,
     encryption as unknown as DataEncryptionPort,
     leases as unknown as MediaLeasePort,
+    careCipher as unknown as CareWorkflowContentCipher,
   );
 }
 

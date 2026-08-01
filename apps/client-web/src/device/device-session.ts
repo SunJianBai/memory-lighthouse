@@ -3,6 +3,7 @@ import type {
   CompanionSessionStartView,
   DeviceContextView,
   ModelConnectionView,
+  OccurrenceView,
   RemoteJoinTicketView,
   RemoteSessionView,
 } from "../api/types";
@@ -51,16 +52,23 @@ const base64Url = (input: ArrayBuffer | Uint8Array): string => {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 };
 
 const sha256 = async (value: string): Promise<string> =>
   base64Url(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
 
-const canonicalProof = (action: string, fields: Array<[string, string]>): Uint8Array => {
+const canonicalProof = (
+  action: string,
+  fields: Array<[string, string]>,
+): Uint8Array => {
   const lines = ["memory-lighthouse.device-proof.v1", `action=${action}`];
   for (const [name, value] of fields) {
-    if (value.includes("\n") || value.includes("\r")) throw new Error("激活参数格式无效");
+    if (value.includes("\n") || value.includes("\r"))
+      throw new Error("激活参数格式无效");
     lines.push(`${name}=${value}`);
   }
   return encoder.encode(`${lines.join("\n")}\n`);
@@ -82,8 +90,10 @@ class DeviceVault {
   private database: Promise<IDBDatabase> | null = null;
 
   get(): Promise<InstallationRecord | null> {
-    return this.transaction<InstallationRecord | undefined>("readonly", (store) => store.get("current"))
-      .then((record) => record ?? null);
+    return this.transaction<InstallationRecord | undefined>(
+      "readonly",
+      (store) => store.get("current"),
+    ).then((record) => record ?? null);
   }
 
   async put(record: InstallationRecord): Promise<void> {
@@ -105,7 +115,8 @@ class DeviceVault {
           }
         };
         request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error ?? new Error("无法打开设备安全存储"));
+        request.onerror = () =>
+          reject(request.error ?? new Error("无法打开设备安全存储"));
       });
     }
     return this.database;
@@ -120,7 +131,8 @@ class DeviceVault {
       const transaction = database.transaction("installation", mode);
       const request = operation(transaction.objectStore("installation"));
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error ?? new Error("设备安全存储操作失败"));
+      request.onerror = () =>
+        reject(request.error ?? new Error("设备安全存储操作失败"));
     });
   }
 }
@@ -159,9 +171,10 @@ export class DeviceSessionManager {
 
   async claim(input: ActivationClaim): Promise<string> {
     const installation = await this.ensureInstallation();
-    const proof = input.proofType === "DYNAMIC_CODE"
-      ? input.proof.trim().toUpperCase()
-      : input.proof.trim();
+    const proof =
+      input.proofType === "DYNAMIC_CODE"
+        ? input.proof.trim().toUpperCase()
+        : input.proof.trim();
     const proofDigest = await sha256(`${input.proofType}\0${proof}`);
     const signature = await sign(
       installation.privateKey,
@@ -173,21 +186,21 @@ export class DeviceSessionManager {
         ["proof-sha256", proofDigest],
       ]),
     );
-    const result = await publicClient.request<{ claimed: true; challengeId: string }>(
-      `/activation-challenges/${encodeURIComponent(input.publicId)}/claim`,
-      {
-        method: "POST",
-        body: {
-          installationId: installation.installationId,
-          serverNonce: installation.serverNonce,
-          proofType: input.proofType,
-          proof,
-          signature,
-        },
-        authenticated: false,
-        retryAuthentication: false,
+    const result = await publicClient.request<{
+      claimed: true;
+      challengeId: string;
+    }>(`/activation-challenges/${encodeURIComponent(input.publicId)}/claim`, {
+      method: "POST",
+      body: {
+        installationId: installation.installationId,
+        serverNonce: installation.serverNonce,
+        proofType: input.proofType,
+        proof,
+        signature,
       },
-    );
+      authenticated: false,
+      retryAuthentication: false,
+    });
     return result.challengeId;
   }
 
@@ -212,7 +225,11 @@ export class DeviceSessionManager {
       "/device-credentials/exchange",
       {
         method: "POST",
-        body: { challengeId, installationId: installation.installationId, signature },
+        body: {
+          challengeId,
+          installationId: installation.installationId,
+          signature,
+        },
         authenticated: false,
         retryAuthentication: false,
       },
@@ -229,11 +246,16 @@ export class DeviceSessionManager {
   heartbeat(): Promise<{ online: true; serverTime: string }> {
     return this.request("/device/heartbeats", {
       method: "POST",
-      body: { appVersion: "client-web/0.2.0", osVersion: navigator.userAgent.slice(0, 64) },
+      body: {
+        appVersion: "client-web/0.2.0",
+        osVersion: navigator.userAgent.slice(0, 64),
+      },
     });
   }
 
-  startCompanion(mode: "AUDIO" | "AUDIO_VIDEO"): Promise<CompanionSessionStartView> {
+  startCompanion(
+    mode: "AUDIO" | "AUDIO_VIDEO",
+  ): Promise<CompanionSessionStartView> {
     return this.request("/device/companion-sessions", {
       method: "POST",
       headers: { "Idempotency-Key": crypto.randomUUID() },
@@ -242,11 +264,14 @@ export class DeviceSessionManager {
   }
 
   startModel(companionSessionId: string): Promise<ModelConnectionView> {
-    return this.request(`/device/companion-sessions/${companionSessionId}/model-sessions`, {
-      method: "POST",
-      headers: { "Idempotency-Key": crypto.randomUUID() },
-      body: {},
-    });
+    return this.request(
+      `/device/companion-sessions/${companionSessionId}/model-sessions`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: {},
+      },
+    );
   }
 
   appendAssistantUtterance(
@@ -261,6 +286,25 @@ export class DeviceSessionManager {
         speaker: "ASSISTANT",
         source: "MODEL",
         providerEventId: `web-${crypto.randomUUID()}`,
+        rawText: rawText.slice(0, 20_000),
+        isFinal: true,
+        language: "zh-CN",
+      },
+    });
+  }
+
+  appendUserTranscript(
+    modelSessionId: string,
+    sequenceNo: number,
+    rawText: string,
+  ): Promise<unknown> {
+    return this.request(`/device/model-sessions/${modelSessionId}/utterances`, {
+      method: "POST",
+      body: {
+        sequenceNo,
+        speaker: "USER",
+        source: "ASR",
+        providerEventId: `web-asr-${crypto.randomUUID()}`,
         rawText: rawText.slice(0, 20_000),
         isFinal: true,
         language: "zh-CN",
@@ -290,23 +334,54 @@ export class DeviceSessionManager {
     });
   }
 
-  endCompanion(companionSessionId: string, reason: string): Promise<unknown> {
-    return this.request(`/device/companion-sessions/${companionSessionId}/end`, {
+  currentOccurrences(): Promise<OccurrenceView[]> {
+    return this.request("/device/occurrences/current");
+  }
+
+  confirmOccurrence(
+    occurrenceId: string,
+    version: number,
+    source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE",
+  ): Promise<unknown> {
+    return this.request(`/device/occurrences/${occurrenceId}/confirm`, {
       method: "POST",
-      body: { reason },
+      body: {
+        version,
+        idempotencyKey: crypto.randomUUID(),
+        source,
+      },
     });
   }
 
+  endCompanion(companionSessionId: string, reason: string): Promise<unknown> {
+    return this.request(
+      `/device/companion-sessions/${companionSessionId}/end`,
+      {
+        method: "POST",
+        body: { reason },
+      },
+    );
+  }
+
   acceptRemote(sessionId: string): Promise<RemoteSessionView> {
-    return this.request(`/device/remote-sessions/${sessionId}/accept`, { method: "POST", body: {} });
+    return this.request(`/device/remote-sessions/${sessionId}/accept`, {
+      method: "POST",
+      body: {},
+    });
   }
 
   declineRemote(sessionId: string): Promise<RemoteSessionView> {
-    return this.request(`/device/remote-sessions/${sessionId}/decline`, { method: "POST", body: {} });
+    return this.request(`/device/remote-sessions/${sessionId}/decline`, {
+      method: "POST",
+      body: {},
+    });
   }
 
   endRemote(sessionId: string): Promise<RemoteSessionView> {
-    return this.request(`/device/remote-sessions/${sessionId}/end`, { method: "POST", body: {} });
+    return this.request(`/device/remote-sessions/${sessionId}/end`, {
+      method: "POST",
+      body: {},
+    });
   }
 
   remoteTicket(sessionId: string): Promise<RemoteJoinTicketView> {
@@ -317,7 +392,10 @@ export class DeviceSessionManager {
   }
 
   renewRemoteLease(sessionId: string): Promise<unknown> {
-    return this.request(`/device/remote-sessions/${sessionId}/heartbeat`, { method: "POST", body: {} });
+    return this.request(`/device/remote-sessions/${sessionId}/heartbeat`, {
+      method: "POST",
+      body: {},
+    });
   }
 
   currentRemote(): Promise<RemoteSessionView | null> {
@@ -330,9 +408,16 @@ export class DeviceSessionManager {
     deviceClient.setAccessToken(null);
   }
 
-  private async request<T>(path: string, options: Parameters<ApiClient["request"]>[1] = {}): Promise<T> {
+  private async request<T>(
+    path: string,
+    options: Parameters<ApiClient["request"]>[1] = {},
+  ): Promise<T> {
     if (!this.record?.credential) throw new Error("此浏览器尚未激活为陪伴设备");
-    if (new Date(this.record.credential.accessTokenExpiresAt).getTime() - Date.now() < 30_000) {
+    if (
+      new Date(this.record.credential.accessTokenExpiresAt).getTime() -
+        Date.now() <
+      30_000
+    ) {
       const refreshed = await this.refreshAccessToken();
       if (!refreshed) throw new Error("设备凭据已失效，请重新激活");
     }
@@ -361,12 +446,15 @@ export class DeviceSessionManager {
           ["credential-sha256", credentialDigest],
         ]),
       );
-      const rotated = await publicClient.request<DeviceCredential>("/device-auth/refresh", {
-        method: "POST",
-        body: { credential: credential.credential, signature },
-        authenticated: false,
-        retryAuthentication: false,
-      });
+      const rotated = await publicClient.request<DeviceCredential>(
+        "/device-auth/refresh",
+        {
+          method: "POST",
+          body: { credential: credential.credential, signature },
+          authenticated: false,
+          retryAuthentication: false,
+        },
+      );
       this.record = { ...installation, credential: rotated };
       await vault.put(this.record);
       deviceClient.setAccessToken(rotated.accessToken);
@@ -376,7 +464,11 @@ export class DeviceSessionManager {
         error instanceof ApiError &&
         (error.status === 401 ||
           error.status === 403 ||
-          ["DEVICE_REVOKED", "DEVICE_CREDENTIAL_REPLAYED", "INVALID_DEVICE_CREDENTIAL"].includes(error.code))
+          [
+            "DEVICE_REVOKED",
+            "DEVICE_CREDENTIAL_REPLAYED",
+            "INVALID_DEVICE_CREDENTIAL",
+          ].includes(error.code))
       ) {
         await this.clearCredential();
         return false;
@@ -392,8 +484,14 @@ export class DeviceSessionManager {
       this.record = existing;
       return existing;
     }
-    if (!crypto.subtle) throw new Error("当前浏览器不支持设备密钥，请使用最新版 Chrome 或 Android App");
-    const pair = (await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"])) as CryptoKeyPair;
+    if (!crypto.subtle)
+      throw new Error(
+        "当前浏览器不支持设备密钥，请使用最新版 Chrome 或 Android App",
+      );
+    const pair = (await crypto.subtle.generateKey("Ed25519", true, [
+      "sign",
+      "verify",
+    ])) as CryptoKeyPair;
     const spki = await crypto.subtle.exportKey("spki", pair.publicKey);
     const registered = await publicClient.request<{
       installationId: string;

@@ -125,13 +125,62 @@ export type RoutineView = {
   medicationId: string | null;
   title: string;
   instructions: string;
-  confirmationQuestion: string;
+  confirmationQuestion?: string;
   contentProvenance: "FAMILY_ENTERED_VERBATIM";
   status: string;
   schedules: RoutineScheduleView[];
   createdAt: string;
   updatedAt: string;
   version: number;
+};
+
+export type OccurrenceView = {
+  id: string;
+  householdId: string;
+  recipientId: string;
+  routineId: string;
+  scheduleId: string;
+  routineTitle: string;
+  routineType: string;
+  instructions: string;
+  contentProvenance: "FAMILY_ENTERED_VERBATIM";
+  scheduledAtUtc: string;
+  scheduledLocalDate: string;
+  status: string;
+  confirmationDeadlineAt: string | null;
+  escalationAt: string | null;
+  completedAt: string | null;
+  version: number;
+};
+
+export type CareSnapshotOccurrence = {
+  id: string;
+  routineId: string;
+  routineTitle: string;
+  routineType: string;
+  instructions: string;
+  confirmationQuestion: string;
+  scheduledAtUtc: string;
+  status: string;
+  confirmationDeadlineAt: string | null;
+  escalationAt: string | null;
+  version: number;
+};
+
+export type CareEventView = {
+  id: string;
+  householdId: string;
+  recipientId: string;
+  type: string;
+  severity: string;
+  sourceType: string;
+  sourceId: string | null;
+  routineOccurrenceId: string | null;
+  title: string;
+  summary: string;
+  payload: unknown;
+  occurredAt: string;
+  createdAt: string;
 };
 
 export type FamilyTaskView = {
@@ -249,31 +298,47 @@ export type RemoteJoinTicketView = {
   transcription: false;
 };
 
+export type DeviceRecipientView = {
+  id: string;
+  preferredName: string;
+  timezone: string;
+};
+
+export type DeviceConsentView = {
+  capturedAt: string;
+  decisions: Record<string, boolean>;
+};
+
+export type CareSnapshotView = {
+  schemaVersion: 1;
+  recipient: DeviceRecipientView;
+  memories: Array<{
+    id: string;
+    kind: string;
+    title: string;
+    content: string;
+    sensitivity: string;
+    verificationStatus: string;
+    revisionNo: number;
+  }>;
+  occurrences: CareSnapshotOccurrence[];
+};
+
 export type DeviceContextView = {
   deviceId: string;
   bindingId: string;
   householdId: string;
   recipientId: string;
-  recipient: { id: string; preferredName: string; timezone: string };
-  consent: { capturedAt: string; decisions: Record<string, boolean> };
+  recipient: DeviceRecipientView;
+  consent: DeviceConsentView;
+  careSnapshot: CareSnapshotView;
   model: { provider: string; model: string; realtimeUrl: string };
 };
 
 export type CompanionSessionStartView = {
   session: { id: string; mode: "AUDIO" | "AUDIO_VIDEO"; status: string };
   consent: DeviceContextView["consent"];
-  careSnapshot: {
-    recipient: DeviceContextView["recipient"];
-    memories: Array<{
-      id: string;
-      kind: string;
-      title: string;
-      content: string;
-      sensitivity: string;
-      verificationStatus: string;
-      revisionNo: number;
-    }>;
-  };
+  careSnapshot: CareSnapshotView;
 };
 
 export type ModelConnectionView = {

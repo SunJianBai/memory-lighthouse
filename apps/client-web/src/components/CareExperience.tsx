@@ -17,13 +17,7 @@ import {
   Sparkles,
   Volume2,
 } from "lucide-react";
-import {
-  useEffect,
-  useMemo,
-  useReducer,
-  useRef,
-  useState,
-} from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   createInitialAgentState,
   transitionAgent,
@@ -35,10 +29,7 @@ import {
   routineOccurrenceKey,
   shouldNotifyFamily,
 } from "../agent/routine-scheduler";
-import {
-  isMemoryPermitted,
-  permittedRoutines,
-} from "../agent/privacy-policy";
+import { isMemoryPermitted, permittedRoutines } from "../agent/privacy-policy";
 import { classifyVoiceCommand } from "../agent/voice-command";
 import type { AppState, Routine } from "../domain/types";
 import {
@@ -46,11 +37,7 @@ import {
   type OmniSessionStartOverrides,
 } from "../hooks/use-omni-session";
 import { useAppState } from "../state/app-state";
-import {
-  formatClock,
-  formatLongDate,
-  formatMetric,
-} from "../utils/format";
+import { formatClock, formatLongDate, formatMetric } from "../utils/format";
 
 const phaseLabels = {
   idle: "等待开始",
@@ -65,8 +52,14 @@ type CareExperienceProps = {
   presenterMode?: boolean;
   runtimeState?: AppState;
   sessionCoordinator?: {
-    start: (mode: "AUDIO" | "AUDIO_VIDEO") => Promise<OmniSessionStartOverrides>;
+    start: (
+      mode: "AUDIO" | "AUDIO_VIDEO",
+    ) => Promise<OmniSessionStartOverrides>;
     stop: (reason: string) => Promise<void>;
+    confirmOccurrence?: (
+      occurrenceId: string,
+      source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE",
+    ) => Promise<void>;
   };
   serverBackedMode?: boolean;
 };
@@ -80,22 +73,16 @@ export const CareExperience = ({
   const { state: demoState, updateState, addEvent } = useAppState();
   const state = runtimeState ?? demoState;
   const [coordinatorError, setCoordinatorError] = useState("");
-  const [agent, dispatch] = useReducer(
-    transitionAgent,
-    undefined,
-    () => createInitialAgentState(),
+  const [agent, dispatch] = useReducer(transitionAgent, undefined, () =>
+    createInitialAgentState(),
   );
   const [clock, setClock] = useState(new Date());
-  const [presenterCue, setPresenterCue] = useState(
-    "先启动会话，再按顺序触发场景。",
-  );
+  const [presenterCue, setPresenterCue] =
+    useState("先启动会话，再按顺序触发场景。");
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const lastAutomaticRoutineRef = useRef("");
   const lastVoiceCommandRef = useRef("");
-  const enabledRoutines = useMemo(
-    () => permittedRoutines(state),
-    [state],
-  );
+  const enabledRoutines = useMemo(() => permittedRoutines(state), [state]);
   const activeRoutine: Routine | undefined = useMemo(
     () =>
       presenterMode
@@ -118,9 +105,8 @@ export const CareExperience = ({
 
   const nextRoutine = activeRoutine ?? enabledRoutines[0];
   const currentRoutine =
-    enabledRoutines.find(
-      (routine) => routine.id === agent.activeRoutineId,
-    ) ?? nextRoutine;
+    enabledRoutines.find((routine) => routine.id === agent.activeRoutineId) ??
+    nextRoutine;
 
   const record = (
     title: string,
@@ -188,7 +174,9 @@ export const CareExperience = ({
         await sessionCoordinator.stop("RUNTIME_START_FAILED");
       } catch (error) {
         setCoordinatorError(
-          error instanceof Error ? error.message : "服务端会话清理失败，请稍后重试",
+          error instanceof Error
+            ? error.message
+            : "服务端会话清理失败，请稍后重试",
         );
       }
     }
@@ -199,7 +187,9 @@ export const CareExperience = ({
     if (sessionCoordinator) {
       void sessionCoordinator.stop("DEVICE_ENDED").catch((error) => {
         setCoordinatorError(
-          error instanceof Error ? error.message : "服务端会话结束失败，请稍后重试",
+          error instanceof Error
+            ? error.message
+            : "服务端会话结束失败，请稍后重试",
         );
       });
     }
@@ -250,9 +240,7 @@ export const CareExperience = ({
           });
         }
         record(
-          accepted
-            ? `${routine.title}已到期`
-            : `${routine.title}触发失败`,
+          accepted ? `${routine.title}已到期` : `${routine.title}触发失败`,
           accepted
             ? "确定性日程规则已触发，真实模型已完整返回提醒。"
             : "确定性日程规则已触发，但真实模型没有接受提醒请求。",
@@ -267,7 +255,11 @@ export const CareExperience = ({
   };
 
   useEffect(() => {
-    if (presenterMode || session.status !== "live" || agent.phase !== "observing") {
+    if (
+      presenterMode ||
+      session.status !== "live" ||
+      agent.phase !== "observing"
+    ) {
       return;
     }
     const due = findDueRoutine(enabledRoutines, clock);
@@ -279,7 +271,8 @@ export const CareExperience = ({
   }, [agent.phase, clock, enabledRoutines, presenterMode, session.status]);
 
   const triggerWrongBox = () => {
-    const text = "先等一下，我看到你拿的是标有“下午”的盒子。我还不能确认，请看看右边标有“早 · 08:30”的白色盒子。";
+    const text =
+      "先等一下，我看到你拿的是标有“下午”的盒子。我还不能确认，请看看右边标有“早 · 08:30”的白色盒子。";
     setPresenterCue(
       state.provider.provider === "replay"
         ? "主动纠正已完成。现在请说“是右边这个吗？”，展示用户可打断。"
@@ -298,15 +291,32 @@ export const CareExperience = ({
     }
   };
 
-  const confirmRoutine = (source: "user" | "demo" = "user") => {
+  const confirmRoutine = async (
+    source: "button" | "voice" | "demo" = "button",
+  ) => {
     if (agent.phase !== "awaiting_confirmation") return;
+    if (serverBackedMode && currentRoutine?.occurrenceId) {
+      if (!sessionCoordinator?.confirmOccurrence) {
+        setCoordinatorError("设备端日程确认接口尚未就绪，请刷新后重试。");
+        return;
+      }
+      setCoordinatorError("");
+      try {
+        await sessionCoordinator.confirmOccurrence(
+          currentRoutine.occurrenceId,
+          source === "voice" ? "RECIPIENT_VOICE" : "RECIPIENT_BUTTON",
+        );
+      } catch (error) {
+        setCoordinatorError(
+          error instanceof Error ? error.message : "日程确认失败，请重试。",
+        );
+        return;
+      }
+    }
     dispatch({ type: "USER_CONFIRMED", at: new Date().toISOString() });
     updateState((current) => ({
       ...current,
-      events: resolveOpenTaskEvents(
-        current.events,
-        currentRoutine?.id,
-      ),
+      events: resolveOpenTaskEvents(current.events, currentRoutine?.id),
     }));
     const text = `好的，${state.recipient.preferredName}。我记录的是“本人已口头确认”，不是医学判断。今天这项任务完成了。`;
     sayIfReplay(text);
@@ -317,7 +327,7 @@ export const CareExperience = ({
       "user_confirmed",
       "info",
       "resolved",
-      source,
+      source === "demo" ? "demo" : "user",
     );
   };
 
@@ -378,8 +388,7 @@ export const CareExperience = ({
 
   const findGlasses = () => {
     const memory = state.memories.find(
-      (item) =>
-        item.tags.includes("眼镜") && isMemoryPermitted(state, item),
+      (item) => item.tags.includes("眼镜") && isMemoryPermitted(state, item),
     );
     const text = memory
       ? `${state.recipient.preferredName}，家属记录里写着：${memory.content}我们先去那里看看，好吗？`
@@ -450,10 +459,7 @@ export const CareExperience = ({
       lastVoiceCommandRef.current = "";
       return;
     }
-    if (
-      session.status !== "live" ||
-      !session.userTranscript.trim()
-    ) {
+    if (session.status !== "live" || !session.userTranscript.trim()) {
       return;
     }
     const command = session.userTranscript.replace(/\s+/g, "").trim();
@@ -462,7 +468,7 @@ export const CareExperience = ({
 
     const intent = classifyVoiceCommand(command);
     if (intent === "confirm") {
-      confirmRoutine("user");
+      void confirmRoutine("voice");
     } else if (intent === "repeat") {
       repeatReminder();
     } else if (intent === "family") {
@@ -480,7 +486,9 @@ export const CareExperience = ({
           : "live";
 
   return (
-    <div className={`care-experience ${presenterMode ? "presenter-layout" : ""}`}>
+    <div
+      className={`care-experience ${presenterMode ? "presenter-layout" : ""}`}
+    >
       <section className="care-stage" aria-label="长者陪伴界面">
         <div className="care-stage-header">
           <div>
@@ -566,13 +574,17 @@ export const CareExperience = ({
             <ShieldAlert aria-hidden="true" size={20} />
             <div>
               <strong>真实模型连接失败</strong>
-              <span>{coordinatorError || session.error}。真实会话没有被标记为成功。</span>
+              <span>
+                {coordinatorError || session.error}。真实会话没有被标记为成功。
+              </span>
             </div>
           </div>
         )}
 
         <div className="next-routine-card">
-          <span className="routine-time">{currentRoutine?.scheduledTime ?? "—"}</span>
+          <span className="routine-time">
+            {currentRoutine?.scheduledTime ?? "—"}
+          </span>
           <div>
             <small>当前日程</small>
             <strong>{currentRoutine?.title ?? "今天没有待办任务"}</strong>
@@ -608,7 +620,7 @@ export const CareExperience = ({
               session.status !== "live" ||
               agent.phase !== "awaiting_confirmation"
             }
-            onClick={() => confirmRoutine("user")}
+            onClick={() => void confirmRoutine("button")}
           >
             <Check aria-hidden="true" size={24} />
             我完成了
@@ -627,7 +639,11 @@ export const CareExperience = ({
             type="button"
             disabled={session.status !== "live" || serverBackedMode}
             onClick={() => requestFamily("user")}
-            title={serverBackedMode ? "服务端家庭联系请求接口尚未开放；请使用上方远程来电功能" : undefined}
+            title={
+              serverBackedMode
+                ? "服务端家庭联系请求接口尚未开放；请使用上方远程来电功能"
+                : undefined
+            }
           >
             <HeartHandshake aria-hidden="true" size={23} />
             {serverBackedMode ? "联系家人（待接入）" : "联系家人"}
@@ -638,8 +654,8 @@ export const CareExperience = ({
           {serverBackedMode
             ? "真实会话使用服务器 Prompt 与 Consent Snapshot；尚未开放的家庭联系动作会保持禁用，不会伪造成功。"
             : state.provider.provider === "cloud"
-            ? "守忆灯塔不识别药片、剂量或诊断健康状况。ModelBest 官方双工协议不返回用户转写，完成与联系家人请点击按钮留痕。"
-            : "守忆灯塔只复述家属录入的信息，不识别药片、剂量或诊断健康状况。"}
+              ? "守忆灯塔不识别药片、剂量或诊断健康状况。ModelBest 官方双工协议不返回用户转写，完成与联系家人请点击按钮留痕。"
+              : "守忆灯塔只复述家属录入的信息，不识别药片、剂量或诊断健康状况。"}
         </p>
       </section>
 
