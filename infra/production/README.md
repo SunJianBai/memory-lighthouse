@@ -137,8 +137,11 @@ Compose raw 格式读取，SMTP 密码中的 `$` 等字符不会被插值。
 
 TX4H4G 所在网络不能可靠访问 Docker Hub，因此仓库的
 `.github/workflows/production-delivery.yml` 在已通过 CI 的 GitHub Runner 上构建
-四个应用镜像、拉取本文件锁定的基础设施镜像，再把 `docker save` 数据流经固定
-主机密钥的 SSH 直接送入服务器。服务器不会从第三方公共加速器拉取镜像。
+四个应用镜像、拉取本文件锁定的基础设施镜像，再把九个精确镜像作为私有、按发布号
+隔离的传输 tag 推送到 GHCR。TX4H4G 通过固定主机密钥的 SSH 接收本次工作流短期
+Token，从 GHCR 拉取后恢复为 Compose 的原始 tag；Token 只进入 `docker login`
+标准输入并使用临时 `DOCKER_CONFIG`，完成后立即注销和清理。服务器不会从第三方
+公共加速器或 Docker Hub 拉取镜像。
 
 仓库的 `production` Environment 需要两个 Base64 编码的 Actions Secret：
 `TX4H4G_SSH_PRIVATE_KEY_BASE64` 和 `TX4H4G_KNOWN_HOSTS_BASE64`。仓库变量

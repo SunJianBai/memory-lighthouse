@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: production-openbmb
@@ -51,7 +52,10 @@ jobs:
           actual_sha="$(git rev-parse HEAD)"
           [[ "$actual_sha" == "$SOURCE_SHA" ]]
           release_id="git-${SOURCE_SHA:0:12}"
+          repository_owner_lower="${GITHUB_REPOSITORY_OWNER,,}"
+          [[ "$repository_owner_lower" =~ ^[a-z0-9][a-z0-9-]*$ ]]
           echo "RELEASE_ID=$release_id" >> "$GITHUB_ENV"
+          echo "DELIVERY_IMAGE=ghcr.io/$repository_owner_lower/memory-lighthouse-delivery" >> "$GITHUB_ENV"
           if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
             echo 'ACTIVATE_RELEASE=true' >> "$GITHUB_ENV"
           else
@@ -129,22 +133,26 @@ jobs:
           docker build --pull \
             --target api-runtime \
             --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --file infra/production/Dockerfile.api \
             --tag "openbmb-api:$RELEASE_ID" .
           docker build \
             --target api-migrator \
             --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --file infra/production/Dockerfile.api \
             --tag "openbmb-migrator:$RELEASE_ID" .
           docker build --pull \
             --target client-runtime \
             --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --build-arg VITE_API_BASE_URL=/openBMB/api/v1 \
             --file infra/production/Dockerfile.web \
             --tag "openbmb-client-web:$RELEASE_ID" .
           docker build \
             --target admin-runtime \
             --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --build-arg VITE_API_BASE=/openBMB/api/v1 \
             --file infra/production/Dockerfile.web \
             --tag "openbmb-admin-web:$RELEASE_ID" .
@@ -160,11 +168,26 @@ jobs:
           docker pull minio/mc:RELEASE.2025-04-08T15-39-49Z
           docker pull livekit/livekit-server:v1.13.4
 
-      - name: Transfer pinned images without Docker Hub access on the host
+      - name: Publish exact release transport images to GHCR
         if: env.ALREADY_STAGED != 'true'
         shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          auth_dir="$RUNNER_TEMP/openbmb-ghcr-auth-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          case "$auth_dir" in
+            "$RUNNER_TEMP"/openbmb-ghcr-auth-[0-9]*-[0-9]*) ;;
+            *) printf 'unsafe runner authentication path\n' >&2; exit 1 ;;
+          esac
+          install -d -m 0700 "$auth_dir"
+          cleanup() {
+            DOCKER_CONFIG="$auth_dir" docker logout ghcr.io >/dev/null 2>&1 || true
+            rm -rf -- "$auth_dir"
+          }
+          trap cleanup EXIT
+          printf '%s\n' "$GHCR_TOKEN" | DOCKER_CONFIG="$auth_dir" \
+            docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >/dev/null
           images=(
             "openbmb-api:$RELEASE_ID"
             "openbmb-migrator:$RELEASE_ID"
@@ -176,9 +199,43 @@ jobs:
             minio/mc:RELEASE.2025-04-08T15-39-49Z
             livekit/livekit-server:v1.13.4
           )
-          docker save "${images[@]}" | gzip -1 | \
+          components=(
+            api migrator client-web admin-web mysql redis minio minio-mc livekit
+          )
+          [[ "${#images[@]}" -eq "${#components[@]}" ]]
+          for index in "${!images[@]}"; do
+            delivery_ref="$DELIVERY_IMAGE:${components[$index]}-$RELEASE_ID"
+            docker tag "${images[$index]}" "$delivery_ref"
+            DOCKER_CONFIG="$auth_dir" docker push "$delivery_ref"
+          done
+          trap - EXIT
+          cleanup
+
+      - name: Pull exact release images from GHCR on the host
+        if: env.ALREADY_STAGED != 'true'
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_ACTOR" =~ ^[A-Za-z0-9_-]+(\[bot\])?$ ]]
+          transfer_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          remote_dir=".openbmb-transfer/$transfer_id"
+          remote_helper="$remote_dir/pull-release-images.sh"
+          ssh tx4h4g-prod \
+            "set -eu; install -d -m 0700 \"\$HOME/.openbmb-transfer\" \"\$HOME/$remote_dir\""
+          scp infra/production/scripts/pull-release-images.sh \
+            "tx4h4g-prod:$remote_helper"
+          cleanup_remote() {
             ssh tx4h4g-prod \
-              'set -euo pipefail; gzip -dc | docker load'
+              "rm -f -- \"\$HOME/$remote_helper\"; rmdir -- \"\$HOME/$remote_dir\" 2>/dev/null || true" \
+              >/dev/null 2>&1 || true
+          }
+          trap cleanup_remote EXIT
+          printf '%s\n' "$GHCR_TOKEN" | ssh tx4h4g-prod \
+            "chmod 0700 \"\$HOME/$remote_helper\"; bash \"\$HOME/$remote_helper\" '$RELEASE_ID' '$DELIVERY_IMAGE' '$GITHUB_ACTOR'"
+          trap - EXIT
+          cleanup_remote
 
       - name: Stage exact source release
         if: env.ALREADY_STAGED != 'true'
