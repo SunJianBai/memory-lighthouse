@@ -102,6 +102,10 @@ export const CareExperience = ({
   }, [session.videoStream]);
 
   const nextRoutine = activeRoutine ?? enabledRoutines[0];
+  const currentRoutine =
+    enabledRoutines.find(
+      (routine) => routine.id === agent.activeRoutineId,
+    ) ?? nextRoutine;
 
   const record = (
     title: string,
@@ -118,7 +122,7 @@ export const CareExperience = ({
       title,
       summary,
       occurredAt: new Date().toISOString(),
-      routineId: nextRoutine?.id,
+      routineId: currentRoutine?.id,
       source,
     });
 
@@ -165,7 +169,7 @@ export const CareExperience = ({
     }
   };
 
-  const triggerRoutine = (routine: Routine | undefined = nextRoutine) => {
+  const triggerRoutine = (routine: Routine | undefined = currentRoutine) => {
     if (!routine) return;
     const at = new Date().toISOString();
     dispatch({ type: "ROUTINE_DUE", routineId: routine.id, at });
@@ -251,7 +255,7 @@ export const CareExperience = ({
     sayIfReplay(text);
     setPresenterCue("长者端闭环完成。切换到家属端可查看带边界说明的事件摘要。");
     record(
-      `${nextRoutine?.title ?? "晨间任务"}已确认`,
+      `${currentRoutine?.title ?? "晨间任务"}已确认`,
       "本人通过页面或语音明确确认完成；系统未判断具体药片和剂量。",
       "user_confirmed",
       "info",
@@ -261,14 +265,14 @@ export const CareExperience = ({
   };
 
   const repeatReminder = () => {
-    const text = nextRoutine
-      ? `好的，我慢一点再说一次。现在只需要先看看${nextRoutine.instructions}`
+    const text = currentRoutine
+      ? `好的，我慢一点再说一次。现在只需要先看看${currentRoutine.instructions}`
       : "好的，我会慢一点再说一次。";
     if (state.provider.provider === "replay") {
       sayIfReplay(text);
     } else {
       void requestModelAction(
-        `长者请求你慢一点重复当前步骤。当前步骤是：${nextRoutine?.instructions ?? "请简短重复刚才的提醒"}`,
+        `长者请求你慢一点重复当前步骤。当前步骤是：${currentRoutine?.instructions ?? "请简短重复刚才的提醒"}`,
       );
     }
     setPresenterCue("已按长者需求缩短并重复指令。");
@@ -289,7 +293,7 @@ export const CareExperience = ({
     );
     setPresenterCue("事件已进入家属端“待确认”，不显示为紧急告警。");
     record(
-      `${nextRoutine?.title ?? "当前任务"}等待家属确认`,
+      `${currentRoutine?.title ?? "当前任务"}等待家属确认`,
       source === "agent"
         ? "超过家属配置的等待时间仍未获得明确确认；系统没有判定危险，已将事项加入家属待办。"
         : "长者未明确确认，系统没有判定危险，已将事项加入家属待办。",
@@ -505,11 +509,11 @@ export const CareExperience = ({
         )}
 
         <div className="next-routine-card">
-          <span className="routine-time">{nextRoutine?.scheduledTime ?? "—"}</span>
+          <span className="routine-time">{currentRoutine?.scheduledTime ?? "—"}</span>
           <div>
             <small>当前日程</small>
-            <strong>{nextRoutine?.title ?? "今天没有待办任务"}</strong>
-            <p>{nextRoutine?.instructions}</p>
+            <strong>{currentRoutine?.title ?? "今天没有待办任务"}</strong>
+            <p>{currentRoutine?.instructions}</p>
           </div>
           <BellRing aria-hidden="true" size={24} />
         </div>
