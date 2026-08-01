@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+case "${OPENBMB_OPERATION_LOCK_HELD:-false}" in
+  false)
+    exec flock --exclusive --wait 0 --conflict-exit-code 75 \
+      /run/lock/openbmb-operation.lock \
+      env OPENBMB_OPERATION_LOCK_HELD=true bash "$script_dir/rollback-release.sh" "$@"
+    ;;
+  true) ;;
+  *) printf 'OPENBMB_OPERATION_LOCK_HELD must be true or false\n' >&2; exit 1 ;;
+esac
+
 if [[ $# -ne 1 ]]; then
   printf 'usage: %s <release-id>\n' "${BASH_SOURCE[0]}" >&2
   exit 2
@@ -41,7 +52,7 @@ done
 
 OPENBMB_RELEASE="$release_id" \
   bash "$target/infra/production/scripts/compose.sh" \
-  up -d --no-build api client-web admin-web
+  up -d --pull never --no-build api client-web admin-web
 OPENBMB_RELEASE="$release_id" \
   bash "$target/infra/production/scripts/health-check.sh" --local
 

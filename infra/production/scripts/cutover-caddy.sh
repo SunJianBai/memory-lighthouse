@@ -2,6 +2,17 @@
 set -Eeuo pipefail
 umask 0077
 
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+case "${OPENBMB_OPERATION_LOCK_HELD:-false}" in
+  false)
+    exec flock --exclusive --wait 0 --conflict-exit-code 75 \
+      /run/lock/openbmb-operation.lock \
+      env OPENBMB_OPERATION_LOCK_HELD=true bash "$script_dir/cutover-caddy.sh" "$@"
+    ;;
+  true) ;;
+  *) printf 'OPENBMB_OPERATION_LOCK_HELD must be true or false\n' >&2; exit 1 ;;
+esac
+
 if [[ $# -ne 5 ]]; then
   printf 'usage: %s <CampusHub-dir> <base-compose.yml> <env-file> <override.yml> <frontend-service>\n' "${BASH_SOURCE[0]}" >&2
   exit 2
@@ -15,7 +26,6 @@ frontend_service="$5"
 state_root="/var/lib/openbmb/cutover"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 state_dir="$state_root/$stamp"
-script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 caddy_env="/etc/caddy/openbmb.env"
 
 caddy_value() {
@@ -95,7 +105,7 @@ rollback_public() {
   printf 'Cutover failed; restoring CampusHub directly on port 80.\n' >&2
   systemctl stop caddy || true
   cd "$campus_dir"
-  "${campus_compose[@]}" up -d --no-deps --force-recreate "$frontend_service" || true
+  "${campus_compose[@]}" up -d --pull never --no-build --no-deps --force-recreate "$frontend_service" || true
   curl --fail --silent --show-error http://127.0.0.1/ --output /dev/null || true
   exit "$status"
 }
@@ -104,7 +114,7 @@ trap rollback_public ERR
 campus_cutover_compose=(docker compose --env-file "$campus_env" -f "$base_compose" -f "$override_compose")
 "${campus_cutover_compose[@]}" config > "$state_dir/campus.after.yml"
 "${campus_cutover_compose[@]}" \
-  up -d --no-deps --force-recreate "$frontend_service"
+  up -d --pull never --no-build --no-deps --force-recreate "$frontend_service"
 
 published="$("${campus_cutover_compose[@]}" port "$frontend_service" 80)"
 [[ "$published" == 127.0.0.1:18080 ]] || {

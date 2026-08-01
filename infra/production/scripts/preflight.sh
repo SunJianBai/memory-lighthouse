@@ -94,9 +94,22 @@ fi
 available_kib="$(awk '/MemAvailable:/ { print $2 }' /proc/meminfo)"
 swap_free_kib="$(awk '/SwapFree:/ { print $2 }' /proc/meminfo)"
 [[ "${available_kib:-0}" -ge 786432 ]] || fail 'at least 768 MiB immediately available RAM is required before deployment'
-[[ "$(( ${available_kib:-0} + ${swap_free_kib:-0} ))" -ge 2097152 ]] || fail 'available RAM plus free swap must total at least 2 GiB for the first build'
 available_disk_kib="$(df -Pk /opt | awk 'NR == 2 { print $4 }')"
-[[ "${available_disk_kib:-0}" -ge 10485760 ]] || fail 'at least 10 GiB free space under /opt is required for first-build layers and rollback images'
+case "${OPENBMB_SKIP_IMAGE_BUILD:-false}" in
+  true)
+    [[ "$(( ${available_kib:-0} + ${swap_free_kib:-0} ))" -ge 1572864 ]] || \
+      fail 'available RAM plus free swap must total at least 1.5 GiB for migration and startup'
+    [[ "${available_disk_kib:-0}" -ge 3145728 ]] || \
+      fail 'at least 3 GiB free space under /opt is required after preloading release images'
+    ;;
+  false)
+    [[ "$(( ${available_kib:-0} + ${swap_free_kib:-0} ))" -ge 2097152 ]] || \
+      fail 'available RAM plus free swap must total at least 2 GiB for the first build'
+    [[ "${available_disk_kib:-0}" -ge 10485760 ]] || \
+      fail 'at least 10 GiB free space under /opt is required for first-build layers and rollback images'
+    ;;
+  *) fail 'OPENBMB_SKIP_IMAGE_BUILD must be true or false' ;;
+esac
 
 for host_name in \
   "$(value_from OPENBMB_DOMAIN "$infra_env")"; do

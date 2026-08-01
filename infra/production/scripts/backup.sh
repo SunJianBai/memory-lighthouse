@@ -3,6 +3,15 @@ set -Eeuo pipefail
 umask 0077
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+case "${OPENBMB_OPERATION_LOCK_HELD:-false}" in
+  false)
+    exec flock --exclusive --wait 1800 --conflict-exit-code 75 \
+      /run/lock/openbmb-operation.lock \
+      env OPENBMB_OPERATION_LOCK_HELD=true bash "$script_dir/backup.sh" "$@"
+    ;;
+  true) ;;
+  *) printf 'OPENBMB_OPERATION_LOCK_HELD must be true or false\n' >&2; exit 1 ;;
+esac
 infra_env="${OPENBMB_INFRA_ENV_FILE:-/etc/openbmb/infra.env}"
 backup_root="${OPENBMB_BACKUP_ROOT:-/var/backups/openbmb}"
 
@@ -12,9 +21,11 @@ case "$backup_root" in
 esac
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-backup_dir="$backup_root/$stamp"
+mkdir -p -- "$backup_root"
+chmod 0700 -- "$backup_root"
+backup_dir="$(mktemp -d -- "$backup_root/${stamp}.XXXXXX")"
 mkdir -p -- "$backup_dir/minio"
-chmod 0700 -- "$backup_root" "$backup_dir" "$backup_dir/minio"
+chmod 0700 -- "$backup_dir" "$backup_dir/minio"
 
 api_was_running=false
 if [[ "$(docker inspect --format '{{.State.Running}}' openbmb-api 2>/dev/null || true)" == true ]]; then
@@ -45,7 +56,7 @@ printf 'Creating MySQL snapshot in %s\n' "$backup_dir"
 gzip -t "$backup_dir/mysql.sql.gz"
 
 printf 'Creating current-object MinIO snapshot\n'
-"$script_dir/compose.sh" run --rm --no-deps \
+"$script_dir/compose.sh" run --rm --pull never --no-deps \
   --volume "$backup_dir/minio:/backup" \
   --entrypoint /bin/sh \
   minio-init -ceu '

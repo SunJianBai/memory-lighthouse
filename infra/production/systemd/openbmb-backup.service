@@ -15,6 +15,6 @@ UMask=0077
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/backups/openbmb
+ReadWritePaths=/var/backups/openbmb /run/lock
 NoNewPrivileges=true
 TimeoutStartSec=3600

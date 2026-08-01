@@ -1,0 +1,325 @@
+name: Production delivery
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-openbmb
+  cancel-in-progress: false
+
+env:
+  DEPLOY_HOST: 124.220.81.104
+  DEPLOY_USER: ubuntu
+  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  deliver:
+    name: Build, transfer, and safely activate
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       vars.PRODUCTION_DEPLOY_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out the exact validated commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Derive immutable release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$SOURCE_SHA" ]]
+          release_id="git-${SOURCE_SHA:0:12}"
+          echo "RELEASE_ID=$release_id" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
+            echo 'ACTIVATE_RELEASE=true' >> "$GITHUB_ENV"
+          else
+            echo 'ACTIVATE_RELEASE=false' >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure pinned SSH identity
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY_BASE64: ${{ secrets.TX4H4G_SSH_PRIVATE_KEY_BASE64 }}
+          SSH_KNOWN_HOSTS_BASE64: ${{ secrets.TX4H4G_KNOWN_HOSTS_BASE64 }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SSH_PRIVATE_KEY_BASE64" && -n "$SSH_KNOWN_HOSTS_BASE64" ]]
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s' "$SSH_PRIVATE_KEY_BASE64" | base64 --decode > "$HOME/.ssh/openbmb_deploy"
+          printf '%s' "$SSH_KNOWN_HOSTS_BASE64" | base64 --decode > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/openbmb_deploy" "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/openbmb_deploy" >/dev/null
+          cat > "$HOME/.ssh/config" <<EOF
+          Host tx4h4g-prod
+            HostName $DEPLOY_HOST
+            User $DEPLOY_USER
+            IdentityFile ~/.ssh/openbmb_deploy
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            GlobalKnownHostsFile /dev/null
+            ServerAliveInterval 30
+            ServerAliveCountMax 6
+          EOF
+          chmod 0600 "$HOME/.ssh/config"
+
+      - name: Verify deployment host prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh tx4h4g-prod 'set -euo pipefail
+            sudo -n true
+            docker version >/dev/null
+            docker compose version >/dev/null
+            test -d /opt/openbmb/releases
+            docker_root="$(docker info --format "{{.DockerRootDir}}")"
+            docker_free_kib="$(sudo df -Pk "$docker_root" | awk "NR == 2 { print \$4 }")"
+            release_free_kib="$(df -Pk /opt/openbmb/releases | awk "NR == 2 { print \$4 }")"
+            test "${docker_free_kib:-0}" -ge 6291456
+            test "${release_free_kib:-0}" -ge 1048576'
+
+      - name: Reuse only a fully verified immutable release
+        shell: bash
+        run: |
+          set -euo pipefail
+          already_staged="$(ssh tx4h4g-prod \
+            "set -euo pipefail
+             release_root='/opt/openbmb/releases/$RELEASE_ID'
+             if sudo test -e \"\$release_root\" || sudo test -L \"\$release_root\"; then
+               sudo test ! -L \"\$release_root\"
+               test \"\$(sudo cat \"\$release_root/.openbmb-release-sha\")\" = '$SOURCE_SHA'
+               sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env \\
+                 OPENBMB_API_ENV_FILE=/etc/openbmb/api.env \\
+                 bash \"\$release_root/infra/production/scripts/verify-release-images.sh\" >/dev/null
+               printf true
+             else
+               printf false
+             fi")"
+          [[ "$already_staged" == true || "$already_staged" == false ]]
+          echo "ALREADY_STAGED=$already_staged" >> "$GITHUB_ENV"
+
+      - name: Build immutable application images
+        if: env.ALREADY_STAGED != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull \
+            --target api-runtime \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --file infra/production/Dockerfile.api \
+            --tag "openbmb-api:$RELEASE_ID" .
+          docker build \
+            --target api-migrator \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --file infra/production/Dockerfile.api \
+            --tag "openbmb-migrator:$RELEASE_ID" .
+          docker build --pull \
+            --target client-runtime \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --build-arg VITE_API_BASE_URL=/openBMB/api/v1 \
+            --file infra/production/Dockerfile.web \
+            --tag "openbmb-client-web:$RELEASE_ID" .
+          docker build \
+            --target admin-runtime \
+            --label "org.opencontainers.image.revision=$SOURCE_SHA" \
+            --build-arg VITE_API_BASE=/openBMB/api/v1 \
+            --file infra/production/Dockerfile.web \
+            --tag "openbmb-admin-web:$RELEASE_ID" .
+
+      - name: Pull pinned infrastructure images
+        if: env.ALREADY_STAGED != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull mysql:8.4.8
+          docker pull redis:7.4.10-alpine
+          docker pull minio/minio:RELEASE.2025-04-22T22-12-26Z
+          docker pull minio/mc:RELEASE.2025-04-08T15-39-49Z
+          docker pull livekit/livekit-server:v1.13.4
+
+      - name: Transfer pinned images without Docker Hub access on the host
+        if: env.ALREADY_STAGED != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          images=(
+            "openbmb-api:$RELEASE_ID"
+            "openbmb-migrator:$RELEASE_ID"
+            "openbmb-client-web:$RELEASE_ID"
+            "openbmb-admin-web:$RELEASE_ID"
+            mysql:8.4.8
+            redis:7.4.10-alpine
+            minio/minio:RELEASE.2025-04-22T22-12-26Z
+            minio/mc:RELEASE.2025-04-08T15-39-49Z
+            livekit/livekit-server:v1.13.4
+          )
+          docker save "${images[@]}" | gzip -1 | \
+            ssh tx4h4g-prod \
+              'set -euo pipefail; gzip -dc | docker load'
+
+      - name: Stage exact source release
+        if: env.ALREADY_STAGED != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_name="openbmb-source-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
+          manifest_name="openbmb-images-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          source_archive="$RUNNER_TEMP/$archive_name"
+          image_manifest="$RUNNER_TEMP/$manifest_name"
+          git archive --format=tar.gz --output="$source_archive" "$SOURCE_SHA"
+          images=(
+            "openbmb-api:$RELEASE_ID"
+            "openbmb-migrator:$RELEASE_ID"
+            "openbmb-client-web:$RELEASE_ID"
+            "openbmb-admin-web:$RELEASE_ID"
+            mysql:8.4.8
+            redis:7.4.10-alpine
+            minio/minio:RELEASE.2025-04-22T22-12-26Z
+            minio/mc:RELEASE.2025-04-08T15-39-49Z
+            livekit/livekit-server:v1.13.4
+          )
+          : > "$image_manifest"
+          for image_name in "${images[@]}"; do
+            image_id="$(docker image inspect --format '{{.Id}}' "$image_name")"
+            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+            printf '%s %s\n' "$image_name" "$image_id" >> "$image_manifest"
+          done
+          source_archive_sha256="$(sha256sum "$source_archive" | awk '{ print $1 }')"
+          [[ "$source_archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          transfer_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ssh tx4h4g-prod \
+            "set -eu; install -d -m 0700 \"\$HOME/.openbmb-transfer\" \"\$HOME/.openbmb-transfer/$transfer_id\""
+          scp "$source_archive" "$image_manifest" \
+            "tx4h4g-prod:.openbmb-transfer/$transfer_id/"
+          ssh tx4h4g-prod \
+            "SOURCE_SHA='$SOURCE_SHA' RELEASE_ID='$RELEASE_ID' GITHUB_RUN_ID='$GITHUB_RUN_ID' GITHUB_RUN_ATTEMPT='$GITHUB_RUN_ATTEMPT' TRANSFER_ID='$transfer_id' ARCHIVE_NAME='$archive_name' MANIFEST_NAME='$manifest_name' SOURCE_ARCHIVE_SHA256='$source_archive_sha256' bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_ID" == "git-${SOURCE_SHA:0:12}" ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          [[ "$TRANSFER_ID" == "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]
+          [[ "$ARCHIVE_NAME" == "openbmb-source-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz" ]]
+          [[ "$MANIFEST_NAME" == "openbmb-images-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt" ]]
+          [[ "$SOURCE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          release_root="/opt/openbmb/releases/$RELEASE_ID"
+          transfer_dir="$HOME/.openbmb-transfer/$TRANSFER_ID"
+          source_archive="$transfer_dir/$ARCHIVE_NAME"
+          image_manifest="$transfer_dir/$MANIFEST_NAME"
+          incoming="/opt/openbmb/releases/.incoming-$RELEASE_ID-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          candidate="$incoming/$RELEASE_ID"
+          case "$incoming" in
+            /opt/openbmb/releases/.incoming-git-[0-9a-f]*-[0-9]*-[0-9]*) ;;
+            *) printf 'unsafe incoming release path\n' >&2; exit 1 ;;
+          esac
+          cleanup() {
+            sudo rm -rf -- "$incoming"
+            rm -f -- "$source_archive" "$image_manifest"
+            rmdir -- "$transfer_dir" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          printf '%s  %s\n' "$SOURCE_ARCHIVE_SHA256" "$source_archive" | sha256sum --check --status
+          [[ "$(wc -l < "$image_manifest")" -eq 9 ]]
+          sudo chown root:openbmb /opt/openbmb/releases
+          sudo chmod 0750 /opt/openbmb/releases
+          if [[ -e "$release_root" || -L "$release_root" ]]; then
+            [[ ! -L "$release_root" ]]
+            [[ "$(sudo readlink -f -- "$release_root")" == "$release_root" ]]
+            [[ "$(sudo cat "$release_root/.openbmb-release-sha")" == "$SOURCE_SHA" ]]
+            [[ "$(sudo cat "$release_root/.openbmb-source-sha256")" == "$SOURCE_ARCHIVE_SHA256" ]]
+            [[ "$(sudo stat -c %U "$release_root")" == root ]]
+            ! sudo find "$release_root" -xdev \( ! -user root -o -perm /022 \) -print -quit | grep -q .
+            sudo cmp --silent "$image_manifest" "$release_root/.openbmb-images"
+          else
+            if [[ -e "$incoming" || -L "$incoming" ]]; then
+              sudo rm -rf -- "$incoming"
+            fi
+            [[ ! -e "$incoming" && ! -L "$incoming" ]]
+            sudo install -d -o root -g openbmb -m 0550 "$incoming"
+            sudo install -d -o root -g openbmb -m 0550 "$candidate"
+            sudo tar --no-same-owner --no-same-permissions -xzf "$source_archive" -C "$candidate"
+            printf '%s\n' "$SOURCE_SHA" | sudo tee "$candidate/.openbmb-release-sha" >/dev/null
+            printf '%s\n' "$SOURCE_ARCHIVE_SHA256" | sudo tee "$candidate/.openbmb-source-sha256" >/dev/null
+            sudo install -o root -g openbmb -m 0440 \
+              "$image_manifest" "$candidate/.openbmb-images"
+            sudo chown -R root:openbmb "$incoming"
+            sudo find "$incoming" -xdev -type d -exec chmod 0550 {} +
+            sudo find "$incoming" -xdev -type f -perm /111 -exec chmod 0550 {} +
+            sudo find "$incoming" -xdev -type f ! -perm /111 -exec chmod 0440 {} +
+            sudo chmod 0444 \
+              "$candidate/infra/redis/redis.conf" \
+              "$candidate/infra/production/livekit/livekit.production.yaml"
+            sudo chmod 0555 "$candidate/infra/redis/start-livekit-redis.sh"
+            sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env \
+              OPENBMB_API_ENV_FILE=/etc/openbmb/api.env \
+              bash "$candidate/infra/production/scripts/verify-release-images.sh"
+            sudo mv "$candidate" "$release_root"
+          fi
+          trap - EXIT
+          cleanup
+          REMOTE
+
+      - name: Verify transferred release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh tx4h4g-prod \
+            "set -euo pipefail; test \"\$(sudo cat /opt/openbmb/releases/$RELEASE_ID/.openbmb-release-sha)\" = '$SOURCE_SHA'; sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env OPENBMB_API_ENV_FILE=/etc/openbmb/api.env bash /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/verify-release-images.sh"
+
+      - name: Reject stale automatic activation
+        if: env.ACTIVATE_RELEASE == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          [[ "$current_main_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$current_main_sha" != "$SOURCE_SHA" ]]; then
+            printf 'Refusing stale activation: validated=%s current-main=%s\n' \
+              "$SOURCE_SHA" "$current_main_sha" >&2
+            exit 1
+          fi
+
+      - name: Activate validated release
+        if: env.ACTIVATE_RELEASE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh tx4h4g-prod \
+            "sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env OPENBMB_API_ENV_FILE=/etc/openbmb/api.env OPENBMB_SKIP_IMAGE_BUILD=true /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/deploy-release.sh"
+
+      - name: Verify public health after activation
+        if: env.ACTIVATE_RELEASE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh tx4h4g-prod \
+            "OPENBMB_DOMAIN=sun227454.online /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/health-check.sh --public"
+          curl --fail --silent --show-error \
+            --retry 12 --retry-delay 5 --retry-all-errors \
+            https://sun227454.online/openBMB/api/v1/health/ready \
+            --output /dev/null

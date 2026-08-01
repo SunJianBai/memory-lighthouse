@@ -1,7 +1,7 @@
 # TX4H4G 生产部署方案
 
-此目录是可审阅的部署产物，**当前没有连接、修改或重启 TX4H4G**。目标主机为
-Ubuntu 24.04（SSH 别名 `TX4H4G`，公网 IP `124.220.81.104`），并保证现有
+此目录是 TX4H4G 的可审阅部署产物。目标主机为 Ubuntu 24.04（SSH 别名
+`TX4H4G`，公网 IP `124.220.81.104`），并保证现有
 CampusHub 后端 `127.0.0.1:8080`、数据库 `127.0.0.1:33306` 和数据卷不被复用或
 修改。已确认当前 `campushub_frontend` 独占 `0.0.0.0:80`；主机没有正在运行的
 Caddy/nginx。
@@ -133,6 +133,32 @@ Compose raw 格式读取，SMTP 密码中的 `$` 等字符不会被插值。
 
 ## 3. 发布应用（尚不切换公网）
 
+### 推荐：GitHub Runner 构建并经 SSH 传送
+
+TX4H4G 所在网络不能可靠访问 Docker Hub，因此仓库的
+`.github/workflows/production-delivery.yml` 在已通过 CI 的 GitHub Runner 上构建
+四个应用镜像、拉取本文件锁定的基础设施镜像，再把 `docker save` 数据流经固定
+主机密钥的 SSH 直接送入服务器。服务器不会从第三方公共加速器拉取镜像。
+
+仓库的 `production` Environment 需要两个 Base64 编码的 Actions Secret：
+`TX4H4G_SSH_PRIVATE_KEY_BASE64` 和 `TX4H4G_KNOWN_HOSTS_BASE64`。仓库变量
+`PRODUCTION_DEPLOY_ENABLED` 默认必须保持 `false`。手工运行工作流在任何情况下都
+只会预装并验证精确提交的源码和镜像，不提供生产激活参数。首次部署、
+真实 SMTP 和 Caddy 切流全部验证后，再把该变量改为 `true`，后续 `main` 的 CI
+成功运行才会自动激活。PR、非 `main` 手工运行和被取消/失败的 CI 都不能触发生产
+部署。
+
+工作流使用确定性的 `git-<12位提交哈希>` 发布号，并在发布目录写入完整提交哈希
+、源码归档 SHA-256 和精确镜像 ID 清单。发布树由 `root` 拥有且不可被组或其他用户
+写入；容器必须读取的 Redis/LiveKit 配置只获得只读例外。新发布先传送镜像，再在
+临时目录核对 Compose 实际引用的全部 9 个镜像 ID 和四个应用镜像的 OCI revision，
+通过后才原子落盘。同一提交重跑时会先验证并复用已有不可变发布，防止重建镜像覆盖
+已有 tag。`deploy-release.sh` 只有在显式设置
+`OPENBMB_SKIP_IMAGE_BUILD=true` 且上述完整校验通过时才跳过本机构建；所有生产
+`compose up/run` 都使用 `--pull never`，不会在主机上回退访问 Docker Hub。
+
+### 备用：在主机本地串行构建
+
 把干净源码放到新发布目录，排除 `.git`、`node_modules`、`dist` 和所有 `.env`：
 
 ```bash
@@ -154,6 +180,10 @@ sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env \
 
 所有迁移应保持至少一个发布窗口的向后兼容。脚本失败会尝试恢复上一个应用镜像，
 但不会猜测如何回滚 schema。
+
+部署、备份、应用回滚以及公网切换共用
+`/run/lock/openbmb-operation.lock`。计划备份最多等待 30 分钟，其他互斥操作在锁被
+占用时以退出码 75 快速失败，避免迁移、备份和路由切换相互穿插。
 
 ## 4. 安装 Caddy（先校验，不启动）
 

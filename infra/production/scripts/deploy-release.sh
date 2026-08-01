@@ -2,6 +2,15 @@
 set -Eeuo pipefail
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+case "${OPENBMB_OPERATION_LOCK_HELD:-false}" in
+  false)
+    exec flock --exclusive --wait 0 --conflict-exit-code 75 \
+      /run/lock/openbmb-operation.lock \
+      env OPENBMB_OPERATION_LOCK_HELD=true bash "$script_dir/deploy-release.sh" "$@"
+    ;;
+  true) ;;
+  *) printf 'OPENBMB_OPERATION_LOCK_HELD must be true or false\n' >&2; exit 1 ;;
+esac
 production_dir="$(CDPATH= cd -- "$script_dir/.." && pwd -P)"
 release_root="$(CDPATH= cd -- "$production_dir/../.." && pwd -P)"
 release_id="$(basename -- "$release_root")"
@@ -36,7 +45,7 @@ rollback_on_exit() {
     old_id="$(basename -- "$old_release")"
     OPENBMB_RELEASE="$old_id" \
       bash "$old_release/infra/production/scripts/compose.sh" \
-      up -d --no-build api client-web admin-web || true
+      up -d --pull never --no-build api client-web admin-web || true
   else
     bash "$script_dir/compose.sh" stop api client-web admin-web || true
   fi
@@ -46,13 +55,27 @@ trap rollback_on_exit EXIT
 
 bash "$script_dir/preflight.sh"
 
-printf 'Building immutable release images: %s\n' "$release_id"
-# Keep BuildKit from compiling multiple TypeScript applications concurrently
-# on the 3.6 GiB host. Later targets reuse the cache from earlier ones.
-bash "$script_dir/compose.sh" build api
-bash "$script_dir/compose.sh" --profile tools build migrate
-bash "$script_dir/compose.sh" build client-web
-bash "$script_dir/compose.sh" build admin-web
+skip_image_build="${OPENBMB_SKIP_IMAGE_BUILD:-false}"
+case "$skip_image_build" in
+  true)
+    printf 'Using preloaded immutable release images: %s\n' "$release_id"
+    bash "$script_dir/verify-release-images.sh"
+    ;;
+  false)
+    printf 'Building immutable release images: %s\n' "$release_id"
+    # Keep BuildKit from compiling multiple TypeScript applications
+    # concurrently on the 3.6 GiB host. Later targets reuse the cache from
+    # earlier ones.
+    bash "$script_dir/compose.sh" build api
+    bash "$script_dir/compose.sh" --profile tools build migrate
+    bash "$script_dir/compose.sh" build client-web
+    bash "$script_dir/compose.sh" build admin-web
+    ;;
+  *)
+    printf 'OPENBMB_SKIP_IMAGE_BUILD must be true or false\n' >&2
+    exit 1
+    ;;
+esac
 post_build_disk_kib="$(df -Pk /opt | awk 'NR == 2 { print $4 }')"
 [[ "${post_build_disk_kib:-0}" -ge 3145728 ]] || {
   printf 'less than 3 GiB remains after image build; aborting before data changes\n' >&2
@@ -71,8 +94,9 @@ bash "$script_dir/compose.sh" stop --timeout 30 api || true
 
 printf 'Starting or reconciling data and media services.\n'
 bash "$script_dir/compose.sh" up -d \
+  --pull never \
   mysql redis redis-livekit minio livekit
-bash "$script_dir/compose.sh" up -d --force-recreate minio-init
+bash "$script_dir/compose.sh" up -d --pull never --force-recreate minio-init
 
 for service in mysql redis redis-livekit minio livekit; do
   for _attempt in $(seq 1 30); do
@@ -100,10 +124,10 @@ done
 }
 
 printf 'Applying committed Prisma migrations.\n'
-bash "$script_dir/compose.sh" --profile tools run --rm migrate
+bash "$script_dir/compose.sh" --profile tools run --rm --pull never migrate
 
 printf 'Starting release application containers.\n'
-bash "$script_dir/compose.sh" up -d --no-build api client-web admin-web
+bash "$script_dir/compose.sh" up -d --pull never --no-build api client-web admin-web
 bash "$script_dir/health-check.sh" --local
 
 mkdir -p -- "$(dirname -- "$current_link")"
