@@ -23,7 +23,7 @@ Invoke-RestMethod http://127.0.0.1:18099/v1/models
 
 如果端口不可达，先检查 SSH 隧道和服务器端 `status.sh` / `status_realtime_web.sh`，不要把前端回放当成真模型结果。
 
-## ModelBest 公网
+## ModelBest 公网（本方案主模型）
 
 默认入口：
 
@@ -32,7 +32,15 @@ wss://minicpmo45.modelbest.cn/v1/realtime
 https://minicpmo45.modelbest.cn
 ```
 
-只有 `cloudProcessingApproved=true` 时设置页才允许选择公网 Provider。会话模式根据页面选择 `video` 或 `audio`，先排队，再发送 `session.init`；收到 `session.created` 后才进入 live 状态。
+实现严格对照 [MiniCPM-o 4.5 Realtime API 官方概览](https://minicpmo45.modelbest.cn/docs/zh/realtime-api/overview/)：
+
+1. 根据摄像头授权连接 `?mode=video` 或 `?mode=audio`。
+2. 等待 `session.queue_done` 后发送带 `system_prompt`、`config` 和 `voice` 的 `session.init`。
+3. 收到 `session.created` 后才进入 live；上行是 16 kHz 单声道 float32 PCM，视频模式附带 JPEG `video_frames`。
+4. 分别处理 `response.output.delta` 的 `listen`、`text`、`audio`；24 kHz 音频进入播放队列。
+5. 确定性日程动作另开 `?mode=chat` 轮次，并等待 `response.done` 后才把提醒记为已送达。
+
+只有 `cloudProcessingApproved=true` 时设置页才允许选择公网 Provider。首次加载仍使用回放，避免未授权时自动上传。公网参考音使用官方服务的默认 float32 PCM；浏览器上传的音频资料不隐式发送给公网。
 
 ## 演示回放
 
@@ -58,7 +66,7 @@ https://minicpmo45.modelbest.cn
 - 本地隧道不可用：设置页健康检查失败，不会自动把敏感数据切到公网。
 - 公网未授权：禁止选择 ModelBest。
 - 麦克风未授权：真实模型会话不启动；摄像头未授权时只建立音频会话。
-- 敏感记忆授权撤回：药物和敏感人物记忆不再进入模型 Prompt，后续上传被阻止。
+- 敏感记忆授权撤回：立即结束现有会话以清除旧 Prompt；药物日程、联系人和敏感人物记忆不再进入后续 Prompt 或动作轮次，后续上传被阻止。
 
 ## 当前实测
 
@@ -67,5 +75,6 @@ https://minicpmo45.modelbest.cn
 - ModelBest `/health` 返回 HTTP 200。
 - ModelBest `/api/config/eta` 返回 HTTP 200。
 - 公网 Realtime WebSocket 完成排队/初始化并收到 `session.created`，音频会话进入 live。
+- 按官方 Chat 生命周期触发晨间日程，收到 `response.done` 后真实返回“林阿姨，您的晨间用药确认已到期，请查看标有‘早 · 08:30’的白色药盒。”，随后状态才进入等待本人确认。
 - 无头浏览器没有可用虚拟摄像头，因此公网验证只证明音频 Realtime 会话；真实摄像头的全模态演示应在比赛设备上再跑硬件检查。
 - 本地 `18099` 当时不可达，SSH 主机验证返回公钥拒绝；本地链路代码复用工作区已验收的 vLLM-Omni 运行时，但本次没有伪造在线结论。

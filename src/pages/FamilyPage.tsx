@@ -11,6 +11,7 @@ import {
   UserRoundCheck,
 } from "lucide-react";
 import { navigate } from "../app/navigation";
+import type { CareEvent } from "../domain/types";
 import { useAppState } from "../state/app-state";
 import { formatEventTime } from "../utils/format";
 
@@ -18,6 +19,7 @@ const eventIcon = {
   routine_due: Clock3,
   reminder_spoken: BellDot,
   user_confirmed: CheckCircle2,
+  family_acknowledged: UserRoundCheck,
   needs_confirmation: Eye,
   family_contacted: HeartHandshake,
   memory_used: MessageSquareText,
@@ -25,23 +27,53 @@ const eventIcon = {
   session_ended: ShieldCheck,
 };
 
+const sourceLabels: Record<CareEvent["source"], string> = {
+  agent: "助手规则 / 模型",
+  user: "长者",
+  caregiver: "家属",
+  demo: "演示回放",
+};
+
 export const FamilyPage = () => {
   const { state, updateState } = useAppState();
   const pending = state.events.filter((event) => event.status === "open");
   const resolved = state.events.filter(
-    (event) => event.type === "user_confirmed" && event.status === "resolved",
+    (event) =>
+      ["user_confirmed", "family_acknowledged"].includes(event.type) &&
+      event.status === "resolved",
   ).length;
   const firstContact = state.trustedPeople[0];
 
-  const acknowledge = (eventId: string) => {
-    updateState((current) => ({
-      ...current,
-      events: current.events.map((event) =>
-        event.id === eventId
-          ? { ...event, status: "acknowledged" as const }
-          : event,
-      ),
-    }));
+  const confirmAndClose = (eventId: string) => {
+    updateState((current) => {
+      const original = current.events.find(
+        (event) => event.id === eventId && event.status === "open",
+      );
+      if (!original) return current;
+      const closedAt = new Date().toISOString();
+      const closure: CareEvent = {
+        id: crypto.randomUUID(),
+        type: "family_acknowledged",
+        severity: "info",
+        status: "resolved",
+        title: `${original.title}已由家属确认`,
+        summary: "家属在事件面板中完成人工复核并关闭待办。",
+        occurredAt: closedAt,
+        routineId: original.routineId,
+        source: "caregiver",
+      };
+      return {
+        ...current,
+        events: [
+          closure,
+          ...current.events.map((event) =>
+            event.id === eventId
+              ? { ...event, status: "resolved" as const }
+              : event,
+          ),
+        ].slice(0, 200),
+      };
+    });
   };
 
   return (
@@ -163,21 +195,26 @@ export const FamilyPage = () => {
                       </time>
                     </div>
                     <p>{event.summary}</p>
-                    <span className={`event-status status-${event.status}`}>
-                      {event.status === "open"
-                        ? "待查看"
-                        : event.status === "acknowledged"
-                          ? "已查看"
-                          : "已完成"}
-                    </span>
+                    <div className="event-meta-row">
+                      <span className={`event-status status-${event.status}`}>
+                        {event.status === "open"
+                          ? "待查看"
+                          : event.status === "acknowledged"
+                            ? "已查看"
+                            : "已完成"}
+                      </span>
+                      <span className="event-source">
+                        来源：{sourceLabels[event.source]}
+                      </span>
+                    </div>
                   </div>
                   {event.status === "open" && (
                     <button
                       className="compact-button"
                       type="button"
-                      onClick={() => acknowledge(event.id)}
+                      onClick={() => confirmAndClose(event.id)}
                     >
-                      标记已查看
+                      家属确认并关闭
                     </button>
                   )}
                 </article>

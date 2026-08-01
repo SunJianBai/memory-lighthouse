@@ -18,4 +18,20 @@ describe("isAppState", () => {
       }),
     ).toBe(false);
   });
+
+  it("rejects malformed array elements instead of trusting the container", () => {
+    const state = createDemoState();
+    expect(
+      isAppState({
+        ...state,
+        routines: [{ id: "broken" }],
+      }),
+    ).toBe(false);
+    expect(
+      isAppState({
+        ...state,
+        events: [null],
+      }),
+    ).toBe(false);
+  });
 });

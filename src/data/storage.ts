@@ -10,6 +10,128 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const hasString = (value: Record<string, unknown>, key: string) =>
   typeof value[key] === "string";
 
+const hasBoolean = (value: Record<string, unknown>, key: string) =>
+  typeof value[key] === "boolean";
+
+const hasFiniteNumber = (value: Record<string, unknown>, key: string) =>
+  typeof value[key] === "number" && Number.isFinite(value[key]);
+
+const hasOptionalString = (value: Record<string, unknown>, key: string) =>
+  value[key] === undefined || typeof value[key] === "string";
+
+const isOneOf = <T extends string>(
+  value: unknown,
+  choices: readonly T[],
+): value is T => typeof value === "string" && choices.includes(value as T);
+
+const isStringArray = (value: unknown) =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+const isFiniteNumberArray = (value: unknown) =>
+  Array.isArray(value) &&
+  value.every((item) => typeof item === "number" && Number.isFinite(item));
+
+const isArrayOf = (
+  value: unknown,
+  validator: (item: unknown) => boolean,
+) => Array.isArray(value) && value.every(validator);
+
+const isRecipient = (value: unknown) =>
+  isRecord(value) &&
+  [
+    "id",
+    "name",
+    "preferredName",
+    "birthday",
+    "homeLabel",
+    "communicationNotes",
+  ].every((key) => hasString(value, key)) &&
+  hasOptionalString(value, "avatarAssetId");
+
+const isTrustedPerson = (value: unknown) =>
+  isRecord(value) &&
+  ["id", "name", "relationship", "phone"].every((key) =>
+    hasString(value, key),
+  ) &&
+  hasFiniteNumber(value, "priority") &&
+  hasBoolean(value, "canViewEvidence") &&
+  hasOptionalString(value, "faceAssetId");
+
+const isMedication = (value: unknown) =>
+  isRecord(value) &&
+  [
+    "id",
+    "name",
+    "alias",
+    "purpose",
+    "requirements",
+    "containerLabel",
+    "containerLocation",
+    "notes",
+  ].every((key) => hasString(value, key)) &&
+  isStringArray(value.scheduledTimes) &&
+  hasBoolean(value, "active") &&
+  hasOptionalString(value, "imageAssetId");
+
+const isRoutine = (value: unknown) =>
+  isRecord(value) &&
+  ["id", "title", "scheduledTime", "instructions", "confirmationQuestion"].every(
+    (key) => hasString(value, key),
+  ) &&
+  isOneOf(value.category, ["medication", "hydration", "departure", "daily"]) &&
+  isFiniteNumberArray(value.weekdays) &&
+  hasFiniteNumber(value, "graceMinutes") &&
+  hasFiniteNumber(value, "familyNoticeMinutes") &&
+  hasBoolean(value, "enabled") &&
+  hasOptionalString(value, "linkedMedicationId");
+
+const isMemory = (value: unknown) =>
+  isRecord(value) &&
+  ["id", "title", "content", "createdAt", "updatedAt"].every((key) =>
+    hasString(value, key),
+  ) &&
+  isOneOf(value.kind, [
+    "person",
+    "medication",
+    "routine",
+    "preference",
+    "place",
+    "story",
+  ]) &&
+  isOneOf(value.sensitivity, ["normal", "sensitive"]) &&
+  isStringArray(value.tags) &&
+  hasOptionalString(value, "assetId");
+
+const isAsset = (value: unknown) =>
+  isRecord(value) &&
+  ["id", "name", "mimeType", "dataUrl", "createdAt"].every((key) =>
+    hasString(value, key),
+  ) &&
+  isOneOf(value.kind, ["face", "medicine", "place", "document", "voice"]);
+
+const isCareEvent = (value: unknown) =>
+  isRecord(value) &&
+  ["id", "title", "summary", "occurredAt"].every((key) =>
+    hasString(value, key),
+  ) &&
+  isOneOf(value.type, [
+    "routine_due",
+    "reminder_spoken",
+    "user_confirmed",
+    "family_acknowledged",
+    "needs_confirmation",
+    "family_contacted",
+    "memory_used",
+    "session_started",
+    "session_ended",
+  ]) &&
+  isOneOf(value.severity, ["info", "attention", "important"]) &&
+  isOneOf(value.status, ["open", "acknowledged", "resolved"]) &&
+  isOneOf(value.source, ["agent", "user", "caregiver", "demo"]) &&
+  ["routineId", "evidenceAssetId", "transcript"].every((key) =>
+    hasOptionalString(value, key),
+  );
+
 export const isAppState = (value: unknown): value is AppState => {
   if (!isRecord(value)) return false;
   const candidate = value as Partial<AppState> & Record<string, unknown>;
@@ -19,17 +141,13 @@ export const isAppState = (value: unknown): value is AppState => {
   return (
     candidate.schemaVersion === 1 &&
     typeof candidate.initialized === "boolean" &&
-    isRecord(recipient) &&
-    hasString(recipient, "id") &&
-    hasString(recipient, "name") &&
-    hasString(recipient, "preferredName") &&
-    hasString(recipient, "communicationNotes") &&
-    Array.isArray(candidate.trustedPeople) &&
-    Array.isArray(candidate.medications) &&
-    Array.isArray(candidate.routines) &&
-    Array.isArray(candidate.memories) &&
-    Array.isArray(candidate.assets) &&
-    Array.isArray(candidate.events) &&
+    isRecipient(recipient) &&
+    isArrayOf(candidate.trustedPeople, isTrustedPerson) &&
+    isArrayOf(candidate.medications, isMedication) &&
+    isArrayOf(candidate.routines, isRoutine) &&
+    isArrayOf(candidate.memories, isMemory) &&
+    isArrayOf(candidate.assets, isAsset) &&
+    isArrayOf(candidate.events, isCareEvent) &&
     isRecord(consent) &&
     [
       "localStorageApproved",
@@ -38,10 +156,9 @@ export const isAppState = (value: unknown): value is AppState => {
       "sensitiveMemoryApproved",
       "cloudProcessingApproved",
     ].every(
-      (key) =>
-        typeof (consent as unknown as Record<string, unknown>)[key] ===
-        "boolean",
+      (key) => hasBoolean(consent, key),
     ) &&
+    hasOptionalString(consent, "acceptedAt") &&
     isRecord(provider) &&
     ["local", "cloud", "replay"].includes(String(provider.provider)) &&
     [
@@ -50,15 +167,16 @@ export const isAppState = (value: unknown): value is AppState => {
       "cloudRealtimeWs",
       "cloudBaseUrl",
       "model",
-    ].every((key) => hasString(provider, key))
+    ].every((key) => hasString(provider, key)) &&
+    hasOptionalString(provider, "referenceAudio")
   );
 };
 
 export const loadAppState = (): AppState => {
   if (typeof window === "undefined") return createDemoState();
-  const raw = window.localStorage.getItem(STORAGE_KEY);
-  if (!raw) return createDemoState();
   try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return createDemoState();
     const parsed: unknown = JSON.parse(raw);
     return isAppState(parsed) ? parsed : createDemoState();
   } catch {
@@ -66,13 +184,30 @@ export const loadAppState = (): AppState => {
   }
 };
 
-export const saveAppState = (state: AppState) => {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+export type SaveAppStateResult =
+  | { ok: true }
+  | { ok: false; message: string };
+
+export const saveAppState = (state: AppState): SaveAppStateResult => {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    return {
+      ok: false,
+      message:
+        "浏览器本地存储空间不足或不可用，数据没有保存。请删除不需要的图片后重试。",
+    };
+  }
   window.dispatchEvent(new CustomEvent("memory-lighthouse:state"));
+  return { ok: true };
 };
 
 export const clearSavedAppState = () => {
-  window.localStorage.removeItem(STORAGE_KEY);
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable in hardened/private browser contexts.
+  }
 };
 
 export const resetAppState = () => {

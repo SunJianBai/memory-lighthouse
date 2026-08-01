@@ -28,6 +28,7 @@ export type CareEventType =
   | "routine_due"
   | "reminder_spoken"
   | "user_confirmed"
+  | "family_acknowledged"
   | "needs_confirmation"
   | "family_contacted"
   | "memory_used"

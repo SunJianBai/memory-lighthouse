@@ -90,7 +90,6 @@ export class SessionRuntime {
   private outputChunks = 0;
   private videoFramesSent = 0;
   private textBuffer = "";
-  private initFallback: number | null = null;
   private activeTurnSocket: WebSocket | null = null;
   private activeTurnAbort: AbortController | null = null;
   private playbackByResponse = new Map<
@@ -247,6 +246,32 @@ export class SessionRuntime {
     let inputSent = false;
     let closeSent = false;
     let turnErrored = false;
+    let settled = false;
+    let resolveTurn!: () => void;
+    let rejectTurn!: (error: Error) => void;
+    const completion = new Promise<void>((resolve, reject) => {
+      resolveTurn = resolve;
+      rejectTurn = reject;
+    });
+    const completionTimer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      turnErrored = true;
+      rejectTurn(new Error("ModelBest 动作请求等待响应超时"));
+      sendClose("timeout");
+    }, 90_000);
+    const settleSuccess = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(completionTimer);
+      resolveTurn();
+    };
+    const settleFailure = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(completionTimer);
+      rejectTurn(error);
+    };
 
     const sendInit = () => {
       if (initSent || socket.readyState !== WebSocket.OPEN) return;
@@ -418,6 +443,7 @@ export class SessionRuntime {
             "in",
             "green",
           );
+          settleSuccess();
           sendClose();
           break;
         }
@@ -429,8 +455,14 @@ export class SessionRuntime {
             (reason && !["turn_done", "client_closed"].includes(reason))
           ) {
             turnErrored = true;
-            this.callbacks.onError(
-              diagnostic !== "模型端返回未知错误" ? diagnostic : reason,
+            const errorMessage =
+              diagnostic !== "模型端返回未知错误" ? diagnostic : reason;
+            this.callbacks.onError(errorMessage);
+            settleFailure(new Error(errorMessage));
+          }
+          if (!turnErrored && !settled) {
+            settleFailure(
+              new Error("ModelBest 动作请求在完成响应前关闭"),
             );
           }
           if (!turnErrored) this.callbacks.onStatus("live");
@@ -440,7 +472,11 @@ export class SessionRuntime {
         }
         case "error":
           turnErrored = true;
-          this.fail(getErrorMessage(message), false);
+          {
+            const errorMessage = getErrorMessage(message);
+            this.fail(errorMessage, false);
+            settleFailure(new Error(errorMessage));
+          }
           sendClose("error");
           break;
       }
@@ -450,6 +486,7 @@ export class SessionRuntime {
       if (!this.stopped && this.activeTurnSocket === socket) {
         turnErrored = true;
         this.fail("ModelBest Chat WebSocket 连接异常", false);
+        settleFailure(new Error("ModelBest Chat WebSocket 连接异常"));
       }
     };
     socket.onclose = () => {
@@ -457,7 +494,11 @@ export class SessionRuntime {
         this.activeTurnSocket = null;
         if (!turnErrored) this.callbacks.onStatus("live");
       }
+      if (!settled) {
+        settleFailure(new Error("ModelBest 动作请求连接提前关闭"));
+      }
     };
+    await completion;
   }
 
   isPreviewOnly() {
@@ -770,7 +811,6 @@ export class SessionRuntime {
     if (this.stopped) return;
     this.stopped = true;
     this.callbacks.onStatus("closing");
-    if (this.initFallback !== null) window.clearTimeout(this.initFallback);
     this.activeTurnAbort?.abort();
     this.activeTurnAbort = null;
     this.closeTurnSocket(reason);
@@ -940,12 +980,12 @@ export class SessionRuntime {
         payload: {
           system_prompt: options.prompt,
           config: { length_penalty: 1 },
-          max_slice_nums: 1,
-          use_tts: true,
           ...(referenceAudio
             ? {
-                ref_audio_base64: referenceAudio,
-                tts_ref_audio_base64: referenceAudio,
+                voice: {
+                  ref_audio_base64: referenceAudio,
+                  tts_ref_audio_base64: referenceAudio,
+                },
               }
             : {}),
         },
@@ -972,7 +1012,6 @@ export class SessionRuntime {
         "in",
         "green",
       );
-      this.initFallback = window.setTimeout(() => void sendInit(), 500);
     };
 
     socket.onmessage = (event) => {
@@ -1308,7 +1347,11 @@ export class SessionRuntime {
     const frame = withVideo ? this.camera.takeLatestFrame() : null;
     const message: JsonMessage = {
       type: "input.append",
-      input: { audio: float32ToBase64(chunk) },
+      input: {
+        audio: float32ToBase64(chunk),
+        force_listen: false,
+        ...(withVideo ? { max_slice_nums: 1 } : {}),
+      },
     };
     if (frame) message.input.video_frames = [frame];
     this.socket.send(JSON.stringify(message));

@@ -39,7 +39,8 @@ export const AppStateProvider = ({ children }: PropsWithChildren) => {
 
   useEffect(() => {
     if (state.consent.localStorageApproved) {
-      saveAppState(state);
+      const result = saveAppState(state);
+      if (!result.ok) console.warn(result.message);
     } else {
       clearSavedAppState();
     }
@@ -68,12 +69,23 @@ export const AppStateProvider = ({ children }: PropsWithChildren) => {
     [],
   );
 
-  const addAsset = useCallback((asset: StoredAsset) => {
-    setState((current) => ({
-      ...current,
-      assets: [asset, ...current.assets.filter((item) => item.id !== asset.id)],
-    }));
-  }, []);
+  const addAsset = useCallback(
+    (asset: StoredAsset) => {
+      const next: AppState = {
+        ...state,
+        assets: [
+          asset,
+          ...state.assets.filter((item) => item.id !== asset.id),
+        ],
+      };
+      if (state.consent.localStorageApproved) {
+        const result = saveAppState(next);
+        if (!result.ok) throw new Error(result.message);
+      }
+      setState(next);
+    },
+    [state],
+  );
 
   const deleteAsset = useCallback((assetId: string) => {
     setState((current) => ({

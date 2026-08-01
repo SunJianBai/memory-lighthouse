@@ -4,6 +4,7 @@ import {
   findDueRoutine,
   findNextRoutine,
   routineOccurrenceKey,
+  shouldNotifyFamily,
 } from "./routine-scheduler";
 
 const morning: Routine = {
@@ -50,5 +51,37 @@ describe("routine scheduler", () => {
     expect(routineOccurrenceKey(morning, new Date("2026-08-01T08:31:00"))).toBe(
       "morning:2026-8-1",
     );
+  });
+
+  it("notifies family only after the active routine timeout", () => {
+    const agent = {
+      phase: "awaiting_confirmation" as const,
+      activeRoutineId: morning.id,
+      reminderCount: 1,
+      lastTransitionAt: "2026-08-01T08:30:00.000Z",
+      message: "等待确认",
+    };
+
+    expect(
+      shouldNotifyFamily(
+        agent,
+        [morning],
+        new Date("2026-08-01T08:49:59.000Z"),
+      ),
+    ).toBe(false);
+    expect(
+      shouldNotifyFamily(
+        agent,
+        [morning],
+        new Date("2026-08-01T08:50:00.000Z"),
+      ),
+    ).toBe(true);
+    expect(
+      shouldNotifyFamily(
+        { ...agent, phase: "completed" },
+        [morning],
+        new Date("2026-08-01T09:00:00.000Z"),
+      ),
+    ).toBe(false);
   });
 });

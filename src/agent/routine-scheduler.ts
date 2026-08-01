@@ -1,4 +1,4 @@
-import type { Routine } from "../domain/types";
+import type { AgentState, Routine } from "../domain/types";
 
 const minutesSinceMidnight = (date: Date) =>
   date.getHours() * 60 + date.getMinutes();
@@ -52,3 +52,24 @@ export const findNextRoutine = (
 
 export const routineOccurrenceKey = (routine: Routine, date: Date) =>
   `${routine.id}:${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+
+export const shouldNotifyFamily = (
+  agent: AgentState,
+  routines: Routine[],
+  now: Date,
+) => {
+  if (agent.phase !== "awaiting_confirmation" || !agent.activeRoutineId) {
+    return false;
+  }
+  const routine = routines.find(
+    (candidate) =>
+      candidate.id === agent.activeRoutineId && candidate.enabled,
+  );
+  if (!routine) return false;
+  const transitionedAt = new Date(agent.lastTransitionAt).getTime();
+  if (!Number.isFinite(transitionedAt)) return false;
+  return (
+    now.getTime() - transitionedAt >=
+    Math.max(1, routine.familyNoticeMinutes) * 60_000
+  );
+};

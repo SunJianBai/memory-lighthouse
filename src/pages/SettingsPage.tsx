@@ -105,7 +105,7 @@ export const SettingsPage = () => {
             </span>
             <strong>本地 Ascend</strong>
             <p>通过 SSH 隧道连接 vLLM-Omni，全双工音视频不发送到公网。</p>
-            <span className="provider-tag recommended">比赛推荐</span>
+            <span className="provider-tag">可选本地部署</span>
           </button>
           <button
             className={state.provider.provider === "cloud" ? "is-active" : ""}
@@ -116,8 +116,8 @@ export const SettingsPage = () => {
               <Cloud aria-hidden="true" size={25} />
             </span>
             <strong>ModelBest 公网</strong>
-            <p>用于官方服务对照，必须先取得敏感音视频公网处理授权。</p>
-            <span className="provider-tag">需联网</span>
+            <p>按官方 Realtime API 接入全双工音频 / 视频和 Chat 动作轮次。</p>
+            <span className="provider-tag recommended">本方案主模型</span>
           </button>
           <button
             className={state.provider.provider === "replay" ? "is-active" : ""}
@@ -227,7 +227,32 @@ export const SettingsPage = () => {
               }
             />
           </label>
+          <label className="full-span">
+            ModelBest Realtime WebSocket
+            <input
+              value={state.provider.cloudRealtimeWs}
+              onChange={(event) =>
+                updateState((current) => ({
+                  ...current,
+                  provider: {
+                    ...current.provider,
+                    cloudRealtimeWs: event.target.value,
+                  },
+                }))
+              }
+            />
+          </label>
         </div>
+        <p className="panel-intro">
+          官方协议入口：
+          <a
+            href="https://minicpmo45.modelbest.cn/docs/zh/realtime-api/overview/"
+            target="_blank"
+            rel="noreferrer"
+          >
+            MiniCPM-o 4.5 Realtime API 概览
+          </a>
+        </p>
       </section>
 
       <section className="panel-card data-section">

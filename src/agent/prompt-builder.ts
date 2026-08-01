@@ -1,4 +1,9 @@
 import type { AppState, Routine } from "../domain/types";
+import {
+  isRoutinePermitted,
+  permittedMemories,
+  permittedRoutines,
+} from "./privacy-policy";
 
 const compact = (value: string) => value.replace(/\s+/g, " ").trim();
 
@@ -7,7 +12,9 @@ export const buildAgentPrompt = (
   activeRoutine?: Routine,
 ) => {
   const recipient = state.recipient;
-  const trustedPeople = state.trustedPeople
+  const trustedPeople = (state.consent.sensitiveMemoryApproved
+    ? state.trustedPeople
+    : [])
     .map((person) => `${person.name}（${person.relationship}）`)
     .join("、");
   const medications = state.medications
@@ -19,23 +26,26 @@ export const buildAgentPrompt = (
         `${item.alias}：${item.scheduledTimes.join("/")}；标签“${item.containerLabel}”；位置：${item.containerLocation}；要求：${item.requirements}`,
     )
     .join("\n");
-  const memories = state.memories
-    .filter(
-      (item) =>
-        item.sensitivity === "normal" ||
-        state.consent.sensitiveMemoryApproved,
-    )
+  const memories = permittedMemories(state)
     .slice(0, 12)
     .map((item) => `- ${item.title}：${item.content}`)
     .join("\n");
   const permittedRoutine =
-    activeRoutine?.category === "medication" &&
-    !state.consent.sensitiveMemoryApproved
-      ? undefined
-      : activeRoutine;
+    activeRoutine && isRoutinePermitted(state, activeRoutine)
+      ? activeRoutine
+      : undefined;
+  const routineList = permittedRoutines(state)
+    .map(
+      (routine) =>
+        `- ${routine.scheduledTime} ${routine.title}：${routine.instructions}`,
+    )
+    .join("\n");
+  const modalityStatement = state.consent.cameraApproved
+    ? "当前会话已获准申请摄像头和麦克风；只有实际收到画面或声音时，才可以说“我看到”或“我听到”。设备不可用时必须明确说明。"
+    : "当前未获摄像头授权，只能使用麦克风输入；不得声称看到任何画面、人物或物品。";
 
   return compact(`
-    你是“守忆灯塔”，是${recipient.preferredName}的日常任务陪伴助手。你正在通过摄像头和麦克风持续观察与倾听。
+    你是“守忆灯塔”，是${recipient.preferredName}的日常任务陪伴助手。${modalityStatement}
 
     交互原则：
     1. 使用自然、温和、尊重的简体中文，每次最多两句，一次只给一个步骤。
@@ -52,6 +62,9 @@ export const buildAgentPrompt = (
 
     已录入任务资料：
     ${medications || "暂无药物类日程"}
+
+    已授权日程清单：
+    ${routineList || "暂无"}
 
     相关记忆：
     ${memories || "暂无"}

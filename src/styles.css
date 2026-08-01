@@ -1407,7 +1407,7 @@ input[type="file"] {
 
 .scenario-list button small {
   color: #9eb6c7;
-  font-size: 0.76rem;
+  font-size: 1rem;
 }
 
 .runtime-metrics {
@@ -1431,7 +1431,7 @@ input[type="file"] {
 
 .runtime-metrics small {
   color: #9eb6c7;
-  font-size: 0.72rem;
+  font-size: 1rem;
 }
 
 .runtime-metrics strong {
@@ -1666,6 +1666,19 @@ input[type="file"] {
   font-weight: 700;
 }
 
+.event-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.event-source {
+  color: var(--color-muted-foreground);
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
 .status-open {
   color: var(--color-warm);
   background: var(--color-warm-soft);
@@ -1861,7 +1874,7 @@ input[type="file"] {
   position: absolute;
   right: 9px;
   bottom: 9px;
-  min-height: 42px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -1869,7 +1882,7 @@ input[type="file"] {
   color: #fff;
   background: rgba(9, 35, 63, 0.88);
   border-radius: 10px;
-  font-size: 0.82rem;
+  font-size: 1rem;
   font-weight: 700;
 }
 
@@ -1932,7 +1945,7 @@ input[type="file"] {
 }
 
 .compact-upload {
-  min-height: 42px;
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1942,7 +1955,7 @@ input[type="file"] {
   background: #fff;
   border: 1px solid var(--color-border-strong);
   border-radius: 10px;
-  font-size: 0.82rem;
+  font-size: 1rem;
   font-weight: 700;
 }
 
@@ -2872,6 +2885,7 @@ body small,
 .event-copy time,
 .event-copy p,
 .event-status,
+.event-source,
 .routine-list p,
 .memory-card p,
 .provider-grid p,
@@ -2882,6 +2896,26 @@ body small,
 .bottom-nav button,
 .agent-status {
   font-size: 1rem;
+}
+
+/* Project accessibility contract: no informational label below 16px. */
+.brand-copy small,
+.live-chip,
+.scenario-list button > span,
+.safety-badge,
+.person-card > div:nth-child(2) > span,
+.local-only-chip,
+.provider-current,
+.hero-kicker,
+.trust-row span,
+.beacon-card > span {
+  font-size: 1rem;
+}
+
+.endpoint-section .panel-intro a {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
 }
 
 @media (prefers-reduced-motion: reduce) {

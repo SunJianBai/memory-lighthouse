@@ -1,22 +1,21 @@
-import {
-  BookHeart,
-  Camera,
-  Check,
-  CircleUserRound,
-  Clock3,
-  FileImage,
-  MapPin,
-  Pill,
-  Plus,
-  ShieldCheck,
-  Trash2,
-  Upload,
-  UsersRound,
-} from "lucide-react";
+import { BookHeart, Check, Pill, ShieldCheck, UsersRound } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { prepareAsset } from "../data/storage";
 import type { AssetKind, ConsentState, MemoryKind } from "../domain/types";
 import { useAppState } from "../state/app-state";
+import {
+  DailyMemoryTab,
+  type MemoryForm,
+} from "./memories/DailyMemoryTab";
+import {
+  MedicationMemoryTab,
+  type MedicationForm,
+} from "./memories/MedicationMemoryTab";
+import {
+  PeopleMemoryTab,
+  type PersonForm,
+} from "./memories/PeopleMemoryTab";
+import { PrivacyMemoryTab } from "./memories/PrivacyMemoryTab";
 
 type TabId = "people" | "medications" | "daily" | "privacy";
 
@@ -28,23 +27,18 @@ const tabs = [
 ];
 
 export const MemoriesPage = () => {
-  const {
-    state,
-    updateState,
-    addAsset,
-    deleteAsset,
-  } = useAppState();
+  const { state, updateState, addAsset, deleteAsset } = useAppState();
   const [tab, setTab] = useState<TabId>("people");
   const [feedback, setFeedback] = useState("");
   const [feedbackTone, setFeedbackTone] = useState<"success" | "danger">(
     "success",
   );
-  const [personForm, setPersonForm] = useState({
+  const [personForm, setPersonForm] = useState<PersonForm>({
     name: "",
     relationship: "",
     phone: "",
   });
-  const [medicationForm, setMedicationForm] = useState({
+  const [medicationForm, setMedicationForm] = useState<MedicationForm>({
     name: "",
     alias: "",
     time: "08:30",
@@ -52,7 +46,7 @@ export const MemoriesPage = () => {
     containerLabel: "",
     containerLocation: "",
   });
-  const [memoryForm, setMemoryForm] = useState({
+  const [memoryForm, setMemoryForm] = useState<MemoryForm>({
     kind: "preference" as MemoryKind,
     title: "",
     content: "",
@@ -165,6 +159,14 @@ export const MemoriesPage = () => {
 
   const addMemory = (event: FormEvent) => {
     event.preventDefault();
+    if (
+      memoryForm.kind === "person" &&
+      !state.consent.sensitiveMemoryApproved
+    ) {
+      setFeedbackTone("danger");
+      setFeedback("人物关系属于敏感记忆，请先在“授权与数据”中允许保存。");
+      return;
+    }
     if (!memoryForm.title.trim() || !memoryForm.content.trim()) return;
     const timestamp = new Date().toISOString();
     updateState((current) => ({
@@ -179,8 +181,7 @@ export const MemoriesPage = () => {
             .split(/[，,]/)
             .map((tag) => tag.trim())
             .filter(Boolean),
-          sensitivity:
-            memoryForm.kind === "person" ? "sensitive" : "normal",
+          sensitivity: memoryForm.kind === "person" ? "sensitive" : "normal",
           createdAt: timestamp,
           updatedAt: timestamp,
         },
@@ -238,7 +239,10 @@ export const MemoriesPage = () => {
       </div>
 
       {feedback && (
-        <div className={`inline-alert ${feedbackTone}`} role={feedbackTone === "danger" ? "alert" : "status"}>
+        <div
+          className={`inline-alert ${feedbackTone}`}
+          role={feedbackTone === "danger" ? "alert" : "status"}
+        >
           <Check aria-hidden="true" size={19} />
           <span>{feedback}</span>
           <button type="button" onClick={() => setFeedback("")}>
@@ -248,586 +252,42 @@ export const MemoriesPage = () => {
       )}
 
       {tab === "people" && (
-        <div className="memory-content-grid" role="tabpanel">
-          <section className="panel-card">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">陪伴对象</p>
-                <h2>长者资料</h2>
-              </div>
-              <span className="local-only-chip">本地保存</span>
-            </div>
-            <div className="profile-editor">
-              <div className="profile-photo large-photo">
-                {assetById(state.recipient.avatarAssetId) ? (
-                  <img
-                    src={assetById(state.recipient.avatarAssetId)?.dataUrl}
-                    alt={`${state.recipient.name}的资料照片`}
-                  />
-                ) : (
-                  <CircleUserRound aria-hidden="true" size={46} />
-                )}
-                <label className="photo-upload-button">
-                  <Camera aria-hidden="true" size={17} />
-                  上传照片
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(event) =>
-                      void uploadAndAttach(
-                        event.target.files?.[0],
-                        "face",
-                        (assetId) =>
-                          updateState((current) => ({
-                            ...current,
-                            recipient: {
-                              ...current.recipient,
-                              avatarAssetId: assetId,
-                            },
-                          })),
-                      )
-                    }
-                  />
-                </label>
-              </div>
-              <div className="form-grid two-columns">
-                <label>
-                  姓名
-                  <input
-                    value={state.recipient.name}
-                    onChange={(event) =>
-                      updateState((current) => ({
-                        ...current,
-                        recipient: {
-                          ...current.recipient,
-                          name: event.target.value,
-                        },
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  希望被称呼为
-                  <input
-                    value={state.recipient.preferredName}
-                    onChange={(event) =>
-                      updateState((current) => ({
-                        ...current,
-                        recipient: {
-                          ...current.recipient,
-                          preferredName: event.target.value,
-                        },
-                      }))
-                    }
-                  />
-                </label>
-                <label className="full-span">
-                  沟通偏好
-                  <textarea
-                    rows={3}
-                    value={state.recipient.communicationNotes}
-                    onChange={(event) =>
-                      updateState((current) => ({
-                        ...current,
-                        recipient: {
-                          ...current.recipient,
-                          communicationNotes: event.target.value,
-                        },
-                      }))
-                    }
-                  />
-                  <small>例如语速、称呼、一次说几个步骤，以及不希望使用的表达。</small>
-                </label>
-              </div>
-            </div>
-          </section>
-
-          <section className="panel-card">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">授权人物</p>
-                <h2>家属与照护联系人</h2>
-              </div>
-            </div>
-            <div className="person-list">
-              {state.trustedPeople.map((person) => {
-                const photo = assetById(person.faceAssetId);
-                return (
-                  <article key={person.id} className="person-card">
-                    <div className="person-photo">
-                      {photo ? (
-                        <img src={photo.dataUrl} alt={`${person.name}的资料照片`} />
-                      ) : (
-                        <span>{person.name.slice(-1)}</span>
-                      )}
-                    </div>
-                    <div>
-                      <strong>{person.name}</strong>
-                      <p>{person.relationship} · {person.phone || "未填写电话"}</p>
-                      <span>
-                        {person.canViewEvidence ? "可查看事件摘要" : "尚未授权查看摘要"}
-                      </span>
-                    </div>
-                    <label className="compact-upload">
-                      <FileImage aria-hidden="true" size={17} />
-                      上传人脸资料
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={(event) =>
-                          void uploadAndAttach(
-                            event.target.files?.[0],
-                            "face",
-                            (assetId) =>
-                              updateState((current) => ({
-                                ...current,
-                                trustedPeople: current.trustedPeople.map((item) =>
-                                  item.id === person.id
-                                    ? { ...item, faceAssetId: assetId }
-                                    : item,
-                                ),
-                              })),
-                          )
-                        }
-                      />
-                    </label>
-                  </article>
-                );
-              })}
-            </div>
-            <form className="inline-form" onSubmit={addPerson}>
-              <h3>添加联系人</h3>
-              <div className="form-grid three-columns">
-                <label>
-                  姓名 <span aria-hidden="true">*</span>
-                  <input
-                    required
-                    value={personForm.name}
-                    onChange={(event) =>
-                      setPersonForm((current) => ({
-                        ...current,
-                        name: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  与长者关系 <span aria-hidden="true">*</span>
-                  <input
-                    required
-                    value={personForm.relationship}
-                    onChange={(event) =>
-                      setPersonForm((current) => ({
-                        ...current,
-                        relationship: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  联系电话
-                  <input
-                    type="tel"
-                    value={personForm.phone}
-                    onChange={(event) =>
-                      setPersonForm((current) => ({
-                        ...current,
-                        phone: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-              </div>
-              <button className="secondary-button" type="submit">
-                <Plus aria-hidden="true" size={18} /> 添加联系人
-              </button>
-            </form>
-          </section>
-        </div>
+        <PeopleMemoryTab
+          state={state}
+          updateState={updateState}
+          assetById={assetById}
+          uploadAndAttach={uploadAndAttach}
+          personForm={personForm}
+          setPersonForm={setPersonForm}
+          addPerson={addPerson}
+        />
       )}
-
       {tab === "medications" && (
-        <div className="memory-content-grid" role="tabpanel">
-          <div className="inline-alert warning">
-            <ShieldCheck aria-hidden="true" size={20} />
-            <div>
-              <strong>仅记录既定安排</strong>
-              <span>守忆灯塔不会识别药片、判断剂量或给出用药建议。</span>
-            </div>
-          </div>
-          <section className="panel-card">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">已录入</p>
-                <h2>药物与提醒日程</h2>
-              </div>
-              <span className="count-chip">{state.medications.length} 项</span>
-            </div>
-            <div className="medication-list">
-              {state.medications.map((medication) => {
-                const photo = assetById(medication.imageAssetId);
-                return (
-                  <article key={medication.id} className="medication-card">
-                    <div className="medication-photo">
-                      {photo ? (
-                        <img src={photo.dataUrl} alt={`${medication.alias}的标签照片`} />
-                      ) : (
-                        <Pill aria-hidden="true" size={28} />
-                      )}
-                    </div>
-                    <div className="medication-main">
-                      <div>
-                        <strong>{medication.alias}</strong>
-                        <span>{medication.active ? "提醒已开启" : "已停用"}</span>
-                      </div>
-                      <p>{medication.name}</p>
-                      <dl>
-                        <div>
-                          <dt>时间</dt>
-                          <dd>{medication.scheduledTimes.join("、")}</dd>
-                        </div>
-                        <div>
-                          <dt>标签</dt>
-                          <dd>{medication.containerLabel || "未填写"}</dd>
-                        </div>
-                        <div>
-                          <dt>位置</dt>
-                          <dd>{medication.containerLocation || "未填写"}</dd>
-                        </div>
-                      </dl>
-                    </div>
-                    <label className="compact-upload">
-                      <Upload aria-hidden="true" size={17} />
-                      上传标签照片
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={(event) =>
-                          void uploadAndAttach(
-                            event.target.files?.[0],
-                            "medicine",
-                            (assetId) =>
-                              updateState((current) => ({
-                                ...current,
-                                medications: current.medications.map((item) =>
-                                  item.id === medication.id
-                                    ? { ...item, imageAssetId: assetId }
-                                    : item,
-                                ),
-                              })),
-                          )
-                        }
-                      />
-                    </label>
-                  </article>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="panel-card">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">新增</p>
-                <h2>建立药物记忆与提醒</h2>
-              </div>
-            </div>
-            <form className="form-stack" onSubmit={addMedication}>
-              <div className="form-grid two-columns">
-                <label>
-                  记录名称 <span aria-hidden="true">*</span>
-                  <input
-                    required
-                    placeholder="例如：晨间降压药"
-                    value={medicationForm.name}
-                    onChange={(event) =>
-                      setMedicationForm((current) => ({
-                        ...current,
-                        name: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  长者熟悉的叫法
-                  <input
-                    placeholder="例如：早上的白盒"
-                    value={medicationForm.alias}
-                    onChange={(event) =>
-                      setMedicationForm((current) => ({
-                        ...current,
-                        alias: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  提醒时间 <span aria-hidden="true">*</span>
-                  <input
-                    required
-                    type="time"
-                    value={medicationForm.time}
-                    onChange={(event) =>
-                      setMedicationForm((current) => ({
-                        ...current,
-                        time: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  药盒可见标签
-                  <input
-                    placeholder="例如：早 · 08:30"
-                    value={medicationForm.containerLabel}
-                    onChange={(event) =>
-                      setMedicationForm((current) => ({
-                        ...current,
-                        containerLabel: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  常放位置
-                  <input
-                    placeholder="例如：餐桌右侧白色托盘"
-                    value={medicationForm.containerLocation}
-                    onChange={(event) =>
-                      setMedicationForm((current) => ({
-                        ...current,
-                        containerLocation: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  家属确认的要求
-                  <input
-                    placeholder="例如：早餐后，按药盒标签执行"
-                    value={medicationForm.requirements}
-                    onChange={(event) =>
-                      setMedicationForm((current) => ({
-                        ...current,
-                        requirements: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-              </div>
-              <button className="primary-button" type="submit">
-                <Clock3 aria-hidden="true" size={19} />
-                保存并建立提醒
-              </button>
-            </form>
-          </section>
-        </div>
+        <MedicationMemoryTab
+          state={state}
+          updateState={updateState}
+          assetById={assetById}
+          uploadAndAttach={uploadAndAttach}
+          medicationForm={medicationForm}
+          setMedicationForm={setMedicationForm}
+          addMedication={addMedication}
+        />
       )}
-
       {tab === "daily" && (
-        <div className="memory-content-grid" role="tabpanel">
-          <section className="panel-card">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">长期上下文</p>
-                <h2>生活记忆</h2>
-              </div>
-              <span className="count-chip">{state.memories.length} 条</span>
-            </div>
-            <div className="memory-card-grid">
-              {state.memories.map((memory) => (
-                <article key={memory.id} className="memory-card">
-                  <span className="memory-kind-icon">
-                    {memory.kind === "place" ? (
-                      <MapPin aria-hidden="true" size={20} />
-                    ) : (
-                      <BookHeart aria-hidden="true" size={20} />
-                    )}
-                  </span>
-                  <div>
-                    <small>{memory.kind} · {memory.sensitivity === "sensitive" ? "敏感" : "普通"}</small>
-                    <strong>{memory.title}</strong>
-                    <p>{memory.content}</p>
-                    <div className="tag-row">
-                      {memory.tags.map((tag) => <span key={tag}>{tag}</span>)}
-                    </div>
-                  </div>
-                  <button
-                    className="icon-button danger-ghost"
-                    type="button"
-                    aria-label={`删除记忆：${memory.title}`}
-                    onClick={() =>
-                      updateState((current) => ({
-                        ...current,
-                        memories: current.memories.filter((item) => item.id !== memory.id),
-                      }))
-                    }
-                  >
-                    <Trash2 aria-hidden="true" size={18} />
-                  </button>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel-card">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">新增</p>
-                <h2>告诉助手一件值得记住的事</h2>
-              </div>
-            </div>
-            <form className="form-stack" onSubmit={addMemory}>
-              <div className="form-grid two-columns">
-                <label>
-                  类型
-                  <select
-                    value={memoryForm.kind}
-                    onChange={(event) =>
-                      setMemoryForm((current) => ({
-                        ...current,
-                        kind: event.target.value as MemoryKind,
-                      }))
-                    }
-                  >
-                    <option value="preference">沟通偏好</option>
-                    <option value="place">常用位置</option>
-                    <option value="person">人物关系</option>
-                    <option value="routine">生活习惯</option>
-                    <option value="story">家庭故事</option>
-                  </select>
-                </label>
-                <label>
-                  标题 <span aria-hidden="true">*</span>
-                  <input
-                    required
-                    placeholder="例如：眼镜常放位置"
-                    value={memoryForm.title}
-                    onChange={(event) =>
-                      setMemoryForm((current) => ({
-                        ...current,
-                        title: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label className="full-span">
-                  内容 <span aria-hidden="true">*</span>
-                  <textarea
-                    required
-                    rows={4}
-                    placeholder="写清信息来源和可靠边界，例如：家属记录，眼镜通常放在客厅边柜托盘。"
-                    value={memoryForm.content}
-                    onChange={(event) =>
-                      setMemoryForm((current) => ({
-                        ...current,
-                        content: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label className="full-span">
-                  标签
-                  <input
-                    placeholder="用逗号分隔，例如：眼镜，客厅，寻物"
-                    value={memoryForm.tags}
-                    onChange={(event) =>
-                      setMemoryForm((current) => ({
-                        ...current,
-                        tags: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-              </div>
-              <button className="primary-button" type="submit">
-                <Plus aria-hidden="true" size={19} /> 添加生活记忆
-              </button>
-            </form>
-          </section>
-        </div>
+        <DailyMemoryTab
+          state={state}
+          updateState={updateState}
+          memoryForm={memoryForm}
+          setMemoryForm={setMemoryForm}
+          addMemory={addMemory}
+        />
       )}
-
       {tab === "privacy" && (
-        <div className="memory-content-grid" role="tabpanel">
-          <section className="panel-card">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">已上传资料</p>
-                <h2>本地资产清单</h2>
-              </div>
-              <span className="local-only-chip">{state.assets.length} 个文件</span>
-            </div>
-            <p className="panel-intro">
-              人脸照片仅作为家属录入的资料展示和上下文，不进行自动身份认证。删除后会同步解除所有关联。
-            </p>
-            <div className="asset-grid">
-              {state.assets.length === 0 && (
-                <div className="empty-state">
-                  <FileImage aria-hidden="true" size={30} />
-                  <strong>没有上传文件</strong>
-                  <p>可在“人物与称呼”或“药物与日程”中添加照片。</p>
-                </div>
-              )}
-              {state.assets.map((asset) => (
-                <article key={asset.id} className="asset-card">
-                  {asset.mimeType.startsWith("image/") ? (
-                    <img src={asset.dataUrl} alt={asset.name} />
-                  ) : (
-                    <FileImage aria-hidden="true" size={28} />
-                  )}
-                  <div>
-                    <strong>{asset.name}</strong>
-                    <span>{asset.kind} · 仅本地</span>
-                  </div>
-                  <button
-                    className="icon-button danger-ghost"
-                    type="button"
-                    aria-label={`删除文件：${asset.name}`}
-                    onClick={() => deleteAsset(asset.id)}
-                  >
-                    <Trash2 aria-hidden="true" size={18} />
-                  </button>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel-card consent-card">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">授权状态</p>
-                <h2>谁可以处理哪些数据</h2>
-              </div>
-            </div>
-            {[
-              ["localStorageApproved", "在此浏览器保存陪伴档案"],
-              ["cameraApproved", "会话期间使用摄像头"],
-              ["microphoneApproved", "会话期间使用麦克风"],
-              ["sensitiveMemoryApproved", "保存人脸、药物等敏感记忆"],
-              ["cloudProcessingApproved", "把音视频发送到 ModelBest 公网服务"],
-            ].map(([key, label]) => (
-              <label className="consent-row" key={key}>
-                <span>
-                  <strong>{label}</strong>
-                  {key === "cloudProcessingApproved" && (
-                    <small>关闭时只能使用本地 Ascend 或演示回放。</small>
-                  )}
-                </span>
-                <input
-                  type="checkbox"
-                  checked={Boolean(state.consent[key as keyof typeof state.consent])}
-                  onChange={(event) =>
-                    setConsent(
-                      key as Exclude<keyof ConsentState, "acceptedAt">,
-                      event.target.checked,
-                    )
-                  }
-                />
-              </label>
-            ))}
-          </section>
-        </div>
+        <PrivacyMemoryTab
+          state={state}
+          deleteAsset={deleteAsset}
+          setConsent={setConsent}
+        />
       )}
     </div>
   );

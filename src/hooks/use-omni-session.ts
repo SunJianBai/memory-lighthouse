@@ -71,6 +71,12 @@ export const useOmniSession = (
   const userTranscriptDoneRef = useRef(false);
   const localActionSpeechRef = useRef(false);
   const browserActionSpeakingRef = useRef(false);
+  const previousConsentRef = useRef({
+    camera: appState.consent.cameraApproved,
+    microphone: appState.consent.microphoneApproved,
+    sensitiveMemory: appState.consent.sensitiveMemoryApproved,
+    cloudProcessing: appState.consent.cloudProcessingApproved,
+  });
   const [session, setSession] = useState<OmniSessionState>({
     status: "idle",
     cameraState: "off",
@@ -139,6 +145,34 @@ export const useOmniSession = (
 
   useEffect(() => () => stop("component_unmount"), [stop]);
 
+  useEffect(() => {
+    const previous = previousConsentRef.current;
+    const current = {
+      camera: appState.consent.cameraApproved,
+      microphone: appState.consent.microphoneApproved,
+      sensitiveMemory: appState.consent.sensitiveMemoryApproved,
+      cloudProcessing: appState.consent.cloudProcessingApproved,
+    };
+    previousConsentRef.current = current;
+    const authorizationWasRevoked =
+      (previous.camera && !current.camera) ||
+      (previous.microphone && !current.microphone) ||
+      (previous.sensitiveMemory && !current.sensitiveMemory) ||
+      (previous.cloudProcessing && !current.cloudProcessing);
+    if (
+      authorizationWasRevoked &&
+      (runtimeRef.current || previewStreamRef.current)
+    ) {
+      stop("consent_revoked");
+    }
+  }, [
+    appState.consent.cameraApproved,
+    appState.consent.cloudProcessingApproved,
+    appState.consent.microphoneApproved,
+    appState.consent.sensitiveMemoryApproved,
+    stop,
+  ]);
+
   const start = useCallback(async () => {
     stop("restart");
     assistantDraftRef.current = "";
@@ -177,7 +211,7 @@ export const useOmniSession = (
             tone: "green",
           },
         ],
-        signals: { ...initialSignals, listening: true },
+        signals: initialSignals,
         providerLabel: "演示回放",
       }));
       if (appState.consent.cameraApproved) {
@@ -285,9 +319,10 @@ export const useOmniSession = (
     }));
     try {
       const cameraEnabled = appState.consent.cameraApproved;
-      const referenceAudio =
-        appState.provider.referenceAudio ??
-        (isLocal ? await loadBundledReferenceAudio() : null);
+      const referenceAudio = isLocal
+        ? appState.provider.referenceAudio ??
+          (await loadBundledReferenceAudio())
+        : null;
       await runtime.start({
         provider: isLocal ? "local" : "cloud",
         mode: cameraEnabled ? "video" : "voice",
@@ -337,7 +372,10 @@ export const useOmniSession = (
           enableThinking: false,
           maxNewTokens: 96,
           lengthPenalty: 1,
-          referenceAudio: appState.provider.referenceAudio,
+          referenceAudio:
+            appState.provider.provider === "local"
+              ? appState.provider.referenceAudio
+              : undefined,
         });
         return true;
       } catch (error) {

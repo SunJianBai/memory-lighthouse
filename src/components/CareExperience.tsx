@@ -32,7 +32,12 @@ import {
   findDueRoutine,
   findNextRoutine,
   routineOccurrenceKey,
+  shouldNotifyFamily,
 } from "../agent/routine-scheduler";
+import {
+  isMemoryPermitted,
+  permittedRoutines,
+} from "../agent/privacy-policy";
 import { classifyVoiceCommand } from "../agent/voice-command";
 import type { Routine } from "../domain/types";
 import { useOmniSession } from "../hooks/use-omni-session";
@@ -73,8 +78,8 @@ export const CareExperience = ({
   const lastAutomaticRoutineRef = useRef("");
   const lastVoiceCommandRef = useRef("");
   const enabledRoutines = useMemo(
-    () => state.routines.filter((routine) => routine.enabled),
-    [state.routines],
+    () => permittedRoutines(state),
+    [state],
   );
   const activeRoutine: Routine | undefined = useMemo(
     () =>
@@ -136,7 +141,9 @@ export const CareExperience = ({
     dispatch({ type: "SESSION_STARTED", at: new Date().toISOString() });
     record(
       "陪伴会话开始",
-      `${providerLabel}准备接收语音与视频。`,
+      state.provider.provider === "replay"
+        ? `${providerLabel}已启动；不打开麦克风，摄像头仅在授权后用于本地预览。`
+        : `${providerLabel}准备接收已授权且设备可用的输入。`,
       "session_started",
     );
     await start();
@@ -162,7 +169,6 @@ export const CareExperience = ({
     if (!routine) return;
     const at = new Date().toISOString();
     dispatch({ type: "ROUTINE_DUE", routineId: routine.id, at });
-    dispatch({ type: "REMINDER_DELIVERED", at });
     setPresenterCue(
       state.provider.provider === "replay"
         ? "提醒已由回放引擎发出。下一步请拿起标有“下午”的演示盒。"
@@ -171,6 +177,7 @@ export const CareExperience = ({
     const text = `${state.recipient.preferredName}，现在是${routine.scheduledTime}，我们一起确认一下${routine.title}。${routine.instructions}`;
     if (state.provider.provider === "replay") {
       sayIfReplay(text);
+      dispatch({ type: "REMINDER_DELIVERED", at: new Date().toISOString() });
       record(
         `${routine.title}已提醒`,
         "回放引擎根据家属录入的时间与标签发出提醒，等待本人确认。",
@@ -182,7 +189,13 @@ export const CareExperience = ({
     } else {
       void requestModelAction(
         `现在是${routine.scheduledTime}，日程“${routine.title}”已到期。请根据操作说明主动提醒：${routine.instructions}`,
-      ).then((accepted) =>
+      ).then((accepted) => {
+        if (accepted) {
+          dispatch({
+            type: "REMINDER_DELIVERED",
+            at: new Date().toISOString(),
+          });
+        }
         record(
           accepted
             ? `${routine.title}已到期`
@@ -193,9 +206,9 @@ export const CareExperience = ({
           "routine_due",
           accepted ? "info" : "attention",
           "open",
-          "caregiver",
-        ),
-      );
+          "agent",
+        );
+      });
     }
   };
 
@@ -261,7 +274,7 @@ export const CareExperience = ({
     setPresenterCue("已按长者需求缩短并重复指令。");
   };
 
-  const requestFamily = (source: "user" | "demo" = "user") => {
+  const requestFamily = (source: "user" | "agent" | "demo" = "user") => {
     if (agent.phase === "idle" || agent.phase === "completed") return;
     dispatch({
       type:
@@ -276,8 +289,10 @@ export const CareExperience = ({
     );
     setPresenterCue("事件已进入家属端“待确认”，不显示为紧急告警。");
     record(
-      "晨间任务等待家属确认",
-      "长者未明确确认，系统没有判定危险，已将事项加入家属待办。",
+      `${nextRoutine?.title ?? "当前任务"}等待家属确认`,
+      source === "agent"
+        ? "超过家属配置的等待时间仍未获得明确确认；系统没有判定危险，已将事项加入家属待办。"
+        : "长者未明确确认，系统没有判定危险，已将事项加入家属待办。",
       "family_contacted",
       "important",
       "open",
@@ -285,8 +300,20 @@ export const CareExperience = ({
     );
   };
 
+  useEffect(() => {
+    if (
+      session.status === "live" &&
+      shouldNotifyFamily(agent, enabledRoutines, clock)
+    ) {
+      requestFamily("agent");
+    }
+  }, [agent, clock, enabledRoutines, session.status]);
+
   const findGlasses = () => {
-    const memory = state.memories.find((item) => item.tags.includes("眼镜"));
+    const memory = state.memories.find(
+      (item) =>
+        item.tags.includes("眼镜") && isMemoryPermitted(state, item),
+    );
     const text = memory
       ? `${state.recipient.preferredName}，家属记录里写着：${memory.content}我们先去那里看看，好吗？`
       : "我还没有眼镜位置的可靠记录，可以请家属补充。";
@@ -433,7 +460,13 @@ export const CareExperience = ({
           </div>
           <div className="camera-overlay top-right">
             <Mic aria-hidden="true" size={17} />
-            {session.status === "live" ? "正在倾听" : "麦克风关闭"}
+            {state.provider.provider === "replay"
+              ? "演示回放 · 未启用麦克风"
+              : session.status === "live" && session.signals.listening
+                ? "正在倾听"
+                : session.status === "live"
+                  ? "麦克风准备中"
+                  : "麦克风关闭"}
           </div>
           {session.signals.modelSpeaking && (
             <div className="speaking-wave" aria-label="助手正在说话">
