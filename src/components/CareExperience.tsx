@@ -115,6 +115,7 @@ export const CareExperience = ({
     severity: Parameters<typeof addEvent>[0]["severity"] = "info",
     status: Parameters<typeof addEvent>[0]["status"] = "resolved",
     source: Parameters<typeof addEvent>[0]["source"] = "demo",
+    routineId: string | undefined = currentRoutine?.id,
   ) =>
     addEvent({
       type,
@@ -123,7 +124,7 @@ export const CareExperience = ({
       title,
       summary,
       occurredAt: new Date().toISOString(),
-      routineId: currentRoutine?.id,
+      routineId,
       source,
     });
 
@@ -190,6 +191,7 @@ export const CareExperience = ({
         "info",
         "open",
         "demo",
+        routine.id,
       );
     } else {
       void requestModelAction(
@@ -206,12 +208,13 @@ export const CareExperience = ({
             ? `${routine.title}已到期`
             : `${routine.title}触发失败`,
           accepted
-            ? "确定性日程规则已触发，提醒请求已提交到真实模型通道。"
+            ? "确定性日程规则已触发，真实模型已完整返回提醒。"
             : "确定性日程规则已触发，但真实模型没有接受提醒请求。",
           "routine_due",
           accepted ? "info" : "attention",
           "open",
           "agent",
+          routine.id,
         );
       });
     }

@@ -2918,6 +2918,18 @@ body small,
   align-items: center;
 }
 
+.privacy-note strong,
+.runtime-metrics strong,
+.count-chip,
+.medication-main > div:first-child span,
+.medication-main dt,
+.medication-main dd,
+.tag-row span,
+.welcome-actions .quiet-button,
+.welcome-header .quiet-button {
+  font-size: 1rem;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
