@@ -1,0 +1,27 @@
+{
+  "name": "@memory-lighthouse/admin-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 4311",
+    "dev:inspection": "vite --mode inspection --host 127.0.0.1 --port 4311",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "build": "npm run typecheck && vite build",
+    "build:inspection": "npm run typecheck && vite build --mode inspection",
+    "preview": "vite preview --host 127.0.0.1 --port 4311"
+  },
+  "dependencies": {
+    "vue": "^3.5.21",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "typescript": "^6.0.2",
+    "vite": "^7.2.2",
+    "vue-tsc": "^3.1.7"
+  }
+}

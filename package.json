@@ -4,30 +4,33 @@
   "version": "0.1.0",
   "type": "module",
   "packageManager": "npm@11.4.2",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "engines": {
     "node": ">=20.19.0"
   },
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 4310",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview --host 127.0.0.1 --port 4310",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "check": "npm run test && npm run build"
-  },
-  "dependencies": {
-    "@fontsource-variable/lexend": "^5.2.8",
-    "@fontsource-variable/source-sans-3": "^5.2.8",
-    "lucide-react": "^0.468.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0"
-  },
-  "devDependencies": {
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0",
-    "@vitejs/plugin-react": "^5.0.4",
-    "typescript": "^6.0.2",
-    "vite": "^7.2.2",
-    "vitest": "^4.0.8"
+    "dev": "npm run dev --workspace @memory-lighthouse/client-web",
+    "dev:client": "npm run dev --workspace @memory-lighthouse/client-web",
+    "dev:demo": "npm run dev --workspace @memory-lighthouse/client-web",
+    "dev:server": "npm run start:dev --workspace @memory-lighthouse/server-api",
+    "build": "npm run build --workspace @memory-lighthouse/client-web",
+    "build:client": "npm run build --workspace @memory-lighthouse/client-web",
+    "build:demo": "npm run build --workspace @memory-lighthouse/client-web",
+    "build:server": "npm run build --workspace @memory-lighthouse/server-api",
+    "build:contracts": "npm run build --workspace @memory-lighthouse/api-contracts && npm run build --workspace @memory-lighthouse/event-contracts",
+    "preview": "npm run preview --workspace @memory-lighthouse/client-web",
+    "test": "npm run test --workspace @memory-lighthouse/client-web",
+    "test:watch": "npm run test:watch --workspace @memory-lighthouse/client-web",
+    "test:server": "npm run test --workspace @memory-lighthouse/server-api",
+    "test:e2e:server": "npm run test:e2e --workspace @memory-lighthouse/server-api",
+    "prisma:generate": "npm run prisma:generate --workspace @memory-lighthouse/server-api",
+    "prisma:validate": "npm run prisma:validate --workspace @memory-lighthouse/server-api",
+    "check": "npm run test && npm run build",
+    "check:server": "npm run lint --workspace @memory-lighthouse/server-api && npm run test:server && npm run test:e2e:server && npm run build:server",
+    "check:contracts": "npm run check --workspace @memory-lighthouse/api-contracts && npm run check --workspace @memory-lighthouse/event-contracts",
+    "check:all": "npm run check && npm run check:contracts && npm run check:server"
   }
 }

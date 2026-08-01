@@ -4,7 +4,7 @@
 
 四个部署物加认证、设备身份、远程音视频和隐私审计，即使已有 Demo，也不是简单页面拆分。单人完成可维护版本建议 8～10 周；3～4 人并行可压缩到约 4～6 周。赛事官网目前显示 2026-08-17 提交截止，因此比赛版必须以闭环、稳定和复现优先。[赛事官网](https://ascend.openbmb.cn/)
 
-最终排期取决于[待确认事项 Q6](./11-open-questions.md)。
+开发按里程碑持续推进，不以原计划日期裁剪范围；已确认决策和外部依赖见[决策确认记录](./11-open-questions.md)。
 
 ## 2. 工作流依赖
 
@@ -91,7 +91,7 @@ Web、Android 和 Admin 可以在 OpenAPI 固定后并行，但不能在服务�
 - Art Design Dashboard、用户、家庭、设备、模型/远程会话和审计页面。
 - Development Content Auditor、Inspection Grant、水印和逐条原文查看。
 - 站内、邮件和 Android Push Endpoint；Outbox/BullMQ 重试。
-- 家庭隐私中心显示授权、设备和管理员访问历史（待确认）。
+- 家庭隐私中心显示授权、设备和管理员访问历史。
 
 出口：原文访问全部审计；生产环境检查 Interface 不存在。
 
@@ -214,4 +214,3 @@ Web、Android 和 Admin 可以在 OpenAPI 固定后并行，但不能在服务�
 | 日程时区或重复触发 | 中/高 | UTC+IANA、唯一约束、Fake Clock 测试 |
 | 同时模型/家属占用媒体 | 高/高 | MediaSessionCoordinator + Redis 租约 |
 | 两个家属并发处理 | 中/中 | version 乐观锁和幂等命令 |
-

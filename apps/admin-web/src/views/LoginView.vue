@@ -1,0 +1,113 @@
+<script setup lang="ts">
+import { computed, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+
+import AppIcon from '../components/AppIcon.vue'
+import { login } from '../state/session'
+import { formatError } from '../utils/format'
+
+const route = useRoute()
+const router = useRouter()
+const identifier = ref('')
+const password = ref('')
+const showPassword = ref(false)
+const submitting = ref(false)
+const errorMessage = ref('')
+
+const canSubmit = computed(
+  () => identifier.value.trim().length > 0 && password.value.length > 0 && !submitting.value
+)
+
+async function submit(): Promise<void> {
+  if (!canSubmit.value) return
+  submitting.value = true
+  errorMessage.value = ''
+
+  try {
+    await login(identifier.value.trim(), password.value)
+    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/dashboard'
+    await router.replace(redirect.startsWith('/') ? redirect : '/dashboard')
+  } catch (error) {
+    errorMessage.value = formatError(error)
+  } finally {
+    submitting.value = false
+  }
+}
+</script>
+
+<template>
+  <main class="login-page">
+    <section class="login-introduction" aria-labelledby="product-title">
+      <div class="brand brand--login">
+        <span class="brand__mark"><AppIcon name="lighthouse" :size="30" /></span>
+        <span><strong>守忆灯塔</strong><small>Memory Lighthouse</small></span>
+      </div>
+      <div>
+        <p class="eyebrow">平台运营与安全审计</p>
+        <h1 id="product-title">让每一次陪伴，都有边界、有记录、有回应。</h1>
+        <p class="login-introduction__copy">
+          管理端只展示履职所需元数据。开发期原文检查采用独立授权、双人审批与不可变审计，生产环境硬关闭。
+        </p>
+      </div>
+      <ul class="trust-list" aria-label="安全能力">
+        <li><AppIcon name="check" :size="18" />账号会话采用短期访问令牌</li>
+        <li><AppIcon name="check" :size="18" />敏感原文不写入浏览器存储</li>
+        <li><AppIcon name="check" :size="18" />所有管理数据来自真实 API</li>
+      </ul>
+    </section>
+
+    <section class="login-panel" aria-labelledby="login-title">
+      <form class="login-card" @submit.prevent="submit">
+        <div class="login-card__heading">
+          <p class="eyebrow">受控入口</p>
+          <h2 id="login-title">登录管理中心</h2>
+          <p>请使用已授予平台角色的邮箱或用户名。</p>
+        </div>
+
+        <div v-if="errorMessage" class="inline-alert inline-alert--danger" role="alert">
+          <AppIcon name="warning" :size="20" />
+          <span>{{ errorMessage }}</span>
+        </div>
+
+        <label class="field">
+          <span>邮箱或用户名</span>
+          <input
+            v-model="identifier"
+            name="identifier"
+            type="text"
+            autocomplete="username"
+            required
+            placeholder="name@example.com"
+          />
+        </label>
+
+        <label class="field">
+          <span>密码</span>
+          <input
+            v-model="password"
+            name="password"
+            :type="showPassword ? 'text' : 'password'"
+            autocomplete="current-password"
+            required
+            placeholder="请输入密码"
+          />
+        </label>
+
+        <label class="checkbox-field checkbox-field--compact">
+          <input v-model="showPassword" type="checkbox" />
+          <span>显示密码</span>
+        </label>
+
+        <button class="button button--primary button--full" type="submit" :disabled="!canSubmit">
+          <span v-if="submitting" class="spinner spinner--small" aria-hidden="true"></span>
+          <AppIcon v-else name="lock" :size="18" />
+          {{ submitting ? '正在验证…' : '安全登录' }}
+        </button>
+
+        <p class="login-card__privacy">
+          登录即表示你理解：管理操作可能被记录到安全审计日志中。
+        </p>
+      </form>
+    </section>
+  </main>
+</template>

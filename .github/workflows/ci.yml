@@ -1,0 +1,296 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  NODE_VERSION: "20.19.0"
+
+jobs:
+  web-server-contracts:
+    name: Web, server, and contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate Prisma schema
+        run: npm run prisma:validate
+
+      - name: Check API and event contracts
+        run: npm run check:contracts
+
+      - name: Lint server
+        run: npm run lint --workspace @memory-lighthouse/server-api
+
+      - name: Test server
+        run: npm run test:server
+
+      - name: Build server
+        run: npm run build:server
+
+      - name: Test client web
+        run: npm run test --workspace @memory-lighthouse/client-web
+
+      - name: Type-check client web
+        run: npm run typecheck --workspace @memory-lighthouse/client-web
+
+      - name: Build client web
+        run: npm run build --workspace @memory-lighthouse/client-web
+
+      - name: Type-check admin web
+        run: npm run typecheck --workspace @memory-lighthouse/admin-web
+
+      - name: Build admin web
+        run: npm run build --workspace @memory-lighthouse/admin-web
+
+      - name: Build development inspection admin variant
+        run: npm run build:inspection --workspace @memory-lighthouse/admin-web
+
+  server-e2e:
+    name: Server E2E with local infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Generate ephemeral CI configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          random_hex() { openssl rand -hex 32; }
+          random_base64url() {
+            openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
+          }
+
+          mysql_password="$(random_hex)"
+          mysql_root_password="$(random_hex)"
+          redis_app_password="$(random_hex)"
+          redis_livekit_password="$(random_hex)"
+          minio_root_password="$(random_hex)"
+          minio_app_secret="$(random_hex)"
+          livekit_secret="$(random_hex)"
+          rate_limit_secret="$(random_base64url)"
+          data_encryption_key="$(openssl rand -base64 32 | tr -d '\n')"
+          care_encryption_key="$(random_base64url)"
+          auth_access_secret="$(random_hex)"
+          auth_refresh_pepper="$(random_hex)"
+          auth_one_time_pepper="$(random_hex)"
+          household_invitation_pepper="$(random_hex)"
+          device_activation_pepper="$(random_base64url)"
+          device_credential_pepper="$(random_base64url)"
+          device_access_secret="$(random_base64url)"
+
+          for value in \
+            "$mysql_password" \
+            "$mysql_root_password" \
+            "$redis_app_password" \
+            "$redis_livekit_password" \
+            "$minio_root_password" \
+            "$minio_app_secret" \
+            "$livekit_secret" \
+            "$rate_limit_secret" \
+            "$data_encryption_key" \
+            "$care_encryption_key" \
+            "$auth_access_secret" \
+            "$auth_refresh_pepper" \
+            "$auth_one_time_pepper" \
+            "$household_invitation_pepper" \
+            "$device_activation_pepper" \
+            "$device_credential_pepper" \
+            "$device_access_secret"
+          do
+            echo "::add-mask::$value"
+          done
+
+          compose_env="$RUNNER_TEMP/openbmb-compose.env"
+          umask 077
+          cat > "$compose_env" <<EOF
+          TZ=UTC
+          MYSQL_DATABASE=openbmb
+          MYSQL_USER=openbmb
+          MYSQL_PASSWORD=$mysql_password
+          MYSQL_ROOT_PASSWORD=$mysql_root_password
+          MYSQL_HOST_PORT=13306
+          REDIS_APP_PASSWORD=$redis_app_password
+          REDIS_LIVEKIT_PASSWORD=$redis_livekit_password
+          REDIS_HOST_PORT=16379
+          MINIO_ROOT_USER=openbmb-ci-root
+          MINIO_ROOT_PASSWORD=$minio_root_password
+          MINIO_APP_ACCESS_KEY=openbmb-api
+          MINIO_APP_SECRET_KEY=$minio_app_secret
+          MINIO_BUCKET=openbmb-assets
+          MINIO_API_HOST_PORT=19000
+          MINIO_CONSOLE_HOST_PORT=19001
+          MINIO_SERVER_URL=http://127.0.0.1:19000
+          MINIO_BROWSER_REDIRECT_URL=http://127.0.0.1:19001
+          LIVEKIT_API_KEY=openbmb_ci
+          LIVEKIT_API_SECRET=$livekit_secret
+          LIVEKIT_NODE_IP=127.0.0.1
+          LIVEKIT_MEDIA_BIND_IP=127.0.0.1
+          LIVEKIT_SIGNAL_HOST_PORT=17880
+          LIVEKIT_ICE_TCP_PORT=7881
+          LIVEKIT_ICE_UDP_PORT=7882
+          LIVEKIT_TURN_UDP_PORT=3478
+          EOF
+
+          {
+            echo "COMPOSE_ENV_FILE=$compose_env"
+            echo "DATABASE_URL=mysql://openbmb:$mysql_password@127.0.0.1:13306/openbmb"
+            echo "REDIS_URL=redis://openbmb-api:$redis_app_password@127.0.0.1:16379/0"
+            echo "OBJECT_STORAGE_SECRET_ACCESS_KEY=$minio_app_secret"
+            echo "LIVEKIT_API_SECRET=$livekit_secret"
+            echo "RATE_LIMIT_KEY_SECRET=$rate_limit_secret"
+            echo "DATA_ENCRYPTION_KEY_BASE64=$data_encryption_key"
+            echo "CARE_WORKFLOW_ENCRYPTION_KEY=$care_encryption_key"
+            echo "AUTH_ACCESS_TOKEN_SECRET=$auth_access_secret"
+            echo "AUTH_REFRESH_TOKEN_PEPPER=$auth_refresh_pepper"
+            echo "AUTH_ONE_TIME_TOKEN_PEPPER=$auth_one_time_pepper"
+            echo "HOUSEHOLD_INVITATION_TOKEN_PEPPER=$household_invitation_pepper"
+            echo "DEVICE_ACTIVATION_PEPPER=$device_activation_pepper"
+            echo "DEVICE_CREDENTIAL_PEPPER=$device_credential_pepper"
+            echo "DEVICE_ACCESS_TOKEN_SECRET=$device_access_secret"
+          } >> "$GITHUB_ENV"
+
+      - name: Start MySQL, Redis, MinIO, and LiveKit
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose \
+            --env-file "$COMPOSE_ENV_FILE" \
+            -f infra/compose/compose.yml \
+            up -d --wait mysql redis redis-livekit minio livekit
+          docker compose \
+            --env-file "$COMPOSE_ENV_FILE" \
+            -f infra/compose/compose.yml \
+            run --rm --no-deps minio-init
+
+      - name: Apply database migrations
+        working-directory: apps/server-api
+        run: npx prisma migrate deploy
+
+      - name: Run server E2E tests
+        env:
+          NODE_ENV: test
+          HOST: 127.0.0.1
+          CORS_ORIGINS: http://127.0.0.1:4310
+          PUBLIC_APP_URL: http://127.0.0.1:4310/openBMB
+          MAIL_DELIVERY_MODE: memory
+          OBJECT_STORAGE_ENDPOINT: http://127.0.0.1:19000
+          OBJECT_STORAGE_REGION: us-east-1
+          OBJECT_STORAGE_BUCKET: openbmb-assets
+          OBJECT_STORAGE_ACCESS_KEY_ID: openbmb-api
+          OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+          DATA_ENCRYPTION_KEY_ID: ci-key-v1
+          CARE_WORKFLOW_SCHEDULER_ENABLED: "false"
+          TRANSCRIPT_PURGE_ENABLED: "false"
+          LIVEKIT_URL: ws://127.0.0.1:17880
+          LIVEKIT_PUBLIC_URL: ws://127.0.0.1:17880
+          LIVEKIT_API_KEY: openbmb_ci
+          REMOTE_SESSION_EXPIRY_ENABLED: "false"
+          ENABLE_DEVELOPMENT_CONTENT_INSPECTION: "false"
+        run: npm run test:e2e:server
+
+      - name: Show infrastructure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          docker compose \
+            --env-file "$COMPOSE_ENV_FILE" \
+            -f infra/compose/compose.yml \
+            ps || true
+          docker compose \
+            --env-file "$COMPOSE_ENV_FILE" \
+            -f infra/compose/compose.yml \
+            logs --no-color --tail 300 || true
+
+      - name: Tear down local infrastructure
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${COMPOSE_ENV_FILE:-}" && -f "$COMPOSE_ENV_FILE" ]]; then
+            docker compose \
+              --env-file "$COMPOSE_ENV_FILE" \
+              -f infra/compose/compose.yml \
+              down --volumes --remove-orphans || true
+            rm -f "$COMPOSE_ENV_FILE"
+          fi
+
+  android:
+    name: Android test, lint, and APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Detect Android project
+        id: android-project
+        shell: bash
+        run: |
+          if [[ -f apps/client-android/gradlew ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "Android Gradle wrapper is not present yet; skipping Android gates."
+          fi
+
+      - name: Set up Java
+        if: steps.android-project.outputs.present == 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        if: steps.android-project.outputs.present == 'true'
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Test, lint, and assemble Android app
+        if: steps.android-project.outputs.present == 'true'
+        working-directory: apps/client-android
+        shell: bash
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon test lint assembleDebug
+
+      - name: Upload debug APK
+        if: steps.android-project.outputs.present == 'true' && success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: memory-lighthouse-debug-apk
+          path: apps/client-android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14

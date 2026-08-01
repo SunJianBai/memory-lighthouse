@@ -1,0 +1,15 @@
+export const PASSWORD_HASHER_PORT = Symbol('PASSWORD_HASHER_PORT');
+export const NOTIFICATION_PORT = Symbol('NOTIFICATION_PORT');
+export const IDENTITY_CLOCK = Symbol('IDENTITY_CLOCK');
+export const IDENTITY_SECURITY_CONFIG = Symbol('IDENTITY_SECURITY_CONFIG');
+
+export const USER_ACCESS_TOKEN_AUDIENCE = 'memory-lighthouse-user';
+export const USER_ACCESS_TOKEN_ISSUER = 'memory-lighthouse-server';
+
+export const EMAIL_IDENTITY = 'EMAIL';
+export const USERNAME_IDENTITY = 'USERNAME';
+
+export const EMAIL_VERIFICATION_PURPOSE = 'EMAIL_VERIFICATION';
+export const PASSWORD_RESET_PURPOSE = 'PASSWORD_RESET';
+
+export const ACTIVE_USER_STATUSES = ['ACTIVE', 'PENDING_VERIFICATION'] as const;

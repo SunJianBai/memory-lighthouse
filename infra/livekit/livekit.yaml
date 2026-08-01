@@ -1,0 +1,32 @@
+port: 7880
+
+redis:
+  address: redis-livekit:6379
+  username: livekit
+  db: 1
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+  allow_tcp_fallback: true
+  packet_buffer_size_video: 300
+  packet_buffer_size_audio: 120
+
+room:
+  auto_create: false
+  empty_timeout: 60
+  departure_timeout: 20
+  max_participants: 2
+  enable_remote_unmute: false
+
+turn:
+  enabled: true
+  udp_port: 3478
+  ttl_seconds: 300
+
+logging:
+  level: info
+  pion_level: error
+  json: true
+  sample: true

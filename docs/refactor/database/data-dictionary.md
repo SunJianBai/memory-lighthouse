@@ -112,7 +112,7 @@
 
 ### `recipient_members`
 
-陪伴对象级 Care Authority：`recipient_id`、`household_member_id`、`relationship_label`、`access_level`、`can_manage_profile`、`can_manage_routine`、`can_view_events`、`can_view_conversation`、`can_activate_device`、`can_remote_call`、`receive_notifications`、`contact_priority`、`status`。
+陪伴对象级 Care Authority：`recipient_id`、`household_member_id`、`relationship_label`、`access_level`、`can_manage_profile`、`can_manage_consent`、`can_manage_routine`、`can_view_events`、`can_view_conversation`、`can_activate_device`、`can_remote_call`、`receive_notifications`、`contact_priority`、`status`。同意管理与资料编辑分离，避免仅能维护资料的成员开启摄像头、麦克风、模型处理或转写。
 
 唯一约束 `(recipient_id, household_member_id)`。
 
@@ -183,7 +183,7 @@ Scope 至少包括：`CAMERA`、`MICROPHONE`、`CLOUD_MODEL_PROCESSING`、`SENSI
 
 ### `assets`
 
-`household_id`、`recipient_id`、`bucket`、`object_key`、`original_name`、`mime_type`、`byte_size`、`sha256`、`kind`、`scan_status`、`encryption_key_id`、`retention_until`、`status`、`uploaded_by_member_id`。
+`household_id`、`recipient_id`、`bucket`、`object_key`、`original_name`、`mime_type`、`byte_size`、`sha256`、`kind`、`scan_status`、`encryption_key_id`、`retention_until`、`status`、`uploaded_by_member_id`。`bucket` 遵循 S3 的 63 字符上限；应用生成的 `object_key` 限制为 512 字符，使 `(bucket, object_key)` 唯一索引在 MySQL `utf8mb4` 的 3072 字节索引上限内。
 
 不保存预签名 URL。关联表：`memory_assets`、`recipient_assets`、`medication_assets`、`care_event_assets`、`conversation_assets`。
 
@@ -319,4 +319,3 @@ Scope 至少包括：`CAMERA`、`MICROPHONE`、`CLOUD_MODEL_PROCESSING`、`SENSI
 
 - Outbox：聚合、事件类型、载荷、可用时间、租约、尝试次数和发布时间。
 - Inbox：消费者与事件 ID 唯一，保证至少一次投递下的副作用幂等。
-

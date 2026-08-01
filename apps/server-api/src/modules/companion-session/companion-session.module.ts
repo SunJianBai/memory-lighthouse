@@ -1,0 +1,30 @@
+import { Module } from '@nestjs/common';
+
+import { PrismaModule } from '../../infrastructure/database/prisma.module';
+import { DeviceActivationModule } from '../device-activation/device-activation.module';
+import { MemoryModule } from '../memory/memory.module';
+import { RealtimeCommunicationModule } from '../realtime-communication/realtime-communication.module';
+import { CompanionSessionApplicationService } from './companion-session.application.service';
+import { CompanionSessionController } from './http/companion-session.controller';
+import { TranscriptRetentionApplicationService } from './transcript-retention.application.service';
+import { TranscriptRetentionRunner } from './transcript-retention.runner';
+
+@Module({
+  imports: [
+    PrismaModule,
+    DeviceActivationModule,
+    MemoryModule,
+    RealtimeCommunicationModule,
+  ],
+  controllers: [CompanionSessionController],
+  providers: [
+    CompanionSessionApplicationService,
+    TranscriptRetentionApplicationService,
+    TranscriptRetentionRunner,
+  ],
+  exports: [
+    CompanionSessionApplicationService,
+    TranscriptRetentionApplicationService,
+  ],
+})
+export class CompanionSessionModule {}

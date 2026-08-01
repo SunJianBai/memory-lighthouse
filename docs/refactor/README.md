@@ -1,6 +1,6 @@
 # 守忆灯塔完整重构设计
 
-本目录定义“守忆灯塔”从单机比赛 Demo 演进为多账号、跨设备、可远程协作系统的目标架构。文档以 2026-08-01 已确认的产品选择为基线；尚未确认的高影响选择集中记录在[待确认事项](./11-open-questions.md)，不会隐含在实现细节中。
+本目录定义“守忆灯塔”从单机比赛 Demo 演进为多账号、跨设备、可远程协作系统的目标架构。文档以 2026-08-01 已确认的产品选择为基线；已经确认的安全决策和仍需外部凭据的事项集中记录在[决策确认记录](./11-open-questions.md)。
 
 ## 已确认的架构基线
 
@@ -25,7 +25,7 @@
 8. [部署与运维](./08-deployment-and-operations.md)
 9. [旧 Demo 迁移方案](./09-migration-plan.md)
 10. [开发计划与验收](./10-development-roadmap.md)
-11. [待确认事项](./11-open-questions.md)
+11. [决策确认记录与外部依赖](./11-open-questions.md)
 12. [数据字典](./database/data-dictionary.md)
 13. [Prisma 目标模型草案](./database/schema.prisma)
 14. [Prisma 7 配置草案](./database/prisma.config.ts)

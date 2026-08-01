@@ -1,6 +1,6 @@
 # 守忆灯塔 Memory Lighthouse
 
-面向轻度认知障碍长者的全模态日常任务陪伴 Demo。它把 MiniCPM-o 4.5 的持续视觉、持续语音、主动说话和可打断能力，放进“家属录入可信记忆 → 长者端适时提醒 → 本人确认或家属接手”的完整业务闭环。
+面向轻度认知障碍长者的全模态日常任务陪伴平台。项目已拆分为 Server API、用户 Web、管理员 Web（后续阶段）和原生 Android（后续阶段）；原 MiniCPM-o 4.5 比赛 Demo 作为独立路由完整保留。
 
 这不是医疗诊断或自动用药决策工具。系统不识别药片、不判断剂量、不推断危险，只复述家属录入的时间、标签、位置和要求。
 
@@ -14,22 +14,22 @@ npm install
 npm run dev
 ```
 
-打开 `http://127.0.0.1:4310/`。首次体验建议点击“开始完整演示”，然后在演示台运行五步主线；厨房与夜间陪伴是两个可选加分场景。
+打开 `http://127.0.0.1:4310/openBMB/`。真实家属工作区使用 `/openBMB/app/*`，陪伴设备模式使用 `/openBMB/companion`；比赛 Demo 位于 `/openBMB/demo/*`。
 
 ```powershell
 npm run test
 npm run build
 ```
 
-## 已实现的完整流程
+## 已实现的客户端流程
 
-1. 家属通过四步引导建立长者资料、第一联系人和授权边界。
-2. 在记忆中心上传长者照片、授权联系人照片、药盒标签照片，并录入药物时间、操作要求、日常偏好与常用位置。
-3. 陪伴端仅在开始会话后申请摄像头和麦克风权限。
-4. 确定性日程引擎在时间窗口内触发任务；全模态模型负责自然语言陪伴、视觉标签核对和可打断对话。
-5. 模型完整返回提醒后才进入待确认；超出家属配置的等待时间会自动生成“待家属查看”，不制造紧急告警。
-6. 家属端查看来源清楚的事件摘要、日程和授权联系人，并可人工复核、确认和关闭待办。
-7. 所有资料默认保存在当前浏览器，可导出、恢复、单项删除或整体重置。
+1. 邮箱/用户名密码注册登录、HttpOnly Cookie 刷新轮换、邮箱验证和密码重置。
+2. 家庭与陪伴对象创建、选择；记忆、日程与家庭待办使用真实 Server API。
+3. 二维码或动态码设备 Claim，家属再次批准，设备证明 Ed25519 私钥持有后兑换轮换凭据。
+4. Consent 中心逐项授权或撤回摄像头、麦克风、模型、转写、记忆、远程协助和开发期检查。
+5. 陪伴设备以独立短时 device access token 获取最小上下文、发送心跳、创建 Companion/Model Session，再启动现有 MiniCPM-o runtime。
+6. 家属发起远程通话，陪伴端现场接听后连接 LiveKit；远程通话固定不录音、不转写。
+7. 原本地 Demo 的引导、记忆、确定性状态机、演示回放与 MiniCPM-o 联调行为全部保留。
 
 ## 三种推理模式
 
@@ -62,12 +62,15 @@ ssh -N `
 
 ## 页面入口
 
-- `#/care`：长者陪伴端，大字号、低认知负担操作。
-- `#/family`：家属端，事件摘要、待确认事项和日程。
-- `#/memories`：人物、药物日程、生活记忆、授权与数据。
-- `#/demo`：一镜到底演示控制台。
-- `#/settings`：Provider、接口、备份与恢复。
-- `#/onboarding`：首次建立陪伴档案。
+- `/openBMB/login`、`/register`：用户认证。
+- `/openBMB/app/overview`：家属工作区。
+- `/openBMB/app/memories`：服务器记忆档案。
+- `/openBMB/app/routines`：日程与家庭待办。
+- `/openBMB/app/devices`：设备激活与绑定。
+- `/openBMB/app/privacy`：Consent 中心。
+- `/openBMB/app/remote`：现场接听远程通话。
+- `/openBMB/companion`：激活后的陪伴设备模式。
+- `/openBMB/demo/showcase`：原一镜到底演示台。
 
 ## 设计和工程资料
 
@@ -85,14 +88,13 @@ ssh -N `
 ## 项目结构
 
 ```text
-src/agent       确定性状态机、日程调度和模型 Prompt
-src/components  应用壳与长者端核心体验
-src/data        本地持久化、图片压缩、导入导出
-src/domain      领域模型和可重置演示数据
-src/hooks       MiniCPM-o 会话编排
-src/pages       欢迎、引导、家属、记忆、设置与演示页面
-src/runtime     音视频采集、编解码、Realtime/HTTP 运行时
-public/worklets 实时 PCM 采集与播放 AudioWorklet
+apps/server-api          NestJS + Prisma + MySQL Server API
+apps/client-web          React/Vite 家属工作区、陪伴模式与原 Demo
+apps/client-web/src/api  统一 API client 与内存 access token
+apps/client-web/src/device 设备密钥、激活和凭据轮换
+apps/client-web/src/runtime MiniCPM-o 音视频与 Realtime runtime
+packages                 API 与事件契约
+infra                    MySQL、Redis、MinIO、LiveKit 与 Caddy
 ```
 
-当前仓库是可展示、可联调的单机 Demo，不是生产级照护系统。生产化还需要账户体系、端到端加密、撤回授权审计、跨设备同步、通知网关、访问日志和合规评估。
+项目仍处于开发和部署验证阶段。陪伴端会使用设备凭据保护的 current 接口发现跨设备来电，浏览器跨标签页通知只用于降低本机联调延迟；界面不会把通知或媒体失败伪装成成功。后续可接入服务端鉴权 WSS，替换轮询通知。

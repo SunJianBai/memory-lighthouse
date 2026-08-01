@@ -1,0 +1,2 @@
+export const MAIL_DELIVERY_CONFIG = Symbol('MAIL_DELIVERY_CONFIG');
+export const MAIL_DELIVERY_PORT = Symbol('MAIL_DELIVERY_PORT');

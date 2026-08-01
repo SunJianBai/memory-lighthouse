@@ -25,7 +25,7 @@ NestJS Realtime Communication Module
 
 选择 LiveKit 的原因：WebRTC 不定义信令，裸 P2P 仍需自行处理 SDP/ICE、Perfect Negotiation、ICE Restart、网络切换、TURN、跨端差异和断线恢复；LiveKit 已提供 JavaScript 和原生 Android SDK，并包含信令、SFU、重连、权限和 TURN 能力。[WebRTC 连接基础](https://webrtc.org/getting-started/peer-connections)、[LiveKit SFU](https://docs.livekit.io/reference/internals/livekit-sfu/)、[LiveKit Android SDK](https://github.com/livekit/client-sdk-android)
 
-这项技术选择当前记录为 proposed ADR，待确认允许增加 LiveKit 部署进程后接受。
+这项技术选择已记录为 accepted ADR；产品方已确认允许增加自托管 LiveKit 部署进程。
 
 ## 3. 会话状态机
 
@@ -171,4 +171,3 @@ renewal: authenticated heartbeat
 - 解绑或撤回授权后立即拒绝新会话。
 - 呼叫者取消与陪伴端接听的竞态。
 - 结束后摄像头、麦克风、音频和 Foreground Service 全部释放。
-

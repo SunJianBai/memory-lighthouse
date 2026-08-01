@@ -3,10 +3,12 @@ dist/
 .env
 .env.local
 coverage/
+apps/server-api/src/infrastructure/database/generated/
 playwright-report/
 test-results/
 tmp/
 *.log
+*.tsbuildinfo
 .DS_Store
 
 # User-generated sensitive demo data stays in the browser and must never be committed.

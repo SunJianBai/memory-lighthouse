@@ -286,6 +286,7 @@ model RecipientMember {
   relationship_label    String?  @db.VarChar(50)
   access_level          String   @db.VarChar(32)
   can_manage_profile    Boolean  @default(false)
+  can_manage_consent    Boolean  @default(false)
   can_manage_routine    Boolean  @default(false)
   can_view_events       Boolean  @default(false)
   can_view_conversation Boolean  @default(false)
@@ -566,8 +567,8 @@ model Asset {
   id                    String    @id @db.Char(26)
   household_id          String    @db.Char(26)
   recipient_id          String?   @db.Char(26)
-  bucket                String    @db.VarChar(100)
-  object_key            String    @db.VarChar(1024)
+  bucket                String    @db.VarChar(63)
+  object_key            String    @db.VarChar(512)
   original_name         String    @db.VarChar(255)
   mime_type             String    @db.VarChar(128)
   byte_size             BigInt
@@ -942,10 +943,10 @@ model ConversationUtterance {
 
 model ConversationUtteranceContent {
   utterance_id        String    @id @db.Char(26)
-  raw_text_ciphertext Bytes     @db.LongBlob
-  nonce               Bytes     @db.VarBinary(24)
-  encryption_key_id   String    @db.VarChar(64)
-  content_hash        Bytes     @db.Binary(32)
+  raw_text_ciphertext Bytes?    @db.LongBlob
+  nonce               Bytes?    @db.VarBinary(24)
+  encryption_key_id   String?   @db.VarChar(64)
+  content_hash        Bytes?    @db.Binary(32)
   char_count          Int
   retention_until     DateTime? @db.DateTime(3)
   purged_at           DateTime? @db.DateTime(3)

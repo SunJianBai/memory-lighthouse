@@ -1,0 +1,268 @@
+name: openbmb
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.4.8}
+    container_name: openbmb-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in the env file}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-openbmb}
+      MYSQL_USER: ${MYSQL_USER:-openbmb}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in the env file}
+      MYSQL_LOG_CONSOLE: "true"
+      TZ: ${TZ:-Asia/Shanghai}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --skip-name-resolve=ON
+      - --max-connections=30
+      - --innodb-buffer-pool-size=192M
+      - --innodb-log-buffer-size=16M
+      - --temptable-max-ram=32M
+      - --table-open-cache=400
+      - --performance-schema=OFF
+    ports:
+      - 127.0.0.1:${MYSQL_HOST_PORT:-13306}:3306
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - private
+      - host_access
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping --host=127.0.0.1 --user=root --password="$${MYSQL_ROOT_PASSWORD}" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    stop_grace_period: 60s
+    mem_limit: 600m
+    cpus: 0.75
+    pids_limit: 180
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4.10-alpine}
+    container_name: openbmb-redis
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - /opt/openbmb/start-redis.sh
+    environment:
+      REDIS_APP_PASSWORD: ${REDIS_APP_PASSWORD:?set REDIS_APP_PASSWORD in the env file}
+    ports:
+      - 127.0.0.1:${REDIS_HOST_PORT:-16379}:6379
+    volumes:
+      - redis_data:/data
+      - ../redis/redis.conf:/etc/redis/openbmb.conf:ro
+      - ../redis/start-redis.sh:/opt/openbmb/start-redis.sh:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=2m,mode=1777
+    networks:
+      - private
+      - host_access
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli --no-auth-warning --user openbmb-api --pass "$${REDIS_APP_PASSWORD}" ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 20s
+    read_only: true
+    mem_limit: 144m
+    cpus: 0.35
+    pids_limit: 80
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  redis-livekit:
+    image: ${REDIS_IMAGE:-redis:7.4.10-alpine}
+    container_name: openbmb-redis-livekit
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - /opt/openbmb/start-livekit-redis.sh
+    environment:
+      REDIS_LIVEKIT_PASSWORD: ${REDIS_LIVEKIT_PASSWORD:?set REDIS_LIVEKIT_PASSWORD in the env file}
+    volumes:
+      - redis_livekit_data:/data
+      - ../redis/redis.conf:/etc/redis/openbmb.conf:ro
+      - ../redis/start-livekit-redis.sh:/opt/openbmb/start-livekit-redis.sh:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=2m,mode=1777
+    networks:
+      - private
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli --no-auth-warning --user livekit --pass "$${REDIS_LIVEKIT_PASSWORD}" ping | grep -q PONG
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 20s
+    read_only: true
+    mem_limit: 96m
+    cpus: 0.20
+    pids_limit: 60
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    container_name: openbmb-minio
+    restart: unless-stopped
+    command:
+      - server
+      - /data
+      - --console-address
+      - :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in the env file}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in the env file}
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-http://127.0.0.1:19001}
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://127.0.0.1:19000}
+      MINIO_PROMETHEUS_AUTH_TYPE: private
+      GOMEMLIMIT: 288MiB
+    ports:
+      - 127.0.0.1:${MINIO_API_HOST_PORT:-19000}:9000
+      - 127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-19001}:9001
+    volumes:
+      - minio_data:/data
+    networks:
+      - private
+      - host_access
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:9000/minio/health/live
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    stop_grace_period: 30s
+    mem_limit: 352m
+    cpus: 0.50
+    pids_limit: 120
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  minio-init:
+    image: ${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-04-08T15-39-49Z}
+    container_name: openbmb-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in the env file}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in the env file}
+      MINIO_BUCKET: ${MINIO_BUCKET:-openbmb-assets}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:-openbmb-api}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?set MINIO_APP_SECRET_KEY in the env file}
+    entrypoint:
+      - /bin/sh
+      - /opt/openbmb/init-minio.sh
+    volumes:
+      - ../minio/init-minio.sh:/opt/openbmb/init-minio.sh:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=2m,mode=1777
+      - /root/.mc:rw,noexec,nosuid,size=2m,mode=0700
+    networks:
+      - private
+    read_only: true
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 60
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  livekit:
+    image: ${LIVEKIT_IMAGE:-livekit/livekit-server:v1.13.4}
+    container_name: openbmb-livekit
+    restart: unless-stopped
+    depends_on:
+      redis-livekit:
+        condition: service_healthy
+    command:
+      - --config
+      - /etc/livekit/livekit.yaml
+      - --bind
+      - 0.0.0.0
+      - --node-ip
+      - ${LIVEKIT_NODE_IP:?set LIVEKIT_NODE_IP to the client-reachable host IP}
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?set LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET}"
+      REDIS_PASSWORD: ${REDIS_LIVEKIT_PASSWORD:?set REDIS_LIVEKIT_PASSWORD in the env file}
+      GOMEMLIMIT: 384MiB
+    ports:
+      - 127.0.0.1:${LIVEKIT_SIGNAL_HOST_PORT:-17880}:7880/tcp
+      - ${LIVEKIT_MEDIA_BIND_IP:-127.0.0.1}:${LIVEKIT_ICE_TCP_PORT:-7881}:7881/tcp
+      - ${LIVEKIT_MEDIA_BIND_IP:-127.0.0.1}:${LIVEKIT_ICE_UDP_PORT:-7882}:7882/udp
+      - ${LIVEKIT_MEDIA_BIND_IP:-127.0.0.1}:${LIVEKIT_TURN_UDP_PORT:-3478}:3478/udp
+    volumes:
+      - ../livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+    networks:
+      - private
+      - rtc_egress
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:7880/
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    stop_grace_period: 30s
+    read_only: true
+    user: "65532:65532"
+    mem_limit: 448m
+    cpus: 1.25
+    pids_limit: 180
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+networks:
+  private:
+    name: openbmb_private
+    internal: true
+  rtc_egress:
+    name: openbmb_rtc_egress
+  host_access:
+    name: openbmb_host_access
+
+volumes:
+  mysql_data:
+    name: openbmb_mysql_data
+  redis_data:
+    name: openbmb_redis_data
+  redis_livekit_data:
+    name: openbmb_redis_livekit_data
+  minio_data:
+    name: openbmb_minio_data
