@@ -101,6 +101,7 @@ describe("browser device key protection", () => {
 
 describe("DeviceSessionManager transcript contract", () => {
   it("reports the locally active companion session on heartbeat", async () => {
+    vi.stubGlobal("navigator", undefined);
     const manager = new DeviceSessionManager();
     const request = vi.fn().mockResolvedValue({
       online: true,
@@ -121,6 +122,7 @@ describe("DeviceSessionManager transcript contract", () => {
       expect.objectContaining({
         method: "POST",
         body: expect.objectContaining({
+          osVersion: "Browser",
           activeCompanionSessionId: "companion-1",
         }),
       }),

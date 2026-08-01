@@ -55,6 +55,10 @@ const publicClient = new ApiClient();
 const deviceClient = new ApiClient();
 const encoder = new TextEncoder();
 const CURRENT_INSTALLATION_PROTOCOL = "NON_EXPORTABLE_V1_ED25519" as const;
+const browserUserAgent = (maxLength: number): string => {
+  if (typeof navigator === "undefined") return "Browser";
+  return navigator.userAgent.slice(0, maxLength) || "Browser";
+};
 
 const base64Url = (input: ArrayBuffer | Uint8Array): string => {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
@@ -301,7 +305,7 @@ export class DeviceSessionManager {
       method: "POST",
       body: {
         appVersion: "client-web/0.2.0",
-        osVersion: navigator.userAgent.slice(0, 64),
+        osVersion: browserUserAgent(64),
         ...(activeCompanionSessionId ? { activeCompanionSessionId } : {}),
       },
     });
@@ -598,8 +602,9 @@ export class DeviceSessionManager {
       method: "POST",
       body: buildDeviceInstallationRegistration({
         installationPublicKeySpki: base64Url(spki),
-        manufacturer: navigator.vendor || "Browser",
-        model: navigator.userAgent.slice(0, 100),
+        manufacturer:
+          typeof navigator === "undefined" ? "Browser" : navigator.vendor || "Browser",
+        model: browserUserAgent(100),
         appVersion: "0.2.0",
       }),
       authenticated: false,
