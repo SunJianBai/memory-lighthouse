@@ -35,7 +35,9 @@ for secret_file in "$infra_env" "$api_env"; do
   if find "$secret_file" -maxdepth 0 -perm /0037 -print -quit | grep -q .; then
     fail "$secret_file must not be readable/writable by other users (use 0640 or stricter)"
   fi
-  if grep -Eq 'CHANGE_ME|REPLACE_WITH' "$secret_file"; then
+  if grep -Eq \
+    '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=.*(CHANGE_ME|REPLACE_WITH)' \
+    "$secret_file"; then
     fail "$secret_file still contains placeholder secrets"
   fi
 done
