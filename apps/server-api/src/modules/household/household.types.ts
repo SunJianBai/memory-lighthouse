@@ -76,7 +76,10 @@ export interface AuthorizationDecision {
 }
 
 export type HouseholdAction =
-  'VIEW_HOUSEHOLD' | 'MANAGE_HOUSEHOLD' | 'MANAGE_MEMBERS';
+  | 'VIEW_HOUSEHOLD'
+  | 'VIEW_PRIVACY_AUDIT'
+  | 'MANAGE_HOUSEHOLD'
+  | 'MANAGE_MEMBERS';
 
 export type RecipientAction =
   | 'VIEW_RECIPIENT'

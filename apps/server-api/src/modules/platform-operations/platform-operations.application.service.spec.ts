@@ -2,6 +2,7 @@ import { describe, expect, it, jest } from '@jest/globals';
 
 import type { PrismaService } from '../../infrastructure/database/prisma.service';
 import type { DataEncryptionPort } from '../memory/ports/data-encryption.port';
+import { NotificationApplicationService } from '../notification';
 import type { DevelopmentContentInspectionPolicy } from './config/development-content-inspection.policy';
 import { PlatformOperationsApplicationService } from './platform-operations.application.service';
 import {
@@ -22,7 +23,11 @@ const ID = {
   memory: '01K1K000000000000000000005',
   revision: '01K1K000000000000000000006',
   grant: '01K1K000000000000000000007',
+  owner: '01K1K000000000000000000012',
+  secondOwner: '01K1K000000000000000000013',
 };
+
+const INSPECTION_REASON = '验证模型是否正确使用可信记忆';
 
 const principal: PlatformPrincipal = {
   kind: 'USER',
@@ -36,8 +41,12 @@ const principal: PlatformPrincipal = {
 class InspectionPrismaHarness {
   readonly auditLogs: Row[] = [];
   readonly inspections: Row[] = [];
+  readonly notifications: Row[] = [];
+  readonly userNotifications: Row[] = [];
   consentDecision = 'GRANTED';
   grantOverrides: Row = {};
+  failNotificationWrite = false;
+  failReceiptWrite = false;
 
   readonly memory = {
     findFirst: jest.fn(async () => ({
@@ -104,7 +113,7 @@ class InspectionPrismaHarness {
       householdId: ID.household,
       recipientId: ID.recipient,
       dataCategoriesJson: ['MEMORY_REVISION'],
-      reason: '验证模型是否正确使用可信记忆',
+      reason: INSPECTION_REASON,
       ticketReference: 'DEV-42',
       status: 'ACTIVE',
       validFrom: new Date(Date.now() - 60_000),
@@ -133,6 +142,33 @@ class InspectionPrismaHarness {
     }),
   };
 
+  readonly householdMember = {
+    findMany: jest.fn(async () => [
+      { userId: ID.owner },
+      { userId: ID.secondOwner },
+    ]),
+  };
+
+  readonly notification = {
+    create: jest.fn(async ({ data }: Row) => {
+      if (this.failNotificationWrite) {
+        throw new Error('notification-write-failed');
+      }
+      this.notifications.push(data);
+      return data;
+    }),
+  };
+
+  readonly userNotification = {
+    createMany: jest.fn(async ({ data }: Row) => {
+      if (this.failReceiptWrite) {
+        throw new Error('receipt-write-failed');
+      }
+      this.userNotifications.push(...data);
+      return { count: data.length };
+    }),
+  };
+
   readonly auditLog = {
     findFirst: jest.fn(async () => {
       const previous = this.auditLogs.at(-1);
@@ -145,8 +181,25 @@ class InspectionPrismaHarness {
   };
 
   readonly $transaction = jest.fn(
-    async (work: (transaction: InspectionPrismaHarness) => Promise<unknown>) =>
-      work(this),
+    async (
+      work: (transaction: InspectionPrismaHarness) => Promise<unknown>,
+    ) => {
+      const lengths = {
+        auditLogs: this.auditLogs.length,
+        inspections: this.inspections.length,
+        notifications: this.notifications.length,
+        userNotifications: this.userNotifications.length,
+      };
+      try {
+        return await work(this);
+      } catch (error) {
+        this.auditLogs.length = lengths.auditLogs;
+        this.inspections.length = lengths.inspections;
+        this.notifications.length = lengths.notifications;
+        this.userNotifications.length = lengths.userNotifications;
+        throw error;
+      }
+    },
   );
 }
 
@@ -165,6 +218,10 @@ function makeService() {
     prisma as unknown as PrismaService,
     policy as unknown as DevelopmentContentInspectionPolicy,
     encryption as unknown as DataEncryptionPort,
+    new NotificationApplicationService(
+      prisma as unknown as PrismaService,
+      {} as never,
+    ),
   );
   return { prisma, policy, encryption, service };
 }
@@ -196,6 +253,28 @@ describe('PlatformOperationsApplicationService content inspection', () => {
     );
     expect(prisma.inspections).toHaveLength(1);
     expect(prisma.auditLogs).toHaveLength(1);
+    expect(prisma.notifications).toHaveLength(1);
+    expect(prisma.userNotifications).toEqual([
+      expect.objectContaining({ userId: ID.owner, readAt: null }),
+      expect.objectContaining({ userId: ID.secondOwner, readAt: null }),
+    ]);
+    expect(prisma.notifications[0]).toMatchObject({
+      householdId: ID.household,
+      recipientId: ID.recipient,
+      type: 'CONTENT_INSPECTION_PERFORMED',
+      templateVariablesJson: {
+        inspectionId: prisma.inspections[0].id,
+        category: 'MEMORY_REVISION',
+        reason: INSPECTION_REASON,
+        occurredAt: expect.any(String),
+      },
+    });
+    expect(Object.keys(prisma.notifications[0].templateVariablesJson)).toEqual([
+      'inspectionId',
+      'category',
+      'reason',
+      'occurredAt',
+    ]);
     expect(prisma.auditLogs[0]).toMatchObject({
       action: 'MEMORY_REVISION_ORIGINAL_READ',
       resourceId: ID.revision,
@@ -207,10 +286,35 @@ describe('PlatformOperationsApplicationService content inspection', () => {
     const persisted = JSON.stringify({
       inspection: prisma.inspections,
       audit: prisma.auditLogs,
+      notifications: prisma.notifications,
+      userNotifications: prisma.userNotifications,
     });
     expect(persisted).not.toContain('奶奶小时候住在江边');
     expect(Buffer.from(prisma.auditLogs[0].eventHash)).toHaveLength(32);
   });
+
+  it.each(['notification', 'receipt'] as const)(
+    'rolls back inspection and audit facts when the mandatory owner %s cannot be written',
+    async (failurePoint) => {
+      const { prisma, service } = makeService();
+      prisma.failNotificationWrite = failurePoint === 'notification';
+      prisma.failReceiptWrite = failurePoint === 'receipt';
+
+      await expect(
+        service.inspectMemoryRevision({
+          principal,
+          grantId: ID.grant,
+          memoryId: ID.memory,
+          request: { requestId: 'request-notification-failure' },
+        }),
+      ).rejects.toThrow(`${failurePoint}-write-failed`);
+
+      expect(prisma.inspections).toHaveLength(0);
+      expect(prisma.auditLogs).toHaveLength(0);
+      expect(prisma.notifications).toHaveLength(0);
+      expect(prisma.userNotifications).toHaveLength(0);
+    },
+  );
 
   it('chains each audit entry to the previous event hash', async () => {
     const { prisma, service } = makeService();
@@ -339,6 +443,11 @@ describe('PlatformOperationsApplicationService content inspection', () => {
     expect(prisma.inspections.at(-1)).toMatchObject({
       resourceType: 'CONVERSATION_UTTERANCE',
       resourceId: '01K1K000000000000000000010',
+    });
+    expect(prisma.notifications.at(-1)?.templateVariablesJson).toMatchObject({
+      inspectionId: prisma.inspections.at(-1)?.id,
+      category: 'CONVERSATION_UTTERANCE',
+      reason: INSPECTION_REASON,
     });
     expect(JSON.stringify(prisma.auditLogs)).not.toContain('今天阳光很好');
   });

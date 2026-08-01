@@ -95,8 +95,17 @@ export const App = ({ sensitiveAction }: { sensitiveAction: SensitiveFragmentAct
 
   useEffect(() => {
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+    const targetId = window.location.hash.replace(/^#/, "");
     window.requestAnimationFrame(() => {
+      const target = targetId
+        ? document.getElementById(targetId)
+        : null;
+      if (target) {
+        target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+        target.focus({ preventScroll: true });
+        return;
+      }
+      window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
       document.querySelector<HTMLElement>("#main-content")?.focus({ preventScroll: true });
     });
   }, [route]);

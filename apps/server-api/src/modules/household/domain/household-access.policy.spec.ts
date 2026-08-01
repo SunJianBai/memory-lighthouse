@@ -61,6 +61,30 @@ describe('HouseholdAccessPolicy', () => {
     ).rejects.toBeInstanceOf(HouseholdAccessDeniedException);
   });
 
+  it('exposes the privacy-audit semantic only to an active OWNER', async () => {
+    const owner = makeClient(['OWNER'], fullAuthority);
+    await expect(
+      policy.requireHouseholdAction(
+        owner as never,
+        'user-1',
+        'household-1',
+        'VIEW_PRIVACY_AUDIT',
+      ),
+    ).resolves.toMatchObject({ id: 'member-1' });
+
+    for (const roleCode of ['CAREGIVER', 'VIEWER']) {
+      const member = makeClient([roleCode], fullAuthority);
+      await expect(
+        policy.requireHouseholdAction(
+          member as never,
+          'user-1',
+          'household-1',
+          'VIEW_PRIVACY_AUDIT',
+        ),
+      ).rejects.toBeInstanceOf(HouseholdAccessDeniedException);
+    }
+  });
+
   it('allows a CAREGIVER only when the recipient Care Authority grants the action', async () => {
     const granted = makeClient(['CAREGIVER'], fullAuthority);
     await expect(

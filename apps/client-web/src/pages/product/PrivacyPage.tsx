@@ -1,8 +1,12 @@
 import {
+  Bell,
   Camera,
+  CheckCircle2,
+  CircleAlert,
   Database,
   Eye,
   FileClock,
+  History,
   Mic,
   PhoneCall,
   RefreshCw,
@@ -11,6 +15,7 @@ import {
   Video,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { useAdminAccessNotifications } from "../../api/admin-access-notifications";
 import { apiClient, readableError } from "../../api/api-client";
 import type { ConsentScope, ConsentStateView } from "../../api/types";
 import { useWorkspace } from "../../workspace/workspace-context";
@@ -35,6 +40,7 @@ const consentCatalog: Record<ConsentScope, {
 
 export const PrivacyPage = () => {
   const workspace = useWorkspace();
+  const adminAccesses = useAdminAccessNotifications();
   const [states, setStates] = useState<ConsentStateView[]>([]);
   const [loading, setLoading] = useState(false);
   const [busyScope, setBusyScope] = useState<ConsentScope | "">("");
@@ -82,10 +88,6 @@ export const PrivacyPage = () => {
     }
   };
 
-  if (!workspace.recipientId) {
-    return <section className="empty-resource-state"><ShieldCheck aria-hidden="true" size={34} /><h2>尚未选择陪伴对象</h2><p>授权按具体陪伴对象分别管理，不使用全局默认授权。</p></section>;
-  }
-
   return (
     <div className="privacy-api-page">
       <section className="privacy-principles">
@@ -93,25 +95,184 @@ export const PrivacyPage = () => {
         <div><h2>默认拒绝，逐项授权，随时撤回</h2><p>每次决定都会形成不可变授权事件。页面显示结果，真正的准入由服务器当前状态决定。</p></div>
         <button className="secondary-button" type="button" disabled={loading} onClick={() => void load()}><RefreshCw aria-hidden="true" size={18} /> 刷新状态</button>
       </section>
-      {error && <div className="inline-alert danger" role="alert"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
-      <section className="consent-grid" aria-label="授权项目">
-        {(Object.entries(consentCatalog) as Array<[ConsentScope, typeof consentCatalog[ConsentScope]]>).map(([scope, copy]) => {
-          const state = states.find((item) => item.scope === scope);
-          const granted = state?.granted ?? false;
-          const Icon = copy.icon;
-          return (
-            <article key={scope} className={`consent-card ${copy.sensitive ? "is-sensitive" : ""}`}>
-              <div className="consent-card-heading"><span><Icon aria-hidden="true" size={23} /></span><div><h2>{copy.title}</h2><p>{copy.description}</p></div></div>
-              <p className="consent-detail">{copy.detail}</p>
-              <div className="consent-card-footer">
-                <span className={`status-pill ${granted ? "success" : "neutral"}`}><span className="status-dot" /> {granted ? "已授权" : state?.decision === "REVOKED" ? "已撤回" : "未授权"}</span>
-                <button className={granted ? "danger-outline-button" : "primary-button"} type="button" disabled={loading || busyScope === scope} onClick={() => void decide(scope, !granted)}>{busyScope === scope ? "正在提交…" : granted ? "撤回" : "查看并授权"}</button>
+
+      <section
+        id="admin-accesses"
+        className="admin-access-panel"
+        aria-labelledby="admin-accesses-title"
+        tabIndex={-1}
+      >
+        <header className="admin-access-heading">
+          <span className="admin-access-heading-icon"><Bell aria-hidden="true" size={23} /></span>
+          <div>
+            <p className="eyebrow">站内隐私通知</p>
+            <h2 id="admin-accesses-title">管理员访问记录 / 站内通知</h2>
+            <p>查看开发期管理员何时、因何种目的读取了本家庭的记忆或对话原文。</p>
+          </div>
+          {adminAccesses.isOwner && (
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={adminAccesses.loading}
+              onClick={() => void adminAccesses.refresh()}
+            >
+              <RefreshCw
+                aria-hidden="true"
+                className={adminAccesses.loading ? "spin" : ""}
+                size={18}
+              />
+              {adminAccesses.loading ? "正在刷新…" : "刷新记录"}
+            </button>
+          )}
+        </header>
+
+        {!adminAccesses.isOwner ? (
+          <div className="admin-access-owner-only">
+            <ShieldCheck aria-hidden="true" size={24} />
+            <div>
+              <strong>仅家庭 OWNER 可见</strong>
+              <p>当前角色不含 OWNER。为隔离家庭隐私，本页不会请求或展示管理员访问记录。</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div
+              className={`admin-access-summary ${
+                adminAccesses.status === "error" ? "is-error" : ""
+              }`}
+              aria-live="polite"
+            >
+              <strong>
+                {adminAccesses.status === "error"
+                  ? "未读状态暂时未知"
+                  : adminAccesses.status === "loading"
+                    ? "正在核对未读通知…"
+                    : `${adminAccesses.page.unreadCount} 条未读通知`}
+              </strong>
+              <span>
+                {adminAccesses.page.items.length > 0
+                  ? `已加载 ${adminAccesses.page.items.length} 条管理员成功访问记录`
+                  : "访问记录按时间从新到旧显示"}
+              </span>
+            </div>
+
+            {adminAccesses.error && (
+              <div className="inline-alert danger" role="alert">
+                <span>{adminAccesses.error}</span>
+                <button type="button" onClick={() => void adminAccesses.refresh()}>重试</button>
               </div>
-              {state?.lastEvent && <small>最近决定：{new Date(state.lastEvent.occurredAt).toLocaleString("zh-CN")} · 文档 v{state.lastEvent.documentVersion.version}</small>}
-            </article>
-          );
-        })}
+            )}
+
+            {adminAccesses.loading && adminAccesses.page.items.length === 0 ? (
+              <div className="admin-access-state" role="status">
+                <span className="loading-beacon" aria-hidden="true" />
+                <span>正在读取访问记录…</span>
+              </div>
+            ) : adminAccesses.status === "error" && adminAccesses.page.items.length === 0 ? (
+              <div className="admin-access-state is-error">
+                <CircleAlert aria-hidden="true" size={28} />
+                <strong>暂时无法确认访问记录</strong>
+                <span>请检查网络后重试；在请求成功前，系统不会宣称没有未读通知。</span>
+              </div>
+            ) : adminAccesses.page.items.length === 0 ? (
+              <div className="admin-access-state">
+                <CheckCircle2 aria-hidden="true" size={28} />
+                <strong>暂无管理员访问记录</strong>
+                <span>管理员成功读取原文后，访问类别、原因与时间会显示在这里。</span>
+              </div>
+            ) : (
+              <ol className="admin-access-list" aria-label="管理员访问记录">
+                {adminAccesses.page.items.map((record) => {
+                  const unread = record.notificationState === "UNREAD";
+                  const historical = record.notificationState === "HISTORICAL";
+                  const markingRead = adminAccesses.markingReadIds.has(record.id);
+                  return (
+                    <li key={record.id} className={unread ? "is-unread" : ""}>
+                      <article>
+                        <header>
+                          <span className={`admin-access-status ${unread ? "is-unread" : historical ? "is-historical" : "is-read"}`}>
+                            {unread ? <Bell aria-hidden="true" size={15} /> : historical ? <History aria-hidden="true" size={15} /> : <CheckCircle2 aria-hidden="true" size={15} />}
+                            {unread ? "未读" : historical ? "历史记录" : "已读"}
+                          </span>
+                          <time dateTime={record.occurredAt}>{new Date(record.occurredAt).toLocaleString("zh-CN")}</time>
+                        </header>
+                        <dl>
+                          <div>
+                            <dt>实际类别</dt>
+                            <dd><strong>{record.categoryLabel}</strong><code>{record.category}</code></dd>
+                          </div>
+                          <div>
+                            <dt>访问原因</dt>
+                            <dd>{record.reason}</dd>
+                          </div>
+                        </dl>
+                        <footer>
+                          {unread ? (
+                            <button
+                              className="secondary-button admin-access-read-button"
+                              type="button"
+                              disabled={markingRead}
+                              onClick={() => void adminAccesses.markRead(record.id)}
+                            >
+                              <CheckCircle2 aria-hidden="true" size={17} />
+                              {markingRead ? "正在标记…" : "标为已读"}
+                            </button>
+                          ) : historical ? (
+                            <span>该记录形成于站内通知状态启用前，保留为历史访问凭证。</span>
+                          ) : (
+                            <span>已于 {record.readAt ? new Date(record.readAt).toLocaleString("zh-CN") : "此前"} 阅读</span>
+                          )}
+                        </footer>
+                      </article>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+
+            {adminAccesses.page.nextCursor && (
+              <div className="admin-access-more">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={adminAccesses.loadingMore}
+                  onClick={() => void adminAccesses.loadMore()}
+                >
+                  <History aria-hidden="true" size={18} />
+                  {adminAccesses.loadingMore ? "正在加载…" : "加载更早记录"}
+                </button>
+                <span>每次最多加载 20 条，已加载记录不会被后台刷新移除。</span>
+              </div>
+            )}
+          </>
+        )}
       </section>
+
+      {!workspace.recipientId ? (
+        <section className="empty-resource-state"><ShieldCheck aria-hidden="true" size={34} /><h2>尚未选择陪伴对象</h2><p>授权按具体陪伴对象分别管理，不使用全局默认授权。</p></section>
+      ) : (
+        <>
+          {error && <div className="inline-alert danger" role="alert"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
+          <section className="consent-grid" aria-label="授权项目">
+            {(Object.entries(consentCatalog) as Array<[ConsentScope, typeof consentCatalog[ConsentScope]]>).map(([scope, copy]) => {
+              const state = states.find((item) => item.scope === scope);
+              const granted = state?.granted ?? false;
+              const Icon = copy.icon;
+              return (
+                <article key={scope} className={`consent-card ${copy.sensitive ? "is-sensitive" : ""}`}>
+                  <div className="consent-card-heading"><span><Icon aria-hidden="true" size={23} /></span><div><h2>{copy.title}</h2><p>{copy.description}</p></div></div>
+                  <p className="consent-detail">{copy.detail}</p>
+                  <div className="consent-card-footer">
+                    <span className={`status-pill ${granted ? "success" : "neutral"}`}><span className="status-dot" /> {granted ? "已授权" : state?.decision === "REVOKED" ? "已撤回" : "未授权"}</span>
+                    <button className={granted ? "danger-outline-button" : "primary-button"} type="button" disabled={loading || busyScope === scope} onClick={() => void decide(scope, !granted)}>{busyScope === scope ? "正在提交…" : granted ? "撤回" : "查看并授权"}</button>
+                  </div>
+                  {state?.lastEvent && <small>最近决定：{new Date(state.lastEvent.occurredAt).toLocaleString("zh-CN")} · 文档 v{state.lastEvent.documentVersion.version}</small>}
+                </article>
+              );
+            })}
+          </section>
+        </>
+      )}
     </div>
   );
 };

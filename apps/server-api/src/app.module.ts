@@ -9,6 +9,7 @@ import { DeviceActivationModule } from './modules/device-activation/device-activ
 import { HouseholdModule } from './modules/household/household.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { MemoryModule } from './modules/memory/memory.module';
+import { NotificationModule } from './modules/notification';
 import { PlatformOperationsModule } from './modules/platform-operations/platform-operations.module';
 import { RealtimeCommunicationModule } from './modules/realtime-communication/realtime-communication.module';
 
@@ -25,6 +26,7 @@ import { RealtimeCommunicationModule } from './modules/realtime-communication/re
     DeviceActivationModule,
     ConsentModule,
     MemoryModule,
+    NotificationModule,
     CareWorkflowModule,
     CompanionSessionModule,
     RealtimeCommunicationModule,

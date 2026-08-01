@@ -11,6 +11,7 @@ import { utteranceEncryptionContext } from '../companion-session/companion-sessi
 import { newUlid } from '../identity/domain/ulid';
 import { DATA_ENCRYPTION_PORT } from '../memory/memory.constants';
 import type { DataEncryptionPort } from '../memory/ports/data-encryption.port';
+import { NotificationApplicationService } from '../notification';
 import { DevelopmentContentInspectionPolicy } from './config/development-content-inspection.policy';
 import {
   AUDIT_SERIALIZABLE_RETRY_LIMIT,
@@ -58,6 +59,7 @@ interface AuditAppendInput {
 }
 
 interface InspectionAuditInput extends AuditAppendInput {
+  householdId: string;
   grant: Pick<
     InspectionGrant,
     'id' | 'reason' | 'approvedByUserId' | 'ticketReference'
@@ -71,6 +73,7 @@ export class PlatformOperationsApplicationService {
     private readonly inspectionPolicy: DevelopmentContentInspectionPolicy,
     @Inject(DATA_ENCRYPTION_PORT)
     private readonly encryption: DataEncryptionPort,
+    private readonly notifications: NotificationApplicationService,
   ) {}
 
   async dashboard(): Promise<Record<string, unknown>> {
@@ -966,9 +969,10 @@ export class PlatformOperationsApplicationService {
   ): Promise<InspectionWatermark> {
     const occurredAt = new Date();
     const requestId = this.auditRequestId(input.request.requestId);
+    const inspectionId = newUlid(occurredAt.getTime());
     await transaction.contentInspection.create({
       data: {
-        id: newUlid(occurredAt.getTime()),
+        id: inspectionId,
         grantId: input.grant.id,
         operatorUserId: input.principal.userId,
         resourceType: input.resourceType,
@@ -979,6 +983,14 @@ export class PlatformOperationsApplicationService {
       },
     });
     await this.appendAudit(transaction, input, occurredAt);
+    await this.notifications.enqueueInspectionPerformed(transaction, {
+      inspectionId,
+      householdId: input.householdId,
+      recipientId: input.recipientId,
+      category: input.resourceType,
+      reason: input.grant.reason,
+      occurredAt,
+    });
     return {
       operatorUserId: input.principal.userId,
       grantId: input.grant.id,

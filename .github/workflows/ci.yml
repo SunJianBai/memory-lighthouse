@@ -64,6 +64,9 @@ jobs:
       - name: Build client web
         run: npm run build --workspace @memory-lighthouse/client-web
 
+      - name: Test admin web
+        run: npm run test --workspace @memory-lighthouse/admin-web
+
       - name: Type-check admin web
         run: npm run typecheck --workspace @memory-lighthouse/admin-web
 

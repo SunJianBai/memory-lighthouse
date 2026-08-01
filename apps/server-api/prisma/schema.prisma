@@ -41,6 +41,7 @@ model User {
   approvedInspectionGrants   InspectionGrant[]        @relation("InspectionGrantApprover")
   operatedContentInspections ContentInspection[]      @relation("ContentInspectionOperator")
   notificationEndpoints      NotificationEndpoint[]
+  userNotifications          UserNotification[]
 
   @@index([status, createdAt])
   @@map("users")
@@ -1278,13 +1279,28 @@ model Notification {
   dedupeKey             String   @map("dedupe_key") @db.VarChar(128)
   createdAt             DateTime @default(now()) @map("created_at") @db.DateTime(3)
 
-  household  Household              @relation(fields: [householdId], references: [id], onDelete: Restrict)
-  recipient  CareRecipient?         @relation(fields: [recipientId], references: [id], onDelete: SetNull)
-  deliveries NotificationDelivery[]
+  household         Household              @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  recipient         CareRecipient?         @relation(fields: [recipientId], references: [id], onDelete: SetNull)
+  deliveries        NotificationDelivery[]
+  userNotifications UserNotification[]
 
   @@unique([householdId, dedupeKey])
   @@index([scheduledAt])
   @@map("notifications")
+}
+
+model UserNotification {
+  notificationId String    @map("notification_id") @db.Char(26)
+  userId         String    @map("user_id") @db.Char(26)
+  readAt         DateTime? @map("read_at") @db.DateTime(3)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([notificationId, userId])
+  @@index([userId, readAt, createdAt])
+  @@map("user_notifications")
 }
 
 model NotificationDelivery {

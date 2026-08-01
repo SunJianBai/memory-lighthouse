@@ -277,7 +277,7 @@ onBeforeUnmount(clearInspectionResult)
       <AppIcon name="warning" :size="26" />
       <div>
         <strong>每次查看都会留下操作者、授权、资源与请求号水印，并写入哈希链审计日志。</strong>
-        <p>必须存在家庭/长者当前同意，且申请人不能自批。页面不会持久化原文，并在 60 秒后自动清屏。</p>
+        <p>必须存在家庭/长者当前同意，且申请人不能自批。成功查看后，系统会向该家庭的 OWNER 发送站内通知；页面不会持久化原文，并在 60 秒后自动清屏。</p>
       </div>
     </section>
 
@@ -323,7 +323,7 @@ onBeforeUnmount(clearInspectionResult)
           </fieldset>
           <label class="field fieldset-span">
             <span>具体原因 <b aria-hidden="true">*</b></span>
-            <textarea v-model="requestForm.reason" required maxlength="1000" rows="3" placeholder="说明待验证的模型行为或问题，不要填写无关隐私。"></textarea>
+            <textarea v-model="requestForm.reason" required maxlength="1000" rows="3" placeholder="说明待验证的模型行为或问题；该原因会对家庭 OWNER 可见，请勿填写原文、内部工单号或无关隐私。"></textarea>
           </label>
           <label class="field">
             <span>工单/实验编号</span>
@@ -412,7 +412,7 @@ onBeforeUnmount(clearInspectionResult)
       >
         <div class="section-heading">
           <span class="step-number step-number--danger">3</span>
-          <div><h2 id="original-title">按资源查看原文</h2><p>读取动作本身会立即产生审计记录。</p></div>
+          <div><h2 id="original-title">按资源查看原文</h2><p>读取动作会立即产生审计记录；成功读取还会通知该家庭的所有 OWNER。</p></div>
         </div>
 
         <form class="form-grid" @submit.prevent="inspectOriginal">
@@ -456,6 +456,13 @@ onBeforeUnmount(clearInspectionResult)
         </form>
 
         <article v-if="inspectionResult" class="original-result" aria-live="polite">
+          <div class="inspection-family-notice" role="status">
+            <AppIcon name="check" :size="20" />
+            <div>
+              <strong>已通知家庭 OWNER</strong>
+              <p>本次成功访问的时间、实际数据类别与申请原因已进入该家庭的站内通知记录。</p>
+            </div>
+          </div>
           <div class="original-result__watermark" aria-hidden="true">
             {{ inspectionResult.value.watermark.operatorUserId }} · {{ inspectionResult.value.watermark.grantId }} · {{ inspectionResult.value.watermark.requestId }}
           </div>

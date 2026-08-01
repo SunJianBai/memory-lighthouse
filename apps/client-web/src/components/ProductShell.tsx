@@ -1,8 +1,10 @@
 import {
+  Bell,
   BellRing,
   BookHeart,
   CalendarDays,
   ChevronDown,
+  CircleAlert,
   House,
   LogOut,
   Menu,
@@ -11,7 +13,11 @@ import {
   Settings,
   ShieldCheck,
 } from "lucide-react";
-import type { PropsWithChildren } from "react";
+import type { MouseEvent as ReactMouseEvent, PropsWithChildren } from "react";
+import {
+  AdminAccessNotificationsProvider,
+  useAdminAccessNotificationsController,
+} from "../api/admin-access-notifications";
 import { hrefFor, navigate, type ClientRoute } from "../app/navigation";
 import { useAuth } from "../auth/auth-context";
 import { useWorkspace } from "../workspace/workspace-context";
@@ -47,9 +53,44 @@ export const ProductShell = ({
   const { user, logout } = useAuth();
   const workspace = useWorkspace();
   const email = user?.identities.find((identity) => identity.type === "EMAIL");
+  const adminAccessNotifications = useAdminAccessNotificationsController(
+    workspace.householdId,
+    workspace.household?.roleCodes,
+  );
+  const adminAccessesHref = `${hrefFor("workspace-privacy")}#admin-accesses`;
+  const adminAccessNotificationLabel =
+    adminAccessNotifications.status === "error"
+      ? "隐私通知状态未知：读取失败，打开管理员访问记录后可重试"
+      : adminAccessNotifications.status === "loading"
+        ? "正在检查隐私通知，打开管理员访问记录"
+        : adminAccessNotifications.page.unreadCount > 0
+          ? `隐私通知：${adminAccessNotifications.page.unreadCount} 条未读，打开管理员访问记录`
+          : "隐私通知：暂无未读，打开管理员访问记录";
+
+  const openAdminAccesses = (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    void adminAccessNotifications.refresh();
+    window.history.pushState(null, "", adminAccessesHref);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+
+    let attempts = 0;
+    const revealSection = () => {
+      const section = document.getElementById("admin-accesses");
+      if (section) {
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        section.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+        section.focus({ preventScroll: true });
+        return;
+      }
+      attempts += 1;
+      if (attempts < 5) window.requestAnimationFrame(revealSection);
+    };
+    window.requestAnimationFrame(revealSection);
+  };
 
   return (
-    <div className="product-shell">
+    <AdminAccessNotificationsProvider value={adminAccessNotifications}>
+      <div className="product-shell">
       <aside className="product-sidebar" aria-label="家属工作区导航">
         <button
           className="brand-button product-brand"
@@ -143,6 +184,34 @@ export const ProductShell = ({
             </label>
           </div>
           <div className="account-brief">
+            {adminAccessNotifications.isOwner && (
+              <a
+                className={`privacy-notification-button ${
+                  adminAccessNotifications.status === "error" ? "is-error" : ""
+                }`}
+                href={adminAccessesHref}
+                aria-label={adminAccessNotificationLabel}
+                aria-busy={adminAccessNotifications.status === "loading"}
+                title={adminAccessNotificationLabel}
+                onClick={openAdminAccesses}
+              >
+                {adminAccessNotifications.status === "error" ? (
+                  <CircleAlert aria-hidden="true" size={20} />
+                ) : (
+                  <Bell aria-hidden="true" size={20} />
+                )}
+                {adminAccessNotifications.status === "error" ? (
+                  <span className="privacy-notification-badge is-error" aria-hidden="true">!</span>
+                ) : adminAccessNotifications.status === "ready" &&
+                  adminAccessNotifications.page.unreadCount > 0 ? (
+                    <span className="privacy-notification-badge" aria-hidden="true">
+                      {adminAccessNotifications.page.unreadCount > 99
+                        ? "99+"
+                        : adminAccessNotifications.page.unreadCount}
+                    </span>
+                  ) : null}
+              </a>
+            )}
             <span className={email?.verifiedAt ? "verified" : "unverified"}>
               {email?.verifiedAt ? "邮箱已验证" : "邮箱待验证"}
             </span>
@@ -216,6 +285,7 @@ export const ProductShell = ({
           </details>
         </nav>
       </div>
-    </div>
+      </div>
+    </AdminAccessNotificationsProvider>
   );
 };
