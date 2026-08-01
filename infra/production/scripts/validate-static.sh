@@ -46,10 +46,14 @@ grep -Fq 'ENABLE_DEVELOPMENT_CONTENT_INSPECTION: "false"' <<<"$resolved" || {
 printf 'Static deployment invariants: OK\n'
 
 if command -v caddy >/dev/null 2>&1; then
-  caddy validate \
+  caddy_validation_log="$(mktemp "${TMPDIR:-/tmp}/openbmb-caddy-validate.XXXXXX.log")"
+  trap 'rm -f -- "$caddy_validation_log"' EXIT
+  CADDY_ACCESS_LOG="$caddy_validation_log" caddy validate \
     --config "$production_dir/caddy/Caddyfile" \
     --adapter caddyfile \
     --envfile "$production_dir/caddy/openbmb.env.example"
+  rm -f -- "$caddy_validation_log"
+  trap - EXIT
   printf 'Caddy configuration: OK\n'
 else
   printf 'Caddy binary absent; Caddy validation skipped (Compose validation still passed).\n'

@@ -5,7 +5,7 @@
 
 {$OPENBMB_DOMAIN:sun227454.online} {
 	log {
-		output file /var/log/caddy/openbmb-access.log {
+		output file {$CADDY_ACCESS_LOG:/var/log/caddy/openbmb-access.log} {
 			roll_size 20MiB
 			roll_keep 5
 			roll_keep_for 168h
