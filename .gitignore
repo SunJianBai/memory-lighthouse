@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+.env.local
+coverage/
+playwright-report/
+test-results/
+tmp/
+*.log
+.DS_Store
+
+# User-generated sensitive demo data stays in the browser and must never be committed.
+data/
+uploads/
+recordings/
