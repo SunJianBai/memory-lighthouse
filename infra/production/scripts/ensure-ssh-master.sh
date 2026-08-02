@@ -15,8 +15,8 @@ base_delay_seconds="${3:-5}"
   printf 'SSH host alias is invalid\n' >&2
   exit 1
 }
-[[ "$attempts" =~ ^[1-9][0-9]*$ && "$attempts" -le 10 ]] || {
-  printf 'SSH master attempt count must be between 1 and 10\n' >&2
+[[ "$attempts" =~ ^[1-9][0-9]*$ && "$attempts" -le 6 ]] || {
+  printf 'SSH master attempt count must be between 1 and 6\n' >&2
   exit 1
 }
 [[ "$base_delay_seconds" =~ ^(0|[1-9][0-9]*)$ && "$base_delay_seconds" -le 30 ]] || {

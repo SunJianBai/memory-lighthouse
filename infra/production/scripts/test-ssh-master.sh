@@ -100,8 +100,14 @@ set +e
 ssh -T -F "$fail_closed_config" tx4h4g-prod true \
   > "$test_root/fail-closed.out" 2> "$test_root/fail-closed.err"
 fail_closed_status=$?
+printf 'fail closed\n' > "$test_root/scp-source"
+scp -F "$fail_closed_config" "$test_root/scp-source" \
+  tx4h4g-prod:must-not-transfer \
+  > "$test_root/scp-fail-closed.out" 2> "$test_root/scp-fail-closed.err"
+scp_fail_closed_status=$?
 set -e
 [[ "$fail_closed_status" -ne 0 ]]
+[[ "$scp_fail_closed_status" -ne 0 ]]
 wait "$listener_pid"
 listener_pid=''
 [[ "$(cat "$guard_connection_count_file")" == 0 ]]
@@ -224,5 +230,14 @@ OPENBMB_SSH_COMMAND="$fake_ssh" \
 [[ "$(cat "$attempt_file")" == 2 ]]
 grep -Fq 'Reused authenticated SSH master for fake-prod.' "$test_root/reuse.out"
 [[ ! -s "$test_root/reuse.err" ]]
+set +e
+OPENBMB_SSH_COMMAND="$fake_ssh" \
+  bash "$script_dir/ensure-ssh-master.sh" fake-prod 7 0 \
+  > "$test_root/invalid-attempts.out" 2> "$test_root/invalid-attempts.err"
+invalid_attempts_status=$?
+set -e
+[[ "$invalid_attempts_status" -ne 0 ]]
+[[ "$(cat "$attempt_file")" == 2 ]]
+grep -Fq 'between 1 and 6' "$test_root/invalid-attempts.err"
 
 printf 'Pinned SSH master retry fixtures: OK\n'
