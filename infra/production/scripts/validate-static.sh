@@ -399,6 +399,8 @@ grep -Fq 'if sudo -n test -e "$release_root" || sudo -n test -L "$release_root";
 grep -Fq 'sudo -n test ! -e "$incoming"' "$delivery_workflow"
 grep -Fq 'sudo -n env OPENBMB_DOMAIN=sun227454.online bash' "$delivery_workflow"
 grep -Fq 'test "${docker_free_kib:-0}" -ge 4194304' "$delivery_workflow"
+grep -Fq 'ConnectTimeout 20' "$delivery_workflow"
+grep -Fq 'ConnectionAttempts 6' "$delivery_workflow"
 grep -Fq 'bash infra/production/scripts/transfer-release-images.sh \' "$delivery_workflow"
 ! grep -Fq 'pull-release-images.sh' "$delivery_workflow"
 ! grep -Fq 'printf '\''%s\n'\'' "$GHCR_TOKEN" | ssh' "$delivery_workflow"

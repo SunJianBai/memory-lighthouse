@@ -82,6 +82,8 @@ jobs:
             IdentityFile ~/.ssh/openbmb_deploy
             IdentitiesOnly yes
             BatchMode yes
+            ConnectTimeout 20
+            ConnectionAttempts 6
             StrictHostKeyChecking yes
             UserKnownHostsFile ~/.ssh/known_hosts
             GlobalKnownHostsFile /dev/null
