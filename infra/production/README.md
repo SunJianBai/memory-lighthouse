@@ -208,13 +208,15 @@ sudo bash /opt/openbmb/releases/<release-id>/infra/production/scripts/verify-smt
 
 ### 推荐：GitHub Runner 构建并经 SSH 传送
 
-TX4H4G 所在网络不能可靠访问 Docker Hub，因此仓库的
+TX4H4G 所在网络不能可靠持续拉取 GHCR/Docker Hub 大镜像，因此仓库的
 `.github/workflows/production-delivery.yml` 在已通过 CI 的 GitHub Runner 上构建
-四个应用镜像、拉取本文件锁定的基础设施镜像，再把十个精确镜像作为私有、按发布号
-隔离的传输 tag 推送到 GHCR。TX4H4G 通过固定主机密钥的 SSH 接收本次工作流短期
-Token，从 GHCR 按摘要拉取后写入 Compose 使用的 release-scoped 本地 tag；Token 只进入 `docker login`
-标准输入并使用临时 `DOCKER_CONFIG`，完成后立即注销和清理。服务器不会从第三方
-公共加速器或 Docker Hub 拉取镜像。
+四个应用镜像、拉取本文件锁定的基础设施镜像，并把十个精确镜像推送到 GHCR 留存
+registry digest 溯源。实际交付通过固定主机密钥的 SSH 完成，不把 GHCR Token 传给
+服务器：服务器先按精确 image ID 复用已有内容；仅对缺失镜像逐个执行压缩、32 MiB
+分块、块级与整包 SHA-256 校验和 `docker load`。失败重跑会从内容寻址 cache 复用已经
+验证的块，session 元数据按 Actions run/attempt 隔离；每个镜像导入后立即清理压缩块，
+全程至少保留 4 GiB Docker 磁盘余量。服务器不会从第三方公共加速器或 Docker Hub
+拉取镜像。
 
 仓库的 `production` Environment 需要两个 Base64 编码的 Actions Secret：
 `TX4H4G_SSH_PRIVATE_KEY_BASE64` 和 `TX4H4G_KNOWN_HOSTS_BASE64`。仓库变量
@@ -225,11 +227,13 @@ Token，从 GHCR 按摘要拉取后写入 Compose 使用的 release-scoped 本�
 部署。
 
 工作流使用确定性的 `git-<12位提交哈希>` 发布号，并在发布目录写入完整提交哈希、
-源码归档 SHA-256、GHCR transport digest 清单和服务器本地镜像 ID 清单。发布树由 `root` 拥有且不可被组或其他用户
+源码归档 SHA-256、GHCR transport digest 溯源清单和服务器本地镜像 ID 清单。发布树由 `root` 拥有且不可被组或其他用户
 写入；容器必须读取的 Redis/LiveKit 配置只获得只读例外。新发布先传送镜像，再在
 临时目录核对 Compose 实际引用的全部 10 个镜像 ID 和四个应用镜像的 OCI revision，
 通过后才原子落盘。同一提交重跑时会先验证并复用已有不可变发布，防止重建镜像覆盖
-已有 tag。`deploy-release.sh` 强制要求
+已有 tag。SSH 传输使用独立 lease 防止人工任务与残留连接并发写 cache；最终 local-ID
+清单只有在十个镜像全部复核后才原子生成，旧 attempt 元数据不会阻塞新 attempt。
+`deploy-release.sh` 强制要求
 `OPENBMB_SKIP_IMAGE_BUILD=true` 且上述完整校验通过；TX4H4G 不提供主机本地生产构建回退。所有生产
 `compose up/run` 都使用 `--pull never`，不会在主机上回退访问 Docker Hub。
 

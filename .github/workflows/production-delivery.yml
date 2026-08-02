@@ -34,7 +34,7 @@ jobs:
        vars.PRODUCTION_DEPLOY_ENABLED == 'true')
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Check out the exact validated commit
@@ -109,7 +109,7 @@ jobs:
              docker_root="$(docker info --format "{{.DockerRootDir}}")"
              docker_free_kib="$(sudo -n df -Pk "$docker_root" | awk "NR == 2 { print \$4 }")"
              release_free_kib="$(sudo -n df -Pk /opt/openbmb/releases | awk "NR == 2 { print \$4 }")"
-            test "${docker_free_kib:-0}" -ge 6291456
+            test "${docker_free_kib:-0}" -ge 4194304
             test "${release_free_kib:-0}" -ge 1048576'
 
       - name: Reuse only a fully verified immutable release
@@ -247,42 +247,19 @@ jobs:
           trap - EXIT
           cleanup
 
-      - name: Pull exact release images from GHCR on the host
+      - name: Transfer exact release images over resumable SSH
         if: env.ALREADY_STAGED != 'true'
         shell: bash
-        env:
-          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$GITHUB_ACTOR" =~ ^[A-Za-z0-9_-]+(\[bot\])?$ ]]
-          transfer_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          remote_dir=".openbmb-transfer/$transfer_id"
-          remote_helper="$remote_dir/pull-release-images.sh"
-          remote_image_set="$remote_dir/release-image-set.sh"
-          transport_manifest_name="openbmb-transport-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
-          transport_manifest="$RUNNER_TEMP/$transport_manifest_name"
           manifest_name="openbmb-images-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
-          remote_manifest="$remote_dir/$manifest_name"
           host_image_manifest="$RUNNER_TEMP/$manifest_name"
-          [[ -f "$transport_manifest" && ! -L "$transport_manifest" ]]
           source infra/production/scripts/release-image-set.sh
           openbmb_load_release_image_set "$RELEASE_ID"
           required_images=("${OPENBMB_REQUIRED_IMAGES[@]}")
-          cleanup_remote() {
-            ssh tx4h4g-prod \
-              "rm -f -- \"\$HOME/$remote_helper\" \"\$HOME/$remote_image_set\" \"\$HOME/$remote_dir/$transport_manifest_name\" \"\$HOME/$remote_manifest\"; rmdir -- \"\$HOME/$remote_dir\" 2>/dev/null || true" \
-              >/dev/null 2>&1 || true
-          }
-          trap cleanup_remote EXIT
-          ssh tx4h4g-prod \
-            "set -eu; install -d -m 0700 \"\$HOME/.openbmb-transfer\" \"\$HOME/$remote_dir\""
-          scp infra/production/scripts/pull-release-images.sh \
-            infra/production/scripts/release-image-set.sh "$transport_manifest" \
-            "tx4h4g-prod:$remote_dir/"
-          printf '%s\n' "$GHCR_TOKEN" | ssh tx4h4g-prod \
-            "cd \"\$HOME/$remote_dir\"; chmod 0700 pull-release-images.sh; bash ./pull-release-images.sh '$RELEASE_ID' '$DELIVERY_IMAGE' '$GITHUB_ACTOR' '$transport_manifest_name' '$manifest_name'"
-          scp "tx4h4g-prod:$remote_manifest" "$host_image_manifest"
-          chmod 0600 "$host_image_manifest"
+          bash infra/production/scripts/transfer-release-images.sh \
+            "$RELEASE_ID" "$SOURCE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            tx4h4g-prod "$host_image_manifest"
           [[ "$(wc -l < "$host_image_manifest")" -eq "${#required_images[@]}" ]]
           while read -r image_name image_id trailing; do
             [[ -n "$image_name" && "$image_id" =~ ^sha256:[0-9a-f]{64}$ && -z "${trailing:-}" ]]
@@ -290,10 +267,8 @@ jobs:
           for required_image in "${required_images[@]}"; do
             [[ "$(awk -v image="$required_image" '$1 == image { count += 1 } END { print count + 0 }' "$host_image_manifest")" -eq 1 ]]
           done
-          trap - EXIT
-          cleanup_remote
           ssh tx4h4g-prod \
-            "test ! -e \"\$HOME/$remote_dir\" && test ! -L \"\$HOME/$remote_dir\""
+            "test ! -e \"\$HOME/.openbmb-transfer/direct-v2/sessions/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\" && test ! -L \"\$HOME/.openbmb-transfer/direct-v2/sessions/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\""
 
       - name: Stage exact source release
         if: env.ALREADY_STAGED != 'true'
