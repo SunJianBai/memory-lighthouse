@@ -17,7 +17,8 @@
      "$(sha256sum "$openbmb_backup_dir/SHA256SUMS" | awk '{ print $1 }')"
    (cd "$openbmb_backup_dir" && sha256sum --check SHA256SUMS)
    ```
-2. 记录当前 `/opt/openbmb/current`、`current-app`、security floor、pending、镜像 ID 和卷名。
+2. 记录当前 `/opt/openbmb/current`、`current-app`、security floor、pending、镜像 ID 和卷名，
+   包括可重建缓存卷 `openbmb_clamav_database`。
    只有不存在 pending 时才可再做一次普通现状备份；pending 存在时备份脚本会按设计拒绝，
    应保留状态文件并先完成迁移恢复判断。
 3. 停止 API，避免恢复过程中产生新写入：
@@ -26,8 +27,34 @@
    sudo systemctl stop openbmb
    ```
 
+   当前 stop 语义只停止 API、两个 Web 和 LiveKit；MySQL、Redis、MinIO、ClamAV/FreshClam
+   继续运行。恢复人员必须单独确认没有 API 写入，不能把 systemd 的 stopped 状态误认为
+   所有数据容器都已停止。
+
 4. 以单独 Compose project/新卷做演练；验证数据库行数、登录、资源下载后，
    才能考虑覆盖正式卷。
+
+## ClamAV 签名缓存
+
+`openbmb_clamav_database` 只保存公开、可重新下载的病毒签名，不属于 MySQL/MinIO 业务
+恢复点，也不进入 `backup.sh`。不要用旧业务备份覆盖签名；若该卷损坏，应在核对精确卷名
+后按全新缓存处理，让固定版本的 ClamAV 镜像通过 FreshClam 重建。
+
+恢复业务数据后、启动任何 API 前，必须先协调当前栈的扫描器并执行真实扫描探针：
+
+```bash
+sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env \
+  OPENBMB_API_ENV_FILE=/etc/openbmb/api.env \
+  bash /opt/openbmb/current/infra/production/scripts/compose.sh \
+  up -d --pull never --no-build clamav
+sudo OPENBMB_API_ENV_FILE=/etc/openbmb/api.env \
+  bash /opt/openbmb/current/infra/production/scripts/clamav-watchdog.sh
+```
+
+只有 `PING`、空内容 `INSTREAM`、FreshClam 进程、磁盘 daily 签名与 clamd `VERSION`
+加载版本/日期全部通过后，才可继续启动 API；watchdog 会给首次签名加载和正常 reload
+有界宽限，不能证明签名新鲜时会停止扫描器而不是放行陈旧 CLEAN 结果。`13310/TCP`
+始终只绑定宿主回环，不应为恢复操作临时开放公网。
 
 ## Security floor 恢复
 

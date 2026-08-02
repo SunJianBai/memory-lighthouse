@@ -90,6 +90,11 @@ deployment_complete=false
 deployment_mutated=false
 deployment_resumed=false
 irreversible_boundary_started=false
+clamav_target_attempted=false
+clamav_target_attested=false
+clamav_container_preexisted=false
+old_stack_has_clamav=false
+clamav_recovery_attested=false
 if bash "$security_epoch_script" pending-exists; then
   # A resumed pending boundary may already have rotated credentials or changed
   # schema. Without a durable phase proof, recovery must assume it did.
@@ -112,10 +117,101 @@ wait_for_recovery_livekit() {
   return 1
 }
 
+compose_services_for_stack() {
+  local stack_root="$1"
+  local application_release="$2"
+  local stack_id
+  stack_id="$(basename -- "$stack_root")"
+
+  OPENBMB_RELEASE="$stack_id" \
+    OPENBMB_APPLICATION_RELEASE="$application_release" \
+    OPENBMB_INFRASTRUCTURE_RELEASE="$stack_id" \
+    bash "$stack_root/infra/production/scripts/compose.sh" config --services
+}
+
+old_stack_services=''
+if [[ -n "$old_release" ]]; then
+  old_id="$(basename -- "$old_release")"
+  old_compose_application_release="${old_application_release:-$old_id}"
+  if ! old_stack_services="$(
+    compose_services_for_stack "$old_release" "$old_compose_application_release"
+  )"; then
+    printf 'Unable to render the current stack service model before deployment.\n' >&2
+    exit 1
+  fi
+  if grep -Fxq clamav <<<"$old_stack_services"; then
+    old_stack_has_clamav=true
+  fi
+fi
+
+restore_prechange_clamav() {
+  local active_stack="$1"
+  local old_clamav_watchdog
+  local restore_id
+  local restore_application_release
+
+  [[ "$clamav_target_attempted" == true ]] || return 0
+  if [[ "$active_stack" == "$release_root" ]]; then
+    clamav_recovery_attested="$clamav_target_attested"
+    return 0
+  fi
+
+  if [[ "$old_stack_has_clamav" == true ]]; then
+    restore_id="$(basename -- "$old_release")"
+    restore_application_release="${old_application_release:-$restore_id}"
+    printf 'Restoring the previous release ClamAV image after deployment failure.\n' >&2
+    old_clamav_watchdog="$old_release/infra/production/scripts/clamav-watchdog.sh"
+    if [[ ! -f "$old_clamav_watchdog" ]]; then
+      printf 'WARNING: the previous ClamAV stack has no full freshness watchdog; keeping it stopped.\n' >&2
+      OPENBMB_RELEASE="$restore_id" \
+        OPENBMB_APPLICATION_RELEASE="$restore_application_release" \
+        OPENBMB_INFRASTRUCTURE_RELEASE="$restore_id" \
+        bash "$old_release/infra/production/scripts/compose.sh" \
+        stop --timeout 90 clamav || true
+    elif OPENBMB_RELEASE="$restore_id" \
+         OPENBMB_APPLICATION_RELEASE="$restore_application_release" \
+         OPENBMB_INFRASTRUCTURE_RELEASE="$restore_id" \
+         bash "$old_release/infra/production/scripts/compose.sh" \
+         up -d --pull never --no-build clamav && \
+       OPENBMB_RELEASE="$restore_id" \
+         OPENBMB_APPLICATION_RELEASE="$restore_application_release" \
+         OPENBMB_INFRASTRUCTURE_RELEASE="$restore_id" \
+         bash "$old_clamav_watchdog"; then
+      clamav_recovery_attested=true
+      printf 'The previous release ClamAV scanner is fully attested again.\n' >&2
+    else
+      printf 'WARNING: the previous ClamAV scanner could not be fully attested; keeping it stopped.\n' >&2
+      OPENBMB_RELEASE="$restore_id" \
+        OPENBMB_APPLICATION_RELEASE="$restore_application_release" \
+        OPENBMB_INFRASTRUCTURE_RELEASE="$restore_id" \
+        bash "$old_release/infra/production/scripts/compose.sh" \
+        stop --timeout 90 clamav || true
+    fi
+  elif [[ -n "$old_application_target" ]]; then
+    # A pre-ClamAV release cannot recreate this service. Keep the verified
+    # target scanner available so the still-active application can use the
+    # newly configured loopback endpoint during a first-time upgrade.
+    if [[ "$clamav_target_attested" == true ]] && \
+       bash "$script_dir/verify-clamav.sh" --once; then
+      clamav_recovery_attested=true
+      printf 'Keeping the attested target ClamAV scanner for the active pre-ClamAV application stack.\n' >&2
+    else
+      printf 'WARNING: target ClamAV lacks full attestation; keeping scans unavailable.\n' >&2
+      bash "$script_dir/compose.sh" stop --timeout 90 clamav || true
+    fi
+  elif [[ "$clamav_container_preexisted" == false ]]; then
+    printf 'Removing the newly created ClamAV container; no previous application needs it.\n' >&2
+    bash "$script_dir/compose.sh" rm --force --stop clamav || true
+  fi
+}
+
 rollback_with_status() {
   local status="$1"
+  local active_stack_before_recovery
   trap - EXIT
   trap '' HUP INT TERM
+  active_stack_before_recovery="$(readlink -f -- "$current_link" 2>/dev/null || true)"
+  restore_prechange_clamav "$active_stack_before_recovery"
   if [[ "$deployment_complete" == true || "$deployment_mutated" == false ]]; then
     exit "$status"
   fi
@@ -144,6 +240,20 @@ rollback_with_status() {
     recovery_application_release="$old_application_release"
   fi
 
+  recovery_services_model=''
+  if ! recovery_services_model="$(
+    compose_services_for_stack "$recovery_stack" "$recovery_application_release"
+  )"; then
+    printf 'Recovery stack service model is invalid; keeping applications stopped.\n' >&2
+    bash "$script_dir/compose.sh" stop api client-web admin-web || true
+    exit "$status"
+  fi
+  recovery_services=(mysql redis redis-livekit minio)
+  if grep -Fxq clamav <<<"$recovery_services_model"; then
+    recovery_services+=(clamav)
+  fi
+  recovery_services+=(livekit)
+
   OPENBMB_RELEASE="$recovery_id" \
     OPENBMB_APPLICATION_RELEASE="$recovery_application_release" \
     OPENBMB_INFRASTRUCTURE_RELEASE="$recovery_id" \
@@ -151,12 +261,14 @@ rollback_with_status() {
     stop --timeout 30 api client-web admin-web || true
 
   realtime_recovered=false
-  if OPENBMB_RELEASE="$recovery_id" \
+  if [[ "$clamav_recovery_attested" == true ]] && \
+     OPENBMB_RELEASE="$recovery_id" \
        OPENBMB_APPLICATION_RELEASE="$recovery_application_release" \
        OPENBMB_INFRASTRUCTURE_RELEASE="$recovery_id" \
        bash "$recovery_stack/infra/production/scripts/compose.sh" \
-       up -d --pull never --no-build mysql redis redis-livekit minio livekit && \
-     wait_for_recovery_livekit; then
+       up -d --pull never --no-build "${recovery_services[@]}" && \
+     wait_for_recovery_livekit && \
+     bash "$script_dir/verify-clamav.sh" --wait; then
     realtime_recovered=true
     printf 'Recovery LiveKit is healthy with the current, non-restored signing secret.\n' >&2
   fi
@@ -202,7 +314,7 @@ trap 'rollback_on_signal 129' HUP
 trap 'rollback_on_signal 130' INT
 trap 'rollback_on_signal 143' TERM
 
-bash "$script_dir/preflight.sh"
+bash "$script_dir/preflight.sh" --skip-clamav-runtime
 bash "$security_epoch_script" assert-deploy "$release_root"
 
 skip_image_build="${OPENBMB_SKIP_IMAGE_BUILD:-false}"
@@ -220,9 +332,54 @@ case "$skip_image_build" in
     exit 1
     ;;
 esac
+
+bash "$script_dir/verify-smtp.sh"
 post_build_disk_kib="$(df -Pk /opt | awk 'NR == 2 { print $4 }')"
-[[ "${post_build_disk_kib:-0}" -ge 3145728 ]] || {
-  printf 'less than 3 GiB remains after image build; aborting before data changes\n' >&2
+docker_root="$(docker info --format '{{.DockerRootDir}}')"
+post_build_docker_kib="$(df -Pk "$docker_root" | awk 'NR == 2 { print $4 }')"
+[[ "${post_build_disk_kib:-0}" -ge 4194304 && \
+   "${post_build_docker_kib:-0}" -ge 4194304 ]] || {
+  printf 'less than 4 GiB remains under /opt or DockerRootDir after image preload; aborting before data changes\n' >&2
+  exit 1
+}
+
+printf 'Starting and validating the same-host ClamAV scanner before state changes.\n'
+if docker container inspect openbmb-clamav >/dev/null 2>&1; then
+  clamav_container_preexisted=true
+  clamav_compose_project="$(
+    docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' \
+      openbmb-clamav
+  )"
+  clamav_compose_service="$(
+    docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' \
+      openbmb-clamav
+  )"
+  [[ "$clamav_compose_project" == openbmb && \
+     "$clamav_compose_service" == clamav ]] || {
+    printf 'The openbmb-clamav container is not managed by the OpenBMB clamav service.\n' >&2
+    exit 1
+  }
+  if [[ "$old_stack_has_clamav" == false ]]; then
+    existing_clamav_image="$(docker inspect --format '{{.Config.Image}}' openbmb-clamav)"
+    [[ "$existing_clamav_image" =~ ^openbmb-clamav:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || {
+      printf 'A pre-ClamAV stack has an unexpected managed scanner image: %s\n' \
+        "$existing_clamav_image" >&2
+      exit 1
+    }
+  fi
+fi
+# Reconcile unconditionally. A prior first-signature download may have been
+# interrupted, and merely probing an existing container would validate the old
+# image/config instead of the immutable target release.
+clamav_target_attempted=true
+bash "$script_dir/compose.sh" up -d --pull never --no-build clamav
+bash "$script_dir/clamav-watchdog.sh"
+clamav_target_attested=true
+post_clamav_disk_kib="$(df -Pk /opt | awk 'NR == 2 { print $4 }')"
+post_clamav_docker_kib="$(df -Pk "$docker_root" | awk 'NR == 2 { print $4 }')"
+[[ "${post_clamav_disk_kib:-0}" -ge 4194304 && \
+   "${post_clamav_docker_kib:-0}" -ge 4194304 ]] || {
+  printf 'less than 4 GiB remains under /opt or DockerRootDir after loading ClamAV signatures; aborting before data changes\n' >&2
   exit 1
 }
 
@@ -294,7 +451,7 @@ bash "$script_dir/rotate-livekit-secret.sh"
 printf 'Starting or reconciling data services while realtime media remains drained.\n'
 bash "$script_dir/compose.sh" up -d \
   --pull never \
-  mysql redis redis-livekit minio
+  mysql redis redis-livekit minio clamav
 bash "$script_dir/compose.sh" up -d --pull never --force-recreate minio-init
 
 for service in mysql redis redis-livekit minio; do
@@ -308,6 +465,7 @@ for service in mysql redis redis-livekit minio; do
     exit 1
   }
 done
+bash "$script_dir/verify-clamav.sh" --wait
 
 init_status=''
 init_exit='1'
@@ -341,6 +499,7 @@ done
 }
 
 printf 'Starting release application containers.\n'
+bash "$script_dir/verify-clamav.sh" --once
 bash "$script_dir/compose.sh" up -d --pull never --no-build api client-web admin-web
 bash "$script_dir/health-check.sh" --local
 

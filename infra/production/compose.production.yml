@@ -39,6 +39,8 @@ services:
       MAIL_DELIVERY_MODE: smtp
       DATABASE_URL: mysql://${MYSQL_USER:-openbmb}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD}@127.0.0.1:${MYSQL_HOST_PORT:-13306}/${MYSQL_DATABASE:-openbmb}
       REDIS_URL: redis://openbmb-api:${REDIS_APP_PASSWORD:?set REDIS_APP_PASSWORD}@127.0.0.1:${REDIS_HOST_PORT:-16379}/0
+      CLAMAV_HOST: 127.0.0.1
+      CLAMAV_PORT: ${CLAMAV_HOST_PORT:-13310}
       # Path-style S3 URLs become /openbmb-assets/<key> on the already-existing
       # main domain; Caddy preserves that exact signed path for MinIO.
       OBJECT_STORAGE_ENDPOINT: https://${OPENBMB_DOMAIN:-sun227454.online}
@@ -67,6 +69,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      clamav:
+        condition: service_healthy
       livekit:
         condition: service_healthy
     healthcheck:
@@ -93,6 +97,60 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # clamd's TCP protocol has neither authentication nor transport encryption.
+  # Publish it on host loopback only: the host-network API can scan assets,
+  # while no public or shared Docker network can reach the daemon. The _base
+  # image downloads signatures once into the persistent database volume.
+  clamav:
+    image: openbmb-clamav:${OPENBMB_INFRASTRUCTURE_RELEASE:?OPENBMB_INFRASTRUCTURE_RELEASE must identify an immutable release}
+    container_name: openbmb-clamav
+    restart: unless-stopped
+    init: true
+    ports:
+      - 127.0.0.1:${CLAMAV_HOST_PORT:-13310}:3310
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      CLAMD_STARTUP_TIMEOUT: "1800"
+      FRESHCLAM_CHECKS: "2"
+      CLAMD_CONF_TCPAddr: 0.0.0.0
+      CLAMD_CONF_StreamMaxLength: 100M
+      CLAMD_CONF_MaxFileSize: 100M
+      CLAMD_CONF_MaxScanSize: 200M
+      CLAMD_CONF_MaxScanTime: "120000"
+      CLAMD_CONF_AlertExceedsMax: "yes"
+      CLAMD_CONF_ReadTimeout: "120"
+      CLAMD_CONF_CommandReadTimeout: "30"
+      # Loading a second signature engine during refresh is too expensive on
+      # TX4H4G. Scans pause briefly while the single engine is replaced.
+      CLAMD_CONF_ConcurrentDatabaseReload: "no"
+      # Database validation loads another engine. Disabling it is a deliberate
+      # 4 GiB-host trade-off; clamd still validates by successfully loading the
+      # downloaded signatures before serving scans.
+      FRESHCLAM_CONF_TestDatabases: "no"
+      # The asset worker is also pinned to concurrency 1 on this 4 GiB host.
+      # Keep clamd single-threaded so a burst cannot multiply scan buffers.
+      CLAMD_CONF_MaxThreads: "1"
+      CLAMD_CONF_MaxConnectionQueueLength: "2"
+    volumes:
+      - clamav_database:/var/lib/clamav
+    networks:
+      - clamav_egress
+    healthcheck:
+      test: [CMD, clamdcheck.sh]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      # The first _base-image boot must download and load all signatures.
+      start_period: 30m
+    stop_grace_period: 90s
+    mem_limit: 1536m
+    memswap_limit: 2048m
+    cpus: 1.00
+    pids_limit: 160
+    security_opt:
+      - no-new-privileges:true
+    logging: *production-logging
 
   migrate:
     image: openbmb-migrator:${OPENBMB_RELEASE:?OPENBMB_RELEASE must identify an immutable release}
@@ -220,3 +278,11 @@ networks:
   web:
     name: openbmb_web
     internal: true
+  # Only ClamAV joins this egress-capable network so FreshClam can update its
+  # signatures without gaining lateral access to application data services.
+  clamav_egress:
+    name: openbmb_clamav_egress
+
+volumes:
+  clamav_database:
+    name: openbmb_clamav_database

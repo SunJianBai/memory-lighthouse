@@ -32,7 +32,8 @@
 
 ## 尚待外部输入
 
-- 根域 `sun227454.online` 已解析到 `124.220.81.104`，LiveKit 信令复用标准 `/rtc/v1`；UFW 当前未启用，仍需确认腾讯云安全组开放 `7881/TCP`、`7882/UDP`、`3478/UDP`。若以后启用 UFW，必须同步加入对应规则。
-- 真实 SMTP 主机、端口、账号、密码和发件地址尚未提供，是生产启用和公网切流的阻塞项；当前来电通知使用已认证轮询，不依赖 Android Push。
+- 根域 `sun227454.online` 已解析到 `124.220.81.104`，LiveKit 信令复用标准 `/rtc/v1`；用户已说明服务器端口开放，仍需用两台公网设备实测 `7881/TCP`、`7882/UDP`、`3478/UDP` 的媒体路径。若以后启用 UFW，必须同步加入对应规则。
+- 邮件服务已确定为 QQ `smtp.qq.com:465` 隐式 TLS；尚缺完整 QQ 邮箱，并且 SMTP 授权码尚未由用户直接安全写入服务器（不得通过聊天或 Git 传递），因此生产启用和公网切流仍被阻塞。当前来电通知使用已认证轮询，不依赖 Android Push。
+- ClamAV 已确认与 TX4H4G 同机部署，只通过 `127.0.0.1:13310` 服务 API；代码已纳入不可变镜像链，仍待服务器首次签名下载和真实 INSTREAM 验证。签名引擎内存与上传数据量无关，若出现持续 OOM 必须升级主机。
 - Android 单元测试、Lint、Debug APK 与 CI 产物已经完成；尚未连接真机，也未完成双公网设备 LiveKit 音视频验收。
-- OpenBMB 尚未切换公网流量，CampusHub 仍正常提供现有服务；CD stage-only 使用私有 GHCR 摘要固定与服务器本地镜像清单双重校验，运行状态以 [Production delivery](https://github.com/SunJianBai/memory-lighthouse/actions/workflows/production-delivery.yml) 为准。即使 stage-only 通过，仍需真实 SMTP 才能执行正式激活和 Caddy 切流。
+- OpenBMB 尚未切换公网流量，CampusHub 仍正常提供现有服务；CD stage-only 使用私有 GHCR 摘要固定与服务器本地镜像清单双重校验，运行状态以 [Production delivery](https://github.com/SunJianBai/memory-lighthouse/actions/workflows/production-delivery.yml) 为准。即使 stage-only 通过，仍需 QQ SMTP 认证与 ClamAV/RTC 实测通过才能执行正式激活和 Caddy 切流。

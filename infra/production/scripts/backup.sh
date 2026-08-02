@@ -73,6 +73,9 @@ restore_api() {
     return 0
   fi
   printf 'Restoring the API after backup.\n'
+  if ! bash "$script_dir/verify-clamav.sh" --once; then
+    return 1
+  fi
   if ! "$script_dir/compose.sh" start api; then
     return 1
   fi

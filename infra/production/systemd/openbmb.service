@@ -15,8 +15,10 @@ Environment=OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env
 ExecStart=/bin/bash /opt/openbmb/current/infra/production/scripts/service-control.sh start
 ExecReload=/bin/bash /opt/openbmb/current/infra/production/scripts/service-control.sh reload
 ExecStop=/bin/bash /opt/openbmb/current/infra/production/scripts/service-control.sh stop
-TimeoutStartSec=300
-TimeoutStopSec=90
+# A rebuilt ClamAV signature volume can take 30 minutes, followed by a bounded
+# FreshClam process/freshness check.
+TimeoutStartSec=3600
+TimeoutStopSec=120
 UMask=0027
 
 [Install]

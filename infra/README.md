@@ -38,4 +38,6 @@ reach `CLEAN`.
 Start with [`production/README.md`](production/README.md). The production
 workflow keeps CampusHub as the fallback site and does not reuse or mutate its
 database, backend, or volumes. Secrets live only in `/etc/openbmb` on the
-server and must never be committed.
+server and must never be committed. Unlike the lightweight development profile,
+production includes a digest-pinned same-host ClamAV service published only on
+`127.0.0.1:13310` with a persistent, rebuildable signature cache.

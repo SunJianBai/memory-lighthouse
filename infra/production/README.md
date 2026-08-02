@@ -23,7 +23,8 @@ Caddy/nginx。
 
 LiveKit 媒体不经过 Caddy，直接使用 `7881/TCP`、`7882/UDP`、`3478/UDP`。
 MySQL `13306`、应用 Redis `16379`、LiveKit Redis `16380`、MinIO `19000/19001`
-均只绑定 `127.0.0.1`。管理控制台 `19001` 永不反向代理。
+以及 ClamAV `13310` 均只绑定 `127.0.0.1`。管理控制台 `19001` 永不反向代理，
+`13310` 也绝不能加入腾讯云安全组或 UFW 入站规则。
 
 API 和 LiveKit 在 Linux 上使用 host network，但 API 强制监听 `127.0.0.1`，
 LiveKit 信令也强制监听 `127.0.0.1`。这样 Caddy 是应用所信任的唯一回环代理，
@@ -37,25 +38,32 @@ Caddy 对该路由禁用 access log；MinIO 控制台仍不对外。
 
 ## 4 GB 主机资源预算
 
-OpenBMB 长期运行容器上限约 2.2 GiB：数据/媒体基础设施约 1.64 GiB，API 448
-MiB，两个静态站各 48 MiB。TX4H4G 已确认有 3.6 GiB RAM、约 1.2 GiB 当前
-可用 RAM、1.9 GiB swap（约 1.1 GiB 空闲）、15 GiB 空闲磁盘，现有 CampusHub
-容器约 374 MiB。`minio-init` 和迁移器是短时任务。部署前检查
+除 ClamAV 外，OpenBMB 长期运行容器上限约 2.2 GiB：数据/媒体基础设施约
+1.64 GiB，API 448 MiB，两个静态站各 48 MiB。ClamAV 另设 1.5 GiB RAM、
+2 GiB RAM+swap 硬上限；这些上限不是预留量，但官方标准签名引擎本身可能常驻
+约 1.2 GiB。2026-08-02 最近一次 TX4H4G 快照为 3.6 GiB RAM、约 2.6 GiB
+可用 RAM、1.9 GiB swap（约 1.2 GiB 空闲）和约 7.2 GiB 空闲磁盘，现有
+CampusHub 容器约 358 MiB。`minio-init` 和迁移器是短时任务。部署前检查
 `free -h`、`df -h /opt`、`docker stats --no-stream` 和
 `journalctl -k | grep -i oom`。如果 CampusHub 加 OpenBMB 持续触发 OOM，应升级
 主机，不应简单删除内存上限。
 
-clamd 不部署在 TX4H4G：ClamAV 官方对标准签名库建议约 3 GiB RAM 和额外 5 GiB
-磁盘，同机运行会破坏上述预算。生产使用独立私网扫描节点，建议固定官方
-`clamav/clamav-debian:1.4.5`，将 `StreamMaxLength` 配置为至少 100 MiB，并在网络
-侧只允许 TX4H4G 访问 3310/TCP。clamd TCP 协议本身没有认证或 TLS，绝不能暴露到
-公网。参考 [ClamAV 系统要求](https://docs.clamav.net/) 与
+按产品决定，clamd 与应用同机部署。不可变镜像源固定为
+`clamav/clamav-debian:1.4.5_base`，签名保存到可重建的独立 named volume；容器只加入
+FreshClam 专用出站网络，通过宿主回环 `127.0.0.1:13310` 向 host-network API
+提供服务。上传数据量小不会降低签名引擎本身的内存占用，因此生产将资产 Worker
+并发降为 1、clamd 线程限为 1，并关闭并发数据库重载和 FreshClam 的二次数据库
+加载测试。代价是签名更新时扫描短暂停顿；资产仍保持不可下载并退避重试。clamd TCP
+协议本身没有认证或 TLS，绝不能暴露到公网。参考
+[ClamAV Docker 资源说明](https://docs.clamav.net/manual/Installing/Docker.html) 与
 [ClamD INSTREAM 协议](https://docs.clamav.net/manual/Usage/ClamdProtocol.html)。
 
 首次镜像构建最吃资源：构建脚本强制按 API → 迁移器 → 家属/陪伴 Web → 管理
 Web 串行执行，并把 TypeScript/Node 构建堆限制为 768/640 MiB；后续目标复用
-BuildKit cache。预检要求至少 768 MiB 即时可用 RAM、RAM+空闲 swap 至少 2 GiB，
-以及 `/opt` 下至少 10 GiB 空间；构建后若不足 3 GiB，会在任何数据变更前中止。
+BuildKit cache。生产主机不执行本地构建；预检要求至少 768 MiB 即时可用 RAM、
+RAM+空闲 swap 至少 3 GiB，且镜像预装后 `/opt` 与 DockerRootDir 都仍有至少
+4 GiB。ClamAV 首次下载签名后会再次检查两个文件系统的 4 GiB 下限，任何不满足都在
+数据变更前中止。
 不要并行执行另一次 Gradle/npm 镜像构建。
 
 ## 目录与主机文件
@@ -80,20 +88,20 @@ BuildKit cache。预检要求至少 768 MiB 即时可用 RAM、RAM+空闲 swap �
 
 这些条件无法由仓库静态配置代替：
 
-1. 提供真实 SMTP 主机、端口、账号、密码和发件地址。生产 API 会在启动时验证
-   TLS SMTP；不可用时 readiness 保持失败。
+1. QQ 邮箱中开启包含 SMTP 的客户端服务，确认完整 `@qq.com` 地址，并把新生成的
+   SMTP 授权码安全写入 `/etc/openbmb/api.env`。生产固定使用 `smtp.qq.com:465`
+   隐式 TLS；授权码不是 QQ 登录密码，也不要发到聊天、Git 或 shell 历史中。API
+   启动时会做认证验证，不可用时 readiness 保持失败。
 2. 根域必须继续指向 `124.220.81.104`。LiveKit 标准 `/rtc/v1` 信令和 MinIO
    的 `/openbmb-assets/*` path-style S3 URL 都复用根域，不再要求新增 `rtc.*` 或
    `assets.*` DNS。
-3. 腾讯云安全组和 UFW 同时允许 `80/TCP`、`443/TCP`、`7881/TCP`、
+3. 用户已说明服务器端口开放；部署验收仍需从公网实测腾讯云安全组允许
+   `80/TCP`、`443/TCP`、`7881/TCP`、
    `7882/UDP`、`3478/UDP`；保留 SSH 规则。不要放行 13100、13306、14173、
-   14174、16379、16380、17880、19000、19001。
+   14174、16379、16380、17880、19000、19001、13310。
 4. 当前 ModelBest MiniCPM-o 实时端点不要求 API key。若启用独立 ASR，还需在
    本机 `127.0.0.1:18082` 提供服务；远程家属通话本身不接入 ASR。
-5. 提供独立私网 clamd 的主机和端口；防火墙只允许 TX4H4G 访问。生产 preflight
-   会真实执行 `PING` 和空内容 `INSTREAM`，缺配置、签名库未加载或扫描不可用都会
-   阻断部署。扫描失败时资产保持不可下载并由 Outbox Worker 退避重试。
-6. 两台不同网络设备完成一次真实 LiveKit 音视频测试。HTTP/WSS 健康检查不能
+5. 两台不同网络设备完成一次真实 LiveKit 音视频测试。HTTP/WSS 健康检查不能
    证明云安全组和 NAT 下的 UDP 媒体可达。
 
 ## 1. 静态审阅与校验
@@ -104,14 +112,21 @@ BuildKit cache。预检要求至少 768 MiB 即时可用 RAM、RAM+空闲 swap �
 bash infra/production/scripts/validate-static.sh
 ```
 
-它检查所有 shell 语法、合并后的 Compose 模型、回环端口和生产内容检查硬关闭，
+它检查所有 shell 语法、合并后的 Compose 模型、ClamAV 回环隔离、不可变镜像集合、
+发布顺序和生产内容检查硬关闭，
 不会启动或重启容器。正式主机填好 secret 文件后再运行：
 
 ```bash
 sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env \
   OPENBMB_API_ENV_FILE=/etc/openbmb/api.env \
-  bash /opt/openbmb/releases/<release-id>/infra/production/scripts/preflight.sh
+  OPENBMB_SKIP_IMAGE_BUILD=true \
+  bash /opt/openbmb/releases/<release-id>/infra/production/scripts/preflight.sh \
+  --skip-clamav-runtime
 ```
+
+`--skip-clamav-runtime` 只用于首次安装尚未创建扫描器的前置检查；正式部署随后会用
+不可变目标镜像启动 ClamAV，并在任何状态变更前完成扫描与签名新鲜度验证。扫描器已经
+运行后，去掉该参数可执行包含实时 `INSTREAM` 的完整预检。
 
 ## 2. 安装 secrets
 
@@ -166,13 +181,36 @@ Bucket 的普通 DELETE 只创建 Delete Marker，因此应用身份同时仅获
 数据库用户密码传给 API，不会把 MySQL/MinIO root 凭据传给 API。`api.env` 使用
 Compose raw 格式读取，SMTP 密码中的 `$` 等字符不会被插值。
 
+QQ 邮箱配置的非秘密部分已经写入模板。先登录 QQ 邮箱，在“设置 → 帐户”的客户端
+服务区域开启 SMTP 并生成授权码，然后使用 `sudoedit /etc/openbmb/api.env` 填写：
+
+```dotenv
+SMTP_USER=<完整QQ邮箱地址>
+SMTP_PASSWORD=<QQ生成的SMTP授权码>
+SMTP_FROM_ADDRESS=<与SMTP_USER完全相同>
+```
+
+模板中的 `SMTP_HOST=smtp.qq.com`、`SMTP_PORT=465`、`SMTP_SECURE=true` 和
+`SMTP_REQUIRE_TLS=false` 保持不变；这里的 `false` 仅表示不执行 STARTTLS 升级，
+连接从第一个字节起已经是 TLS。
+
+每次生产激活都会先用目标发布的 API 镜像和同一份 raw `api.env` 运行
+`verify-smtp.sh`。该脚本调用应用实际使用的 Nodemailer transport `verify()` 完成
+TLS、SMTP 握手和账号认证，不发送邮件；授权码只作为短生命周期容器的环境变量进入，
+不会展开到命令行或日志。脚本在同一把生产操作锁内复核发布清单和本地镜像 ID 后才
+读取凭据；认证失败发生在备份、发布指针和安全边界变更之前。也可以在激活前单独验证：
+
+```bash
+sudo bash /opt/openbmb/releases/<release-id>/infra/production/scripts/verify-smtp.sh
+```
+
 ## 3. 发布应用（尚不切换公网）
 
 ### 推荐：GitHub Runner 构建并经 SSH 传送
 
 TX4H4G 所在网络不能可靠访问 Docker Hub，因此仓库的
 `.github/workflows/production-delivery.yml` 在已通过 CI 的 GitHub Runner 上构建
-四个应用镜像、拉取本文件锁定的基础设施镜像，再把九个精确镜像作为私有、按发布号
+四个应用镜像、拉取本文件锁定的基础设施镜像，再把十个精确镜像作为私有、按发布号
 隔离的传输 tag 推送到 GHCR。TX4H4G 通过固定主机密钥的 SSH 接收本次工作流短期
 Token，从 GHCR 按摘要拉取后写入 Compose 使用的 release-scoped 本地 tag；Token 只进入 `docker login`
 标准输入并使用临时 `DOCKER_CONFIG`，完成后立即注销和清理。服务器不会从第三方
@@ -189,13 +227,16 @@ Token，从 GHCR 按摘要拉取后写入 Compose 使用的 release-scoped 本�
 工作流使用确定性的 `git-<12位提交哈希>` 发布号，并在发布目录写入完整提交哈希、
 源码归档 SHA-256、GHCR transport digest 清单和服务器本地镜像 ID 清单。发布树由 `root` 拥有且不可被组或其他用户
 写入；容器必须读取的 Redis/LiveKit 配置只获得只读例外。新发布先传送镜像，再在
-临时目录核对 Compose 实际引用的全部 9 个镜像 ID 和四个应用镜像的 OCI revision，
+临时目录核对 Compose 实际引用的全部 10 个镜像 ID 和四个应用镜像的 OCI revision，
 通过后才原子落盘。同一提交重跑时会先验证并复用已有不可变发布，防止重建镜像覆盖
 已有 tag。`deploy-release.sh` 强制要求
 `OPENBMB_SKIP_IMAGE_BUILD=true` 且上述完整校验通过；TX4H4G 不提供主机本地生产构建回退。所有生产
 `compose up/run` 都使用 `--pull never`，不会在主机上回退访问 Docker Hub。
 
-发布脚本依次执行：严格预检 → 校验已预装的 release tag 与两份摘要清单 → 对普通新部署做 MySQL
+发布脚本依次执行：静态严格预检 → 校验已预装的 release tag 与两份摘要清单 → 使用目标
+API 镜像完成 QQ SMTP 认证预检（不发邮件）→
+启动同机 ClamAV 并真实执行 `PING` 与空内容 `INSTREAM`（首次会下载签名；失败时尚未
+改变发布指针或数据）→ 对普通新部署做 MySQL
 和 MinIO 备份（续跑 pending 时禁止重复备份）→ 先原子持久化 `current` 栈指针 → 同时停止并核实 API 与 LiveKit → 原子写入
 `/opt/openbmb/security-boundary.pending` → 原子轮换 `/etc/openbmb/infra.env` 中的
 `LIVEKIT_API_SECRET` → 启动/核对数据服务 → 定向清空应用媒体租约和专用 LiveKit Redis
@@ -338,21 +379,42 @@ sudo bash /opt/openbmb/current/infra/production/scripts/cutover-caddy.sh \
 sudo install -o root -g root -m 0644 infra/production/systemd/openbmb.service /etc/systemd/system/
 sudo install -o root -g root -m 0644 infra/production/systemd/openbmb-backup.service /etc/systemd/system/
 sudo install -o root -g root -m 0644 infra/production/systemd/openbmb-backup.timer /etc/systemd/system/
+sudo install -o root -g root -m 0644 infra/production/systemd/openbmb-clamav-watchdog.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 infra/production/systemd/openbmb-clamav-watchdog.timer /etc/systemd/system/
 sudo install -d -o root -g root -m 0700 /var/backups/openbmb
 sudo systemctl daemon-reload
 sudo systemctl enable openbmb.service
 sudo systemctl enable --now openbmb-backup.timer
+sudo systemctl enable --now openbmb-clamav-watchdog.timer
 ```
+
+ClamAV 官方容器的 PID 1 会在 `clamd` 或 `freshclam` 子进程退出后继续存活，因此
+Docker 的 `restart: unless-stopped` 本身不能完成恢复。watchdog 每 15 分钟在生产
+操作锁内执行真实 `PING`/`INSTREAM`、检查 FreshClam 进程，并要求 `daily.cvd` 或
+`daily.cld` 不超过 72 小时；同时用 clamd `VERSION` 交叉核对当前引擎加载的签名版本，
+避免“磁盘文件已更新但引擎 reload 失败”的假健康。正常单引擎 reload 有 3 分钟宽限；
+异常时强制按当前 release 重建扫描器并再次验证，恢复失败则停止 clamd，使新资产扫描
+保持失败而不能被陈旧引擎判为 CLEAN。自动重建有 1 小时冷却，避免 FreshClam CDN 故障
+造成重启风暴。与部署、备份或回滚抢锁时退出码 75 被 systemd 视为安全跳过，
+不会并行修改容器。可用
+`systemctl status openbmb-clamav-watchdog.service` 和
+`journalctl -u openbmb-clamav-watchdog.service` 查看最近结果。
+
+部署失败回到旧 stack 时也必须运行该旧 release 自带的完整 watchdog；只有轻量
+PING/INSTREAM、或旧 release 没有签名新鲜度 watchdog，都不足以恢复扫描器和应用。
+首次从不含 ClamAV 的旧栈升级时，只会保留本次已经完成完整认证的目标扫描器。
 
 普通备份在 pending 存在时立即拒绝，不会把安全边界中途状态冒充成恢复点；续跑部署也
 不会再次创建 pre-migration 备份。备份会短暂停止 API，使用事务快照导出 MySQL，并镜像 MinIO 的当前对象状态；
+`openbmb_clamav_database` 只含可由 FreshClam 重建的公开签名，不进入业务备份；
 静态 Web 和 CampusHub 不停。脚本先写隐藏的 `.partial-*` 目录，校验临时 SHA-256
 清单后原子发布目录，并把当时的 `/opt/openbmb/minimum-security-epoch` 作为
 `minimum-security-epoch` 纳入同一清单，最后写入绑定清单摘要的
 `.openbmb-backup-complete` 标记；API
-恢复和本机健康检查失败会令备份单元失败，停止备份服务时最多预留 10 分钟完成恢复与
-partial 清理；systemd 的 `ExecStopPost` 还会在脚本被强制终止后按当前两个版本指针
-再次拉起并检查应用。结果为 0700/0600，包含个人敏感信息。必须加密复制
+恢复和本机健康检查失败会令备份单元失败；systemd 最多预留 1 小时，让
+`ExecStopPost` 在脚本被强制终止后按当前两个版本指针完成 ClamAV 自愈、应用恢复与
+partial 清理，而不会在 30 分钟首次签名加载中途杀死兜底流程，最后再次检查应用。
+结果为 0700/0600，包含个人敏感信息。必须加密复制
 到异机，并按 `RESTORE.md` 在隔离环境验证。脚本不会自动删除旧备份，防止路径或
 保留策略错误造成误删；需根据磁盘和离线副本制定人工保留策略。
 
@@ -368,8 +430,10 @@ sudo ROLLBACK_SCHEMA_COMPATIBLE=yes \
   <previous-release-id>
 ```
 
-这只切换 API/两个 Web 镜像和独立的 `current-app` 指针；基础设施与配置继续使用
-`current` 指向的 stack release，不回滚数据库、不删除卷。systemd 重启后仍会读取
+这只切换 API/两个 Web 镜像和独立的 `current-app` 指针；MySQL、Redis、MinIO、
+ClamAV、LiveKit 与配置继续使用 `current` 指向的 stack release，不回滚数据库、
+不删除卷。回滚脚本会在启动目标 API 前再次执行完整 ClamAV watchdog 认证（扫描、
+FreshClam 与 loaded/disk 签名新鲜度）。systemd 重启后仍会读取
 `current-app`，不会悄悄恢复成较新的应用，也不会降级 MySQL、Redis、MinIO 或 LiveKit。
 回滚脚本同时要求不存在 pending，且目标 release 的 security epoch 不低于持久化 floor；
 因此跨安全边界后的旧镜像即使 schema 仍兼容，也不能重新启动。同 epoch 回滚仍然允许。

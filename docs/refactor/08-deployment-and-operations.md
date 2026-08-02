@@ -86,6 +86,11 @@ OTEL_EXPORTER_OTLP_ENDPOINT
 
 生产环境检测到 `ENABLE_DEVELOPMENT_CONTENT_INSPECTION=true` 时拒绝启动；无论开关值为何，生产模块都不注册内容检查授权和原文读取 HTTP 控制器，因此相关路径返回 404。`RATE_LIMIT_KEY_SECRET` 必须是至少 32 字节随机值的 canonical base64url，并通过独立 HMAC 域同时用于限流键和审计 IP 伪名。
 
+TX4H4G 的生产 `CLAMAV_HOST/PORT` 固定为 `127.0.0.1:13310`：clamd 在同机独立
+容器运行，只有 FreshClam 专用网络可出站更新签名，3310 映射端口不进入任何公网
+安全组。签名 named volume 是可重建缓存，不是家庭业务备份的一部分。由于标准签名
+引擎内存与上传量无关，生产资产 Worker 并发固定为 1，并禁止并发数据库重载。
+
 ### 3.2 Android
 
 - API 和 RTC 基础地址由 Build Variant 注入。
@@ -146,6 +151,7 @@ Redis 清空后系统允许在线状态短暂丢失，但不能造成授权恢�
 - 上传意图限制 MIME、大小、哈希和单次操作，并要求 `If-None-Match: *`，使同一预签名 URL 不能覆盖已存在对象。
 - 上传完成后保持 `PENDING`，同事务写扫描 Outbox；Worker 也按状态周期补偿发现，扫描通过才允许下载或进入模型上下文。
 - 扫描器必须消费对象真实字节并使用 ClamAV `INSTREAM`；仅检查 HEAD/Metadata 不算恶意内容扫描。clamd 不可用时写 `FAILED`、继续拒绝访问并退避重试。
+- 生产发布先校验 ClamAV 的不可变镜像，再在任何发布指针、备份或迁移变更前等待签名加载，并同时通过 `PING` 和空内容 `INSTREAM`；仅 TCP 端口可连接不能视为扫描器健康。systemd watchdog 还会周期检查 FreshClam 子进程、72 小时内的 daily 文件，并用 clamd `VERSION` 交叉核对引擎实际加载版本；官方容器 PID 1 不随后台子进程退出，因此不能只依赖 Docker restart policy。正常签名 reload 有界宽限后仍不能证明新鲜时，watchdog 按当前 release 强制重建；恢复失败会停止 clamd 并执行一小时重建冷却，使资产继续失败而不是由陈旧引擎判为 CLEAN。
 - 开启 SSE-S3、版本化和生命周期规则；客户端 PUT 显式要求 `AES256`，完成上传时再次从 HEAD 验证。
 - 数据库标记删除后由带租约 Worker 等待上传 URL 过期，再永久删除该 Key 的全部对象版本与 Delete Marker；二次列举和 HEAD 都确认无内容后写 `DELETED`，失败保留 `PENDING_DELETE` 持续重试并告警。
 - 备份必须同时包含 MySQL 元数据和对象版本，恢复后执行引用一致性扫描。

@@ -19,6 +19,7 @@ openbmb_load_release_image_set() {
     "openbmb-minio:$release_id"
     "openbmb-minio-mc:$release_id"
     "openbmb-livekit:$release_id"
+    "openbmb-clamav:$release_id"
   )
   OPENBMB_SOURCE_IMAGES=(
     "openbmb-api:$release_id"
@@ -30,9 +31,10 @@ openbmb_load_release_image_set() {
     minio/minio:RELEASE.2025-04-22T22-12-26Z
     minio/mc:RELEASE.2025-04-08T15-39-49Z
     livekit/livekit-server:v1.13.4
+    clamav/clamav-debian:1.4.5_base
   )
   OPENBMB_DELIVERY_COMPONENTS=(
-    api migrator client-web admin-web mysql redis minio minio-mc livekit
+    api migrator client-web admin-web mysql redis minio minio-mc livekit clamav
   )
   if [[ "${#OPENBMB_REQUIRED_IMAGES[@]}" -ne "${#OPENBMB_SOURCE_IMAGES[@]}" || \
         "${#OPENBMB_REQUIRED_IMAGES[@]}" -ne "${#OPENBMB_DELIVERY_COMPONENTS[@]}" ]]; then
