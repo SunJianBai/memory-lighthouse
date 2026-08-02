@@ -1,6 +1,7 @@
 package com.sun.minicpmo_android.lighthouse.data
 
 import com.sun.minicpmo_android.lighthouse.model.CareRecipientInput
+import com.sun.minicpmo_android.lighthouse.model.CareAuthorityInput
 import com.sun.minicpmo_android.lighthouse.model.ConsentCatalog
 import com.sun.minicpmo_android.lighthouse.model.MemoryInput
 import com.sun.minicpmo_android.lighthouse.model.RoutineInput
@@ -221,5 +222,110 @@ class FamilyApiContractTest {
             consent.lastEvent?.documentVersion?.id,
         )
         assertEquals(8, ConsentCatalog.entries.map { it.scope }.distinct().size)
+    }
+
+    @Test
+    fun authorityAndBindingMutationsUseServerPathsVersionsAndFreshPassword() {
+        val authority = CareAuthorityInput(
+            relationshipLabel = " 女儿 ",
+            accessLevel = "CUSTOM",
+            canManageProfile = true,
+            canManageConsent = false,
+            canManageRoutine = true,
+            canViewEvents = true,
+            canViewConversation = false,
+            canActivateDevice = false,
+            canRemoteCall = true,
+            receiveNotifications = true,
+            contactPriority = 2,
+            status = "ACTIVE",
+            version = 7,
+        )
+        val body = FamilyApiContract.careAuthorityBody(authority, "  fresh-password  ")
+
+        assertEquals("女儿", body.getString("relationshipLabel"))
+        assertEquals(7, body.getInt("version"))
+        assertEquals("  fresh-password  ", body.getString("currentPassword"))
+        assertTrue(body.getBoolean("canRemoteCall"))
+        assertFalse(body.getBoolean("canManageConsent"))
+        assertEquals(
+            "households/h-1/care-recipients/r-1/authorities/member-1",
+            FamilyApiContract.careAuthorityPath("h-1", "r-1", "member-1"),
+        )
+
+        val revoke = FamilyApiContract.revokeBindingBody(" FAMILY_REQUESTED_UNBIND ", " pw-2 ")
+        assertEquals("FAMILY_REQUESTED_UNBIND", revoke.getString("reasonCode"))
+        assertEquals(" pw-2 ", revoke.getString("currentPassword"))
+        assertEquals(
+            "households/h-1/companion-bindings/b-1",
+            FamilyApiContract.revokeBindingPath("h-1", "b-1"),
+        )
+
+        val memberUpdate = FamilyApiContract.updateHouseholdMemberBody(
+            setOf("VIEWER", "CAREGIVER"),
+            version = 5,
+            currentPassword = "  member-password  ",
+        )
+        assertEquals(5, memberUpdate.getInt("version"))
+        assertEquals("  member-password  ", memberUpdate.getString("currentPassword"))
+        assertEquals(
+            listOf("CAREGIVER", "VIEWER"),
+            (0 until memberUpdate.getJSONArray("roleCodes").length()).map {
+                memberUpdate.getJSONArray("roleCodes").getString(it)
+            },
+        )
+        assertEquals(
+            "households/h-1/members/member-1?version=5",
+            FamilyApiContract.removeHouseholdMemberPath("h-1", "member-1", 5),
+        )
+        assertEquals(
+            " remove-password ",
+            FamilyApiContract.removeHouseholdMemberBody(" remove-password ")
+                .getString("currentPassword"),
+        )
+    }
+
+    @Test
+    fun memberAndAuthorityResponsesKeepRecipientScopedCapabilities() {
+        val member = FamilyJsonMapper.parseHouseholdMember(
+            JSONObject()
+                .put("id", "member-1")
+                .put("householdId", "h-1")
+                .put("userId", "user-1")
+                .put("displayName", "小雨")
+                .put("status", "ACTIVE")
+                .put("roleCodes", JSONArray().put("CAREGIVER"))
+                .put("joinedAt", "2026-08-01T00:00:00Z")
+                .put("version", 3),
+        )
+        val authority = FamilyJsonMapper.parseCareAuthority(
+            JSONObject()
+                .put("id", "authority-1")
+                .put("householdId", "h-1")
+                .put("recipientId", "r-1")
+                .put("memberId", "member-1")
+                .put("userId", "user-1")
+                .put("displayName", "小雨")
+                .put("relationshipLabel", JSONObject.NULL)
+                .put("accessLevel", "CUSTOM")
+                .put("canManageProfile", true)
+                .put("canManageConsent", false)
+                .put("canManageRoutine", true)
+                .put("canViewEvents", true)
+                .put("canViewConversation", false)
+                .put("canActivateDevice", false)
+                .put("canRemoteCall", true)
+                .put("receiveNotifications", true)
+                .put("contactPriority", JSONObject.NULL)
+                .put("status", "ACTIVE")
+                .put("version", 4),
+        )
+
+        assertEquals(listOf("CAREGIVER"), member.roleCodes)
+        assertNull(authority.relationshipLabel)
+        assertNull(authority.contactPriority)
+        assertTrue(authority.canRemoteCall)
+        assertFalse(authority.canViewConversation)
+        assertEquals(4, authority.version)
     }
 }

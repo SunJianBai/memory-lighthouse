@@ -2,6 +2,7 @@ import {
   IsEnum,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Length,
@@ -11,6 +12,13 @@ import {
 } from 'class-validator';
 
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+class PasswordReauthenticationDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  currentPassword!: string;
+}
 
 export enum DevicePlatformDto {
   ANDROID = 'ANDROID',
@@ -103,6 +111,12 @@ export class ExchangeDeviceCredentialDto {
   @Length(8, 108)
   @Matches(BASE64URL_PATTERN)
   signature!: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(32, 160)
+  @Matches(/^[A-Za-z0-9_.-]+$/)
+  recoveryToken?: string;
 }
 
 export class RefreshDeviceCredentialDto {
@@ -131,7 +145,7 @@ export class ApproveActivationDto {
   claimSnapshotToken!: string;
 }
 
-export class UpdateCompanionBindingDto {
+export class UpdateCompanionBindingDto extends PasswordReauthenticationDto {
   @IsInt()
   @Min(0)
   version!: number;
@@ -146,7 +160,7 @@ export class UpdateCompanionBindingDto {
   status?: 'ACTIVE' | 'SUSPENDED';
 }
 
-export class RevokeCompanionBindingDto {
+export class RevokeCompanionBindingDto extends PasswordReauthenticationDto {
   @IsOptional()
   @IsString()
   @MaxLength(64)

@@ -68,6 +68,16 @@ data class CallLifecycleState(
         }
 }
 
+fun CallLifecycleState.remoteFailureTitle(): String =
+    if (locallyAnswered) "已接听，但通话连接失败" else "通话未能建立"
+
+fun CallLifecycleState.remoteFailureMessage(): String =
+    if (locallyAnswered) {
+        "已现场接听，但实时音视频连接失败；陪伴模型已停止。请结束本次提示并让家属重新发起通话。"
+    } else {
+        "本次通话未能建立，摄像头和麦克风未开启。请让家属重新发起通话。"
+    }
+
 object CallLifecyclePolicy {
     fun initial() = CallLifecycleState(CallLifecyclePhase.IDLE)
 }

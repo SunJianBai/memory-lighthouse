@@ -59,6 +59,8 @@ Web 陪伴端使用 WebCrypto Ed25519，生成时把私钥设为不可导出，�
 
 ## 4. 设备激活安全
 
+凭据兑换按分布式提交歧义设计：首次长期 Device Credential 使用 Credential Pepper 和独立 HMAC 域从已批准 Challenge、安装身份与批准时间确定性派生，数据库仍只保存加 Pepper 的哈希。进入 `CONSUMED` 后，旧 exchange proof 永远不能取回凭据；状态接口只签发绑定当前 Challenge 版本、安装身份和 60 秒期限的不透明恢复令牌，设备须以不可导出私钥签署独立 `exchange-recovery` proof。恢复事务同时复核 ACTIVE Device/Binding、家庭与陪伴对象、指纹、哈希、撤销、到期和未轮换状态，并用 MySQL Challenge `version` CAS 原子消费证明。恢复响应再次丢失时再取得新版本令牌；旧签名、并发重放和 Redis 丢失都不能恢复授权。
+
 二维码和动态码采用同一个“两阶段激活”流程：设备先认领，家属再批准。
 
 安全要求：

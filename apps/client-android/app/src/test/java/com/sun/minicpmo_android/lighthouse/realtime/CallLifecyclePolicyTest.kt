@@ -58,4 +58,25 @@ class CallLifecyclePolicyTest {
         assertFalse(declined.mediaForegroundAllowed)
         assertTrue(declined.mediaReleaseRequired)
     }
+
+    @Test
+    fun acceptedMediaFailureExplainsThatCompanionshipStopped() {
+        val answered = CallLifecyclePolicy.initial()
+            .transition(CallLifecycleEvent.IncomingDiscovered("session-1"))
+            .transition(CallLifecycleEvent.LocalAnswerConfirmed("session-1"))
+
+        assertTrue(answered.remoteFailureMessage().contains("已现场接听"))
+        assertTrue(answered.remoteFailureMessage().contains("陪伴模型已停止"))
+        assertEquals("已接听，但通话连接失败", answered.remoteFailureTitle())
+    }
+
+    @Test
+    fun preAnswerFailureDoesNotClaimThatMediaOpened() {
+        val ringing = CallLifecyclePolicy.initial()
+            .transition(CallLifecycleEvent.IncomingDiscovered("session-1"))
+
+        assertTrue(ringing.remoteFailureMessage().contains("摄像头和麦克风未开启"))
+        assertFalse(ringing.remoteFailureMessage().contains("已现场接听"))
+        assertEquals("通话未能建立", ringing.remoteFailureTitle())
+    }
 }

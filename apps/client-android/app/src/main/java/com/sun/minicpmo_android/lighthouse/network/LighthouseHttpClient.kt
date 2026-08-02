@@ -1,13 +1,16 @@
 package com.sun.minicpmo_android.lighthouse.network
 
 import com.sun.minicpmo_android.BuildConfig
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class LighthouseApiException(
@@ -32,7 +35,7 @@ class LighthouseHttpClient(
         body: JSONObject? = null,
         bearerToken: String? = null,
         headers: Map<String, String> = emptyMap(),
-    ): JSONObject? = withContext(Dispatchers.IO) {
+    ): JSONObject? {
         val endpoint = endpoint(path)
         val requestBody = when {
             body != null -> body.toString().toRequestBody(JSON_MEDIA_TYPE)
@@ -51,32 +54,48 @@ class LighthouseHttpClient(
             }
             .build()
 
-        client.newCall(request).execute().use { response ->
-            val raw = response.body?.string().orEmpty()
-            val json = raw.takeIf(String::isNotBlank)?.let {
-                runCatching { JSONObject(it) }.getOrNull()
-            }
-            if (!response.isSuccessful) {
-                throw LighthouseApiException(
-                    status = response.code,
-                    code = json?.optString("code")?.takeIf(String::isNotBlank)
-                        ?: "HTTP_${response.code}",
-                    message = json?.optString("message")?.takeIf(String::isNotBlank)
-                        ?: "请求失败（HTTP ${response.code}）",
-                    requestId = json?.optString("requestId")?.takeIf(String::isNotBlank),
-                )
-            }
-            if (response.code == 204 || json == null) return@withContext null
-            if (json.optString("code") == "OK" && json.has("data")) {
-                val data = json.opt("data")
-                return@withContext when (data) {
-                    null, JSONObject.NULL -> null
-                    is JSONObject -> data
-                    else -> JSONObject().put("value", data)
+        val call = client.newCall(request)
+        return suspendCancellableCoroutine { continuation ->
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, error: IOException) {
+                    continuation.resumeWith(Result.failure(error))
                 }
-            }
-            json
+
+                override fun onResponse(call: Call, response: Response) {
+                    continuation.resumeWith(
+                        runCatching { response.use(::decodeResponse) },
+                    )
+                }
+            })
         }
+    }
+
+    private fun decodeResponse(response: Response): JSONObject? {
+        val raw = response.body?.string().orEmpty()
+        val json = raw.takeIf(String::isNotBlank)?.let {
+            runCatching { JSONObject(it) }.getOrNull()
+        }
+        if (!response.isSuccessful) {
+            throw LighthouseApiException(
+                status = response.code,
+                code = json?.optString("code")?.takeIf(String::isNotBlank)
+                    ?: "HTTP_${response.code}",
+                message = json?.optString("message")?.takeIf(String::isNotBlank)
+                    ?: "请求失败（HTTP ${response.code}）",
+                requestId = json?.optString("requestId")?.takeIf(String::isNotBlank),
+            )
+        }
+        if (response.code == 204 || json == null) return null
+        if (json.optString("code") == "OK" && json.has("data")) {
+            val data = json.opt("data")
+            return when (data) {
+                null, JSONObject.NULL -> null
+                is JSONObject -> data
+                else -> JSONObject().put("value", data)
+            }
+        }
+        return json
     }
 
     private fun endpoint(path: String): String {

@@ -112,6 +112,7 @@ export class FamilyDeviceActivationController {
   }
 
   @Patch('households/:householdId/companion-bindings/:bindingId')
+  @RateLimited(RateLimitPolicy.SENSITIVE_WRITE_REAUTHENTICATION)
   async updateBinding(
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
@@ -133,6 +134,7 @@ export class FamilyDeviceActivationController {
   }
 
   @Delete('households/:householdId/companion-bindings/:bindingId')
+  @RateLimited(RateLimitPolicy.SENSITIVE_WRITE_REAUTHENTICATION)
   @HttpCode(HttpStatus.OK)
   async revokeBinding(
     @CurrentUser() principal: UserPrincipal,
@@ -144,6 +146,7 @@ export class FamilyDeviceActivationController {
       userId: principal.userId,
       householdId,
       bindingId,
+      currentPassword: input.currentPassword,
       reasonCode: input.reasonCode,
     });
   }

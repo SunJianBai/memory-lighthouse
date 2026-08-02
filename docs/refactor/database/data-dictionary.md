@@ -155,6 +155,8 @@
 
 `binding_id`、`credential_hash`、`credential_family_id`、`device_key_thumbprint`、`issued_at`、`expires_at`、`last_used_at`、`rotated_at`、`revoked_at`。解绑时全部撤销。
 
+首次凭据明文不入库：服务端使用独立域标签、Challenge、安装标识、批准时间和专用 Pepper 确定性派生明文，再只保存加 Pepper 的摘要。若数据库已提交但响应丢失，服务端根据 `device_activation_challenges.version` 签发 60 秒恢复令牌；设备以安装私钥签署独立恢复 proof，恢复事务再用 `status=CONSUMED AND version=<令牌版本>` 做权威 CAS 并递增版本。服务端仅在设备和 Binding 仍有效、凭据未撤销且从未轮换、公钥指纹与摘要均完全匹配时恢复同一首次明文；旧请求不能重放，Redis 清空也不能重开证明。凭据一经轮换便永久关闭该恢复路径。
+
 ## 5. 授权
 
 ### `consent_document_versions`

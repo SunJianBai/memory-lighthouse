@@ -57,6 +57,28 @@ export type HouseholdMemberView = {
   version: number;
 };
 
+export type CareAuthorityView = {
+  id: string;
+  householdId: string;
+  recipientId: string;
+  memberId: string;
+  userId: string;
+  displayName: string;
+  relationshipLabel: string | null;
+  accessLevel: string;
+  canManageProfile: boolean;
+  canManageConsent: boolean;
+  canManageRoutine: boolean;
+  canViewEvents: boolean;
+  canViewConversation: boolean;
+  canActivateDevice: boolean;
+  canRemoteCall: boolean;
+  receiveNotifications: boolean;
+  contactPriority: number | null;
+  status: "ACTIVE" | "REVOKED";
+  version: number;
+};
+
 export type HouseholdInvitationView = {
   id: string;
   householdId: string;

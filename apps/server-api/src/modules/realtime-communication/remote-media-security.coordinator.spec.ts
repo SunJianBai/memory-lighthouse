@@ -1,6 +1,7 @@
 import { describe, expect, it, jest } from '@jest/globals';
 
 import type { PrismaService } from '../../infrastructure/database/prisma.service';
+import type { CompanionMediaControlService } from '../companion-session/companion-media-control.service';
 import type { LiveKitPort } from './ports/livekit.port';
 import type { MediaLeasePort } from './ports/media-lease.port';
 import { RemoteMediaSecurityCoordinator } from './remote-media-security.coordinator';
@@ -116,22 +117,55 @@ function cleanupHarness(
     deleteRoom: jest.fn(async () => undefined),
     verifyWebhook: jest.fn(),
   };
+  const companionMedia = {
+    endForConsentRevocation: jest.fn(async () => 0),
+    endForBindingRevocation: jest.fn(async () => 0),
+    listConsentRevokedSessionsForLeaseCleanup: jest.fn(async () => []),
+    listEndedSessionsForBindingLeaseCleanup: jest.fn(async () => []),
+  };
   const coordinator = new RemoteMediaSecurityCoordinator(
     prisma as unknown as PrismaService,
     leases as unknown as MediaLeasePort,
     livekit as unknown as LiveKitPort,
+    companionMedia as unknown as CompanionMediaControlService,
   );
   return {
     coordinator,
     leases,
     livekit,
     remoteAssistanceSession,
+    companionMedia,
     cleanupStatus: () => cleanupStatus,
     cleanupNotBefore: () => cleanupNotBefore,
   };
 }
 
 describe('RemoteMediaSecurityCoordinator cleanup barrier', () => {
+  it('delegates Companion Session lifecycle changes to the Companion boundary', async () => {
+    const test = cleanupHarness();
+    const occurredAt = new Date('2026-08-02T00:00:05.000Z');
+    test.companionMedia.endForConsentRevocation.mockResolvedValue(2);
+    const transaction = {};
+
+    await expect(
+      test.coordinator.markCompanionConsentRevoked(
+        transaction as never,
+        session.householdId,
+        session.recipientId,
+        'CAMERA_CAPTURE',
+        occurredAt,
+      ),
+    ).resolves.toBe(2);
+
+    expect(test.companionMedia.endForConsentRevocation).toHaveBeenCalledWith(
+      transaction,
+      session.householdId,
+      session.recipientId,
+      'CAMERA_CAPTURE',
+      occurredAt,
+    );
+  });
+
   it('atomically extends the cleanup fence when revocation races durable room provisioning', async () => {
     const test = cleanupHarness();
     const occurredAt = new Date('2026-08-02T00:00:05.000Z');

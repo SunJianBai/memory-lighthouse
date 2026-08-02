@@ -2,7 +2,7 @@
 
 ## 1. 数据库职责
 
-MySQL 是账号、授权、资料、日程、事件、会话生命周期和审计的唯一业务事实源。Redis 只保存可过期、可重建的在线状态、媒体租约、限流和任务队列；MinIO 只保存对象内容，任何对象都必须先有 MySQL 元数据和授权关系。
+MySQL 是账号、授权、资料、日程、事件、会话生命周期、审计和持久 Outbox 的唯一业务事实源。资产扫描/删除等隐私关键任务的租约与重试状态也保存在 MySQL，确保业务提交后任务不会因 Redis 丢失而消失。Redis 只保存可过期、可重建的在线状态、媒体租约、限流和非权威调度提示；MinIO 只保存对象内容，任何对象都必须先有 MySQL 元数据和授权关系。
 
 ## 2. 全局物理约定
 
@@ -67,6 +67,7 @@ erDiagram
 - 一台设备同一时刻只允许一个当前 Companion Binding；历史写入不可变的 Binding Event。
 - MySQL 没有通用部分唯一索引，当前绑定使用独立当前表或自定义生成列约束，不能依赖 `UNIQUE(device_id, status)`。
 - 激活成功后签发 Device Credential，家属 User Session 从陪伴模式清除。
+- 首次 Device Credential 明文由服务端使用独立域标签、激活 Challenge、安装标识、批准时间和服务端 Pepper 确定性派生，数据库仍只保存加 Pepper 的摘要。首次事务已经提交但 HTTP 响应丢失时，公开状态接口签发绑定当前 Challenge `version` 的 60 秒恢复令牌，设备必须用安装私钥签署独立的 `exchange-recovery` proof；恢复事务以 MySQL `version` CAS 原子消费该证明，成功后只呈现同一凭据并递增版本。旧 exchange/recovery 请求、Redis 状态丢失或并发重放都不能恢复授权；仅当 Binding、设备、公钥、未轮换凭据和摘要仍完全一致时允许再次取得新恢复令牌。
 
 ### 4.4 Consent
 

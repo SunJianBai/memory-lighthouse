@@ -1,6 +1,6 @@
 import { generateKeyPairSync, KeyObject, sign } from 'node:crypto';
 
-import { beforeEach, describe, expect, it } from '@jest/globals';
+import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 import type { PrismaService } from '../../infrastructure/database/prisma.service';
 import { DeviceActivationApplicationService } from './device-activation.application.service';
@@ -9,9 +9,11 @@ import { DeviceActivationCrypto } from './device-activation.crypto';
 import {
   buildClaimProofMessage,
   buildExchangeProofMessage,
+  buildExchangeRecoveryProofMessage,
   buildRefreshProofMessage,
 } from './device-activation.crypto';
 import type { ClockPort } from './device-activation.types';
+import { InvalidCredentialsException } from '../identity/identity.errors';
 
 // Prisma 7's generated NodeNext client emits `.js` specifiers. These unit
 // tests use a transaction state double, so the concrete database Adapter is
@@ -323,6 +325,9 @@ describe('DeviceActivationApplicationService', () => {
     cleanupPendingForBinding: jest.Mock;
     cleanupCompanionLeasesForBinding: jest.Mock;
   };
+  let identity: {
+    reauthenticateUser: jest.Mock;
+  };
 
   beforeEach(() => {
     prisma = new PrismaHarness();
@@ -334,6 +339,9 @@ describe('DeviceActivationApplicationService', () => {
       cleanupPendingForBinding: jest.fn(async () => undefined),
       cleanupCompanionLeasesForBinding: jest.fn(async () => undefined),
     };
+    identity = {
+      reauthenticateUser: jest.fn(async () => undefined),
+    };
     service = new DeviceActivationApplicationService(
       prisma as unknown as PrismaService,
       crypto,
@@ -341,6 +349,7 @@ describe('DeviceActivationApplicationService', () => {
       clock,
       securityConfig,
       mediaSecurity as never,
+      identity as never,
     );
     approvalSequence = 0;
     const pair = generateKeyPairSync('ed25519');
@@ -348,6 +357,50 @@ describe('DeviceActivationApplicationService', () => {
     publicKeySpki = Buffer.from(
       pair.publicKey.export({ format: 'der', type: 'spki' }),
     ).toString('base64url');
+  });
+
+  it('rejects a binding state write before opening a transaction when password reauthentication fails', async () => {
+    identity.reauthenticateUser.mockRejectedValue(
+      new InvalidCredentialsException(),
+    );
+
+    await expect(
+      service.updateCompanionBinding({
+        userId: 'user-1',
+        householdId: '01JHOUSEHOLD00000000000000',
+        bindingId: '01JBINDING00000000000000000',
+        version: 0,
+        status: 'SUSPENDED',
+        currentPassword: 'wrong-current-password',
+      } as never),
+    ).rejects.toBeInstanceOf(InvalidCredentialsException);
+
+    expect(identity.reauthenticateUser).toHaveBeenCalledWith(
+      'user-1',
+      'wrong-current-password',
+    );
+    expect(prisma.transactionOptions).toHaveLength(0);
+  });
+
+  it('rejects binding revocation before opening a transaction when password reauthentication fails', async () => {
+    identity.reauthenticateUser.mockRejectedValue(
+      new InvalidCredentialsException(),
+    );
+
+    await expect(
+      service.revokeCompanionBinding({
+        userId: 'user-1',
+        householdId: '01JHOUSEHOLD00000000000000',
+        bindingId: '01JBINDING00000000000000000',
+        currentPassword: 'wrong-current-password',
+      } as never),
+    ).rejects.toBeInstanceOf(InvalidCredentialsException);
+
+    expect(identity.reauthenticateUser).toHaveBeenCalledWith(
+      'user-1',
+      'wrong-current-password',
+    );
+    expect(prisma.transactionOptions).toHaveLength(0);
   });
 
   async function prepareClaim(proofOverride?: string): Promise<{
@@ -735,7 +788,7 @@ describe('DeviceActivationApplicationService', () => {
     });
   });
 
-  it('creates one binding and stores only a peppered credential hash', async () => {
+  it('recovers lost exchange responses only with a fresh one-time installation-key proof', async () => {
     const { installation, credential, challengeId, exchangeSignature } =
       await activate();
 
@@ -761,6 +814,95 @@ describe('DeviceActivationApplicationService', () => {
         challengeId,
         installationId: installation.installationId,
         signature: exchangeSignature,
+      }),
+      'ACTIVATION_ALREADY_CONSUMED',
+    );
+
+    const firstRecoveryStatus =
+      await service.getPublicActivationStatus(challengeId);
+    expect(firstRecoveryStatus).toMatchObject({
+      status: 'CONSUMED',
+      recoveryToken: expect.any(String),
+      recoveryTokenExpiresAt: expect.any(String),
+    });
+    const firstRecoveryToken = firstRecoveryStatus.recoveryToken!;
+    const firstRecoverySignature = sign(
+      null,
+      buildExchangeRecoveryProofMessage({
+        challengeId,
+        installationId: installation.installationId,
+        recoveryToken: firstRecoveryToken,
+      }),
+      privateKey,
+    ).toString('base64url');
+    const firstRecoveryRequest = {
+      challengeId,
+      installationId: installation.installationId,
+      signature: firstRecoverySignature,
+      recoveryToken: firstRecoveryToken,
+    };
+    const recoveredAfterLostResponse =
+      await service.exchangeDeviceCredential(firstRecoveryRequest);
+    expect(recoveredAfterLostResponse).toMatchObject({
+      credential: credential.credential,
+      credentialId: credential.credentialId,
+      credentialFamilyId: credential.credentialFamilyId,
+      bindingId: credential.bindingId,
+      householdId: credential.householdId,
+      recipientId: credential.recipientId,
+      expiresAt: credential.expiresAt,
+    });
+    expect(prisma.bindings).toHaveLength(1);
+    expect(prisma.credentials).toHaveLength(1);
+    await expect(
+      service.resolveDevicePrincipal(recoveredAfterLostResponse.accessToken),
+    ).resolves.toMatchObject({
+      deviceId: installation.installationId,
+      bindingId: credential.bindingId,
+    });
+    await expectErrorCode(
+      service.exchangeDeviceCredential(firstRecoveryRequest),
+      'ACTIVATION_ALREADY_CONSUMED',
+    );
+
+    const secondRecoveryStatus =
+      await service.getPublicActivationStatus(challengeId);
+    expect(secondRecoveryStatus.recoveryToken).not.toBe(firstRecoveryToken);
+    const secondRecoveryToken = secondRecoveryStatus.recoveryToken!;
+    const secondRecoverySignature = sign(
+      null,
+      buildExchangeRecoveryProofMessage({
+        challengeId,
+        installationId: installation.installationId,
+        recoveryToken: secondRecoveryToken,
+      }),
+      privateKey,
+    ).toString('base64url');
+    await expect(
+      service.exchangeDeviceCredential({
+        challengeId,
+        installationId: installation.installationId,
+        signature: secondRecoverySignature,
+        recoveryToken: secondRecoveryToken,
+      }),
+    ).resolves.toMatchObject({
+      credential: credential.credential,
+      credentialId: credential.credentialId,
+      bindingId: credential.bindingId,
+    });
+
+    const invalidProofStatus =
+      await service.getPublicActivationStatus(challengeId);
+    await expectErrorCode(
+      service.exchangeDeviceCredential({
+        challengeId,
+        installationId: installation.installationId,
+        signature: sign(
+          null,
+          Buffer.from('different-proof'),
+          privateKey,
+        ).toString('base64url'),
+        recoveryToken: invalidProofStatus.recoveryToken!,
       }),
       'ACTIVATION_ALREADY_CONSUMED',
     );
@@ -815,7 +957,8 @@ describe('DeviceActivationApplicationService', () => {
   });
 
   it('rotates credentials and revokes the whole family when an old token is replayed', async () => {
-    const { credential } = await activate();
+    const { credential, challengeId, installation, exchangeSignature } =
+      await activate();
     const refreshMessage = buildRefreshProofMessage({
       credentialId: credential.credentialId,
       bindingId: credential.bindingId,
@@ -830,6 +973,14 @@ describe('DeviceActivationApplicationService', () => {
     );
     expect(rotated.credential).not.toBe(credential.credential);
     expect(rotated.accessToken).not.toBe(credential.accessToken);
+    await expectErrorCode(
+      service.exchangeDeviceCredential({
+        challengeId,
+        installationId: installation.installationId,
+        signature: exchangeSignature,
+      }),
+      'ACTIVATION_ALREADY_CONSUMED',
+    );
 
     await expectErrorCode(
       service.rotateDeviceCredential(credential.credential, signature),
@@ -970,6 +1121,7 @@ describe('DeviceActivationApplicationService', () => {
       userId: 'user-1',
       householdId: credential.householdId,
       bindingId: credential.bindingId,
+      currentPassword: 'current-password',
       reasonCode: 'FAMILY_REQUEST',
     });
 
@@ -982,6 +1134,17 @@ describe('DeviceActivationApplicationService', () => {
       eventType: 'REVOKED',
       reasonCode: 'FAMILY_REQUEST',
     });
+    expect(identity.reauthenticateUser).toHaveBeenCalledWith(
+      'user-1',
+      'current-password',
+    );
+    expect(
+      JSON.stringify({
+        bindings: prisma.bindings,
+        bindingEvents: prisma.bindingEvents,
+        outboxEvents: prisma.outboxEvents,
+      }),
+    ).not.toContain('current-password');
     expect(mediaSecurity.markCompanionBindingRevoked).toHaveBeenCalledWith(
       expect.anything(),
       credential.bindingId,
@@ -1001,6 +1164,38 @@ describe('DeviceActivationApplicationService', () => {
       service.resolveDevicePrincipal(credential.accessToken),
       'DEVICE_REVOKED',
     );
+  });
+
+  it('reauthenticates before returning the idempotent already-revoked result', async () => {
+    const { credential } = await activate();
+    await service.revokeCompanionBinding({
+      userId: 'user-1',
+      householdId: credential.householdId,
+      bindingId: credential.bindingId,
+      currentPassword: 'current-password',
+    });
+    const eventCount = prisma.bindingEvents.length;
+    const transactionCount = prisma.transactionOptions.length;
+    identity.reauthenticateUser.mockClear();
+    identity.reauthenticateUser.mockRejectedValue(
+      new InvalidCredentialsException(),
+    );
+
+    await expect(
+      service.revokeCompanionBinding({
+        userId: 'user-1',
+        householdId: credential.householdId,
+        bindingId: credential.bindingId,
+        currentPassword: 'wrong-current-password',
+      }),
+    ).rejects.toBeInstanceOf(InvalidCredentialsException);
+
+    expect(identity.reauthenticateUser).toHaveBeenCalledWith(
+      'user-1',
+      'wrong-current-password',
+    );
+    expect(prisma.transactionOptions).toHaveLength(transactionCount);
+    expect(prisma.bindingEvents).toHaveLength(eventCount);
   });
 
   it('re-checks approval authority when the device exchanges the credential', async () => {
@@ -1070,6 +1265,7 @@ describe('DeviceActivationApplicationService', () => {
         bindingId: credential.bindingId,
         version: 0,
         status: 'SUSPENDED',
+        currentPassword: 'current-password',
       }),
     ).resolves.toMatchObject({ status: 'SUSPENDED' });
 
@@ -1084,6 +1280,10 @@ describe('DeviceActivationApplicationService', () => {
     );
     expect(mediaSecurity.cleanupCompanionLeasesForBinding).toHaveBeenCalledWith(
       credential.bindingId,
+    );
+    expect(identity.reauthenticateUser).toHaveBeenCalledWith(
+      'user-1',
+      'current-password',
     );
   });
 

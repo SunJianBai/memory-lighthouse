@@ -65,6 +65,19 @@ object DeviceProofProtocol {
         ),
     )
 
+    fun exchangeRecoveryMessage(
+        challengeId: String,
+        installationId: String,
+        recoveryToken: String,
+    ): ByteArray = canonical(
+        action = "exchange-recovery",
+        fields = listOf(
+            "challenge-id" to challengeId,
+            "installation-id" to installationId,
+            "recovery-token" to recoveryToken,
+        ),
+    )
+
     fun refreshMessage(
         credentialId: String,
         bindingId: String,

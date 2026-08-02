@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 
 import { PrismaModule } from '../../infrastructure/database/prisma.module';
 import { MailModule } from '../../infrastructure/mail';
+import { RateLimitModule } from '../../infrastructure/rate-limit';
 import { IdentityModule } from '../identity/identity.module';
 import { RealtimeMediaSecurityModule } from '../realtime-communication/realtime-media-security.module';
 import { HouseholdInvitationMailAdapter } from './adapters/household-invitation-mail.adapter';
@@ -24,6 +25,7 @@ import { SystemHouseholdClock } from './ports/household-clock.port';
   imports: [
     PrismaModule,
     MailModule,
+    RateLimitModule,
     IdentityModule,
     RealtimeMediaSecurityModule,
   ],

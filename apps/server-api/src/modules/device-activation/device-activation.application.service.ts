@@ -38,6 +38,7 @@ import { DeviceAccessTokenService } from './device-access-token.service';
 import {
   buildClaimProofMessage,
   buildExchangeProofMessage,
+  buildExchangeRecoveryProofMessage,
   buildRefreshProofMessage,
   DeviceActivationCrypto,
 } from './device-activation.crypto';
@@ -58,6 +59,7 @@ import {
   normalizeClaimNetworkSource,
 } from './device-network-source';
 import { RemoteMediaSecurityCoordinator } from '../realtime-communication/remote-media-security.coordinator';
+import { IdentityApplicationService } from '../identity';
 
 type DatabaseClient = PrismaService | Prisma.TransactionClient;
 
@@ -107,6 +109,7 @@ export interface ExchangeDeviceCredentialCommand {
   challengeId: string;
   installationId: string;
   signature: string;
+  recoveryToken?: string;
 }
 
 export interface UpdateCompanionBindingCommand {
@@ -116,6 +119,15 @@ export interface UpdateCompanionBindingCommand {
   version: number;
   displayName?: string;
   status?: 'ACTIVE' | 'SUSPENDED';
+  currentPassword: string;
+}
+
+export interface RevokeCompanionBindingCommand {
+  userId: string;
+  householdId: string;
+  bindingId: string;
+  currentPassword: string;
+  reasonCode?: string;
 }
 
 interface ChallengeRecord {
@@ -167,6 +179,17 @@ interface DeviceCredentialWithBinding {
   };
 }
 
+interface CompletedCredentialExchange {
+  credential: string;
+  credentialId: string;
+  credentialFamilyId: string;
+  bindingId: string;
+  householdId: string;
+  recipientId: string;
+  expiresAt: Date;
+  bindingVersion: number;
+}
+
 type TransitionError =
   | 'NOT_FOUND'
   | 'EXPIRED'
@@ -190,6 +213,7 @@ export class DeviceActivationApplicationService {
     @Inject(DEVICE_ACTIVATION_SECURITY_CONFIG)
     private readonly config: DeviceActivationSecurityConfig,
     private readonly mediaSecurity: RemoteMediaSecurityCoordinator,
+    private readonly identity: IdentityApplicationService,
   ) {}
 
   async registerInstallation(
@@ -355,11 +379,25 @@ export class DeviceActivationApplicationService {
     if (!challenge) {
       throw new ActivationNotFoundException();
     }
+    const recovery =
+      challenge.status === CHALLENGE_STATUS.consumed &&
+      challenge.pendingDeviceId &&
+      challenge.approvedAt
+        ? this.crypto.issueCredentialRecoveryToken({
+            challengeId: challenge.id,
+            installationId: challenge.pendingDeviceId,
+            challengeVersion: challenge.version,
+            approvedAt: challenge.approvedAt.toISOString(),
+            now,
+          })
+        : null;
     return {
       status: challenge.status,
       expiresAt: challenge.expiresAt.toISOString(),
       claimedAt: challenge.claimedAt?.toISOString() ?? null,
       approvedAt: challenge.approvedAt?.toISOString() ?? null,
+      recoveryToken: recovery?.token ?? null,
+      recoveryTokenExpiresAt: recovery?.expiresAt.toISOString() ?? null,
     };
   }
 
@@ -794,8 +832,6 @@ export class DeviceActivationApplicationService {
     command: ExchangeDeviceCredentialCommand,
   ): Promise<DeviceCredentialPresentation> {
     const now = this.clock.now();
-    const rawCredential = this.crypto.generateCredential();
-    const credentialHash = this.crypto.hashCredential(rawCredential);
     const credentialId = ulid(now.getTime());
     const credentialFamilyId = ulid(now.getTime());
     const bindingId = ulid(now.getTime());
@@ -811,6 +847,16 @@ export class DeviceActivationApplicationService {
       )) as ChallengeRecord | null;
       if (!challenge) {
         return { error: 'NOT_FOUND' as const };
+      }
+      if (challenge.status === CHALLENGE_STATUS.consumed) {
+        const replay = await this.recoverConsumedCredentialExchange(
+          transaction,
+          challenge,
+          command,
+          now,
+        );
+        if (replay) return replay;
+        return { error: 'CONSUMED' as const };
       }
       const terminalError = await this.expireOrGetTerminalError(
         transaction,
@@ -887,6 +933,12 @@ export class DeviceActivationApplicationService {
       if (!proofValid) {
         return { error: 'INVALID_PROOF' as const };
       }
+      const rawCredential = this.crypto.deriveInitialCredential({
+        challengeId: challenge.id,
+        installationId: device.id,
+        approvedAt: challenge.approvedAt.toISOString(),
+      });
+      const credentialHash = this.crypto.hashCredential(rawCredential);
       const existingBinding = await transaction.companionBinding.findUnique({
         where: { deviceId: device.id },
       });
@@ -958,8 +1010,14 @@ export class DeviceActivationApplicationService {
         },
       });
       return {
+        credential: rawCredential,
+        credentialId,
+        credentialFamilyId,
+        bindingId,
         householdId: challenge.householdId,
         recipientId: challenge.recipientId,
+        expiresAt,
+        bindingVersion: 1,
       };
     }).catch((error: unknown) => {
       if (this.isUniqueConstraintError(error)) {
@@ -969,26 +1027,137 @@ export class DeviceActivationApplicationService {
     });
 
     if ('error' in result) {
-      this.throwTransitionError(result.error!);
+      this.throwTransitionError(result.error);
     }
     const access = this.accessTokens.issue({
-      credentialId,
-      credentialFamilyId,
+      credentialId: result.credentialId,
+      credentialFamilyId: result.credentialFamilyId,
       deviceId: command.installationId,
-      bindingId,
+      bindingId: result.bindingId,
       householdId: result.householdId,
       recipientId: result.recipientId,
-      bindingVersion: 1,
+      bindingVersion: result.bindingVersion,
     });
     return {
-      credential: rawCredential,
-      credentialId,
-      credentialFamilyId,
-      bindingId,
+      credential: result.credential,
+      credentialId: result.credentialId,
+      credentialFamilyId: result.credentialFamilyId,
+      bindingId: result.bindingId,
       householdId: result.householdId,
       recipientId: result.recipientId,
-      expiresAt: expiresAt.toISOString(),
+      expiresAt: result.expiresAt.toISOString(),
       ...access,
+    };
+  }
+
+  private async recoverConsumedCredentialExchange(
+    transaction: Prisma.TransactionClient,
+    challenge: ChallengeRecord,
+    command: ExchangeDeviceCredentialCommand,
+    now: Date,
+  ): Promise<CompletedCredentialExchange | null> {
+    const recoveryToken = command.recoveryToken;
+    if (
+      !recoveryToken ||
+      !challenge.pendingDeviceId ||
+      challenge.pendingDeviceId !== command.installationId ||
+      !challenge.approvedAt
+    ) {
+      return null;
+    }
+    const approvedAt = challenge.approvedAt.toISOString();
+    if (
+      !this.crypto.verifyCredentialRecoveryToken({
+        token: recoveryToken,
+        challengeId: challenge.id,
+        installationId: command.installationId,
+        challengeVersion: challenge.version,
+        approvedAt,
+        now,
+      })
+    ) {
+      return null;
+    }
+    const device = await transaction.device.findUnique({
+      where: {
+        id: command.installationId,
+        status: DEVICE_STATUS.active,
+        keyProtection: DEVICE_KEY_PROTECTION.nonExportableV1,
+        installationKeyAlgorithm: {
+          in: [
+            INSTALLATION_KEY_ALGORITHM.ed25519,
+            INSTALLATION_KEY_ALGORITHM.ecdsaP256Sha256,
+          ],
+        },
+      },
+    });
+    if (!device) return null;
+    const proofValid = this.crypto.verifyInstallationSignature(
+      device.installationKeyAlgorithm,
+      device.installationPublicKey,
+      buildExchangeRecoveryProofMessage({
+        challengeId: challenge.id,
+        installationId: device.id,
+        recoveryToken,
+      }),
+      command.signature,
+    );
+    if (!proofValid) return null;
+
+    const rawCredential = this.crypto.deriveInitialCredential({
+      challengeId: challenge.id,
+      installationId: device.id,
+      approvedAt,
+    });
+    const credentialHash = this.crypto.hashCredential(rawCredential);
+    const binding = await transaction.companionBinding.findUnique({
+      where: { deviceId: device.id },
+    });
+    if (
+      !binding ||
+      binding.status !== BINDING_STATUS.active ||
+      binding.revokedAt ||
+      binding.householdId !== challenge.householdId ||
+      binding.recipientId !== challenge.recipientId
+    ) {
+      return null;
+    }
+    const credential = await transaction.deviceCredential.findFirst({
+      where: {
+        bindingId: binding.id,
+        credentialHash,
+        rotatedAt: null,
+        revokedAt: null,
+        expiresAt: { gt: now },
+      },
+    });
+    if (
+      !credential ||
+      !this.crypto.equalHash(
+        device.installationKeyFingerprint,
+        credential.deviceKeyThumbprint,
+      )
+    ) {
+      return null;
+    }
+    const consumed = await transaction.deviceActivationChallenge.updateMany({
+      where: {
+        id: challenge.id,
+        status: CHALLENGE_STATUS.consumed,
+        version: challenge.version,
+      },
+      data: { version: { increment: 1 } },
+    });
+    if (consumed.count !== 1) return null;
+    return {
+      credential: rawCredential,
+      credentialId: credential.id,
+      credentialFamilyId: credential.credentialFamilyId,
+      bindingId: binding.id,
+      householdId: binding.householdId,
+      recipientId: binding.recipientId,
+      expiresAt: credential.expiresAt,
+      bindingVersion: binding.bindingVersion,
     };
   }
 
@@ -1198,6 +1367,10 @@ export class DeviceActivationApplicationService {
   async updateCompanionBinding(
     command: UpdateCompanionBindingCommand,
   ): Promise<CompanionBindingView> {
+    await this.identity.reauthenticateUser(
+      command.userId,
+      command.currentPassword,
+    );
     const now = this.clock.now();
     const result = await this.serializable(async (transaction) => {
       const binding = await transaction.companionBinding.findFirst({
@@ -1286,12 +1459,13 @@ export class DeviceActivationApplicationService {
     return this.toBindingView(result.binding);
   }
 
-  async revokeCompanionBinding(command: {
-    userId: string;
-    householdId: string;
-    bindingId: string;
-    reasonCode?: string;
-  }): Promise<{ revoked: true }> {
+  async revokeCompanionBinding(
+    command: RevokeCompanionBindingCommand,
+  ): Promise<{ revoked: true }> {
+    await this.identity.reauthenticateUser(
+      command.userId,
+      command.currentPassword,
+    );
     const now = this.clock.now();
     await this.serializable(async (transaction) => {
       const binding = await transaction.companionBinding.findFirst({

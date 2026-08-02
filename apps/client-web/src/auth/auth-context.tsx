@@ -26,6 +26,7 @@ type AuthContextValue = {
   register: (input: RegisterInput) => Promise<void>;
   logout: () => Promise<void>;
   logoutAll: () => Promise<void>;
+  lockToDeviceMode: () => Promise<void>;
   refreshUser: () => Promise<void>;
   requestEmailVerification: (email: string) => Promise<void>;
 };
@@ -168,6 +169,16 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
     }
   }, [markAnonymous]);
 
+  const lockToDeviceMode = useCallback(async () => {
+    await apiClient.request<{ locked: true }>("/auth/device-mode-lock", {
+      method: "POST",
+      body: {},
+      authenticated: false,
+      retryAuthentication: false,
+    });
+    markAnonymous();
+  }, [markAnonymous]);
+
   const refreshUser = useCallback(async () => {
     await loadMe();
   }, [loadMe]);
@@ -187,11 +198,13 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
       register,
       logout,
       logoutAll,
+      lockToDeviceMode,
       refreshUser,
       requestEmailVerification,
     }),
     [
       login,
+      lockToDeviceMode,
       logout,
       logoutAll,
       refreshUser,

@@ -379,6 +379,22 @@ export class IdentityApplicationService {
     });
   }
 
+  async revokeWebSessionByRefreshToken(refreshToken: string): Promise<void> {
+    const tokenHash = this.opaqueTokens.hashRefreshToken(refreshToken);
+    const session = await this.prisma.userSession.findUnique({
+      where: { refreshTokenHash: tokenHash },
+      select: { clientType: true, purpose: true, tokenFamilyId: true },
+    });
+    if (
+      !session ||
+      session.clientType !== 'WEB' ||
+      session.purpose !== USER_SESSION_PURPOSE
+    ) {
+      return;
+    }
+    await this.revokeRefreshFamily(session.tokenFamilyId, this.clock.now());
+  }
+
   async revokeAllSessions(userId: string): Promise<void> {
     await this.prisma.userSession.updateMany({
       where: { userId, purpose: USER_SESSION_PURPOSE, revokedAt: null },

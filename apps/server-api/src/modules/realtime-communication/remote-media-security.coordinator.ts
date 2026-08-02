@@ -6,6 +6,7 @@ import {
   type RemoteAssistanceSession,
 } from '../../infrastructure/database/generated/prisma/client';
 import { PrismaService } from '../../infrastructure/database/prisma.service';
+import { CompanionMediaControlService } from '../companion-session/companion-media-control.service';
 import {
   OPEN_REMOTE_STATUSES,
   LIVEKIT_PORT,
@@ -18,16 +19,7 @@ import {
 import type { LiveKitPort } from './ports/livekit.port';
 import type { MediaLeaseOwner, MediaLeasePort } from './ports/media-lease.port';
 
-type RevocationClient = Pick<
-  Prisma.TransactionClient,
-  | 'outboxEvent'
-  | 'companionSession'
-  | 'modelSession'
-  | 'remoteAssistanceSession'
-  | 'remoteSessionEvent'
-  | 'remoteSessionParticipant'
-  | '$queryRaw'
->;
+type RevocationClient = Prisma.TransactionClient;
 
 @Injectable()
 export class RemoteMediaSecurityCoordinator {
@@ -39,6 +31,7 @@ export class RemoteMediaSecurityCoordinator {
     private readonly leases: MediaLeasePort,
     @Inject(LIVEKIT_PORT)
     private readonly livekit: LiveKitPort,
+    private readonly companionMedia: CompanionMediaControlService,
   ) {}
 
   markRecipientRevoked(
@@ -96,14 +89,11 @@ export class RemoteMediaSecurityCoordinator {
       | 'MEMORY_STORAGE',
     occurredAt: Date,
   ): Promise<number> {
-    return this.markCompanionSessionsEnded(
+    return this.companionMedia.endForConsentRevocation(
       transaction,
-      {
-        householdId,
-        recipientId,
-        ...(scope === 'CAMERA_CAPTURE' ? { mode: 'AUDIO_VIDEO' } : {}),
-      },
-      `CONSENT_REVOKED_${scope}`,
+      householdId,
+      recipientId,
+      scope,
       occurredAt,
     );
   }
@@ -114,78 +104,23 @@ export class RemoteMediaSecurityCoordinator {
     reason: string,
     occurredAt: Date,
   ): Promise<number> {
-    return this.markCompanionSessionsEnded(
+    return this.companionMedia.endForBindingRevocation(
       transaction,
-      { bindingId },
+      bindingId,
       reason,
       occurredAt,
     );
-  }
-
-  private async markCompanionSessionsEnded(
-    transaction: RevocationClient,
-    where: Prisma.CompanionSessionWhereInput,
-    reason: string,
-    occurredAt: Date,
-  ): Promise<number> {
-    const normalizedReason = reason.slice(0, 64);
-    const sessions = await transaction.companionSession.findMany({
-      where: { ...where, status: 'ACTIVE' },
-    });
-    let changedCount = 0;
-    for (const session of sessions) {
-      await transaction.modelSession.updateMany({
-        where: { companionSessionId: session.id, status: 'ACTIVE' },
-        data: {
-          status: 'ENDED',
-          endedAt: occurredAt,
-          endReason: normalizedReason,
-        },
-      });
-      const changed = await transaction.companionSession.updateMany({
-        where: { id: session.id, status: 'ACTIVE' },
-        data: {
-          status: 'ENDED',
-          endedAt: occurredAt,
-          endReason: normalizedReason,
-          version: { increment: 1 },
-        },
-      });
-      if (changed.count !== 1) continue;
-      changedCount += 1;
-      await transaction.outboxEvent.create({
-        data: {
-          id: ulid(occurredAt.getTime()),
-          aggregateType: 'CompanionSession',
-          aggregateId: session.id,
-          eventType: 'CompanionSessionEnded',
-          payloadJson: {
-            householdId: session.householdId,
-            recipientId: session.recipientId,
-            bindingId: session.bindingId,
-            reason: normalizedReason,
-          },
-          occurredAt,
-          availableAt: occurredAt,
-        },
-      });
-    }
-    return changedCount;
   }
 
   async cleanupCompanionLeasesForRecipient(
     householdId: string,
     recipientId: string,
   ): Promise<void> {
-    const sessions = await this.prisma.companionSession.findMany({
-      where: {
+    const sessions =
+      await this.companionMedia.listConsentRevokedSessionsForLeaseCleanup(
         householdId,
         recipientId,
-        status: 'ENDED',
-        endReason: { startsWith: 'CONSENT_REVOKED_' },
-      },
-      select: { id: true, bindingId: true },
-    });
+      );
     for (const session of sessions) {
       await this.safeRelease(session.bindingId, {
         ownerType: 'AI_COMPANION',
@@ -196,10 +131,10 @@ export class RemoteMediaSecurityCoordinator {
   }
 
   async cleanupCompanionLeasesForBinding(bindingId: string): Promise<void> {
-    const sessions = await this.prisma.companionSession.findMany({
-      where: { bindingId, status: 'ENDED' },
-      select: { id: true, bindingId: true },
-    });
+    const sessions =
+      await this.companionMedia.listEndedSessionsForBindingLeaseCleanup(
+        bindingId,
+      );
     for (const session of sessions) {
       await this.safeRelease(session.bindingId, {
         ownerType: 'AI_COMPANION',

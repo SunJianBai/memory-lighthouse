@@ -21,7 +21,7 @@ flowchart TB
   subgraph Data[数据与异步]
     direction LR
     MySQL[(MySQL<br/>业务事实)]
-    Redis[(Redis<br/>短时状态 / 队列)]
+    Redis[(Redis<br/>短时状态 / 可重建调度)]
     MinIO[(MinIO<br/>对象内容)]
   end
 
@@ -133,6 +133,7 @@ Prisma 是 MySQL 的具体 Implementation；业务 Module 不为每张表制造�
 - 可编辑资料携带 `version`，冲突返回当前版本，不使用最后写入者静默覆盖。
 - WebSocket 事件只用于加速界面，断线后客户端用 REST 增量同步恢复。
 - Redis 丢失后可从 MySQL 重建在线外的业务状态；在线状态本身允许自然过期。
+- 资产扫描、永久删除和其他隐私关键任务先在同一 MySQL 事务写入持久 Outbox，并由数据库租约安全认领；Redis 只能承担可重建的唤醒或调度加速，不能成为此类任务唯一队列。该取舍见 [ADR-0006](../adr/0006-durable-outbox-for-privacy-lifecycle-jobs.md)。
 
 ## 7. 可观测性
 

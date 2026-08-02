@@ -105,4 +105,33 @@ describe('AuthController refresh transport', () => {
     expect(body.refreshToken).toBe('raw-refresh-token-must-not-leak-on-web');
     expect(cookie).not.toHaveBeenCalled();
   });
+
+  it('revokes and clears a stale Web refresh cookie before device mode', async () => {
+    const revokeWebSessionByRefreshToken = jest.fn(() => Promise.resolve());
+    const identity = {
+      revokeWebSessionByRefreshToken,
+    } as unknown as IdentityApplicationService;
+    const clearCookie = jest.fn();
+    const response = { clearCookie } as unknown as Response;
+    const requestWithCookie = {
+      ...request,
+      headers: { cookie: 'refresh=stale-web-refresh-token' },
+    } as unknown as Request;
+    const controller = new AuthController(identity, config);
+
+    await expect(
+      controller.lockDeviceMode(requestWithCookie, response),
+    ).resolves.toEqual({ locked: true });
+    expect(revokeWebSessionByRefreshToken).toHaveBeenCalledWith(
+      'stale-web-refresh-token',
+    );
+    expect(clearCookie).toHaveBeenCalledWith(
+      'refresh',
+      expect.objectContaining({
+        httpOnly: true,
+        path: '/openBMB/api/v1/auth',
+        sameSite: 'strict',
+      }),
+    );
+  });
 });

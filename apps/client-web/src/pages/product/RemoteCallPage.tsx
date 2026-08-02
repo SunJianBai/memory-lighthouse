@@ -24,6 +24,10 @@ import {
   LiveMediaConnection,
   type LiveMediaStatus,
 } from "../../realtime/live-media";
+import {
+  presentFamilyCall,
+  shouldDisconnectFamilyMedia,
+} from "../../realtime/family-call-presentation";
 import { useWorkspace } from "../../workspace/workspace-context";
 
 const terminal = new Set([
@@ -49,11 +53,13 @@ export const RemoteCallPage = () => {
   const [session, setSession] = useState<RemoteSessionView | null>(null);
   const [mediaStatus, setMediaStatus] = useState<LiveMediaStatus>("idle");
   const [mediaDetail, setMediaDetail] = useState("");
+  const [acceptedMediaFailure, setAcceptedMediaFailure] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const remoteVideo = useRef<HTMLVideoElement | null>(null);
   const remoteAudio = useRef<HTMLAudioElement | null>(null);
   const media = useRef(new LiveMediaConnection());
+  const expectedMediaDisconnect = useRef(false);
   const signals = useRef<BrowserRemoteSignalAdapter | null>(null);
   const commands = useMemo(
     () =>
@@ -98,6 +104,7 @@ export const RemoteCallPage = () => {
     signals.current = new BrowserRemoteSignalAdapter();
     return () => {
       signals.current?.close();
+      expectedMediaDisconnect.current = true;
       void media.current.disconnect();
     };
   }, []);
@@ -121,6 +128,26 @@ export const RemoteCallPage = () => {
     return () => window.clearInterval(timer);
   }, [pollSession, session?.id, session?.status]);
 
+  useEffect(() => {
+    if (!shouldDisconnectFamilyMedia(session?.status)) return;
+    let active = true;
+    expectedMediaDisconnect.current = true;
+    void media.current
+      .disconnect()
+      .catch((disconnectError) => {
+        if (active) setError(readableError(disconnectError));
+      })
+      .finally(() => {
+        if (!active) return;
+        setMediaStatus("idle");
+        setMediaDetail("");
+        expectedMediaDisconnect.current = false;
+      });
+    return () => {
+      active = false;
+    };
+  }, [session?.id, session?.status]);
+
   const call = async () => {
     if (!user || !workspace.householdId || !bindingId) return;
     const requestedMedia = {
@@ -137,6 +164,10 @@ export const RemoteCallPage = () => {
     });
     setBusy(true);
     setError("");
+    setMediaStatus("idle");
+    setMediaDetail("");
+    setAcceptedMediaFailure(false);
+    expectedMediaDisconnect.current = false;
     try {
       const created = await commands.execute(
         `remote-call:${fingerprint}`,
@@ -166,6 +197,7 @@ export const RemoteCallPage = () => {
     if (!workspace.householdId || !session) return;
     setBusy(true);
     setError("");
+    setAcceptedMediaFailure(false);
     try {
       const nextTicket = await apiClient.request<RemoteJoinTicketView>(
         `/households/${workspace.householdId}/remote-sessions/${session.id}/join-ticket`,
@@ -178,6 +210,12 @@ export const RemoteCallPage = () => {
         (status, detail) => {
           setMediaStatus(status);
           setMediaDetail(detail ?? "");
+          if (
+            !expectedMediaDisconnect.current &&
+            (status === "error" || status === "disconnected")
+          ) {
+            setAcceptedMediaFailure(true);
+          }
         },
       );
     } catch (joinError) {
@@ -190,6 +228,7 @@ export const RemoteCallPage = () => {
   const end = async (cancel = false) => {
     if (!workspace.householdId || !session) return;
     setBusy(true);
+    expectedMediaDisconnect.current = true;
     try {
       await media.current.disconnect();
       const next = await apiClient.request<RemoteSessionView>(
@@ -197,10 +236,13 @@ export const RemoteCallPage = () => {
         { method: "POST", body: {} },
       );
       setSession(next);
-      setMediaStatus("disconnected");
+      setMediaStatus("idle");
+      setMediaDetail("");
+      setAcceptedMediaFailure(false);
     } catch (endError) {
       setError(readableError(endError));
     } finally {
+      expectedMediaDisconnect.current = false;
       setBusy(false);
     }
   };
@@ -215,10 +257,12 @@ export const RemoteCallPage = () => {
     );
   }
 
-  const canJoin =
-    session &&
-    ["ACCEPTED", "CONNECTING", "ACTIVE"].includes(session.status) &&
-    mediaStatus !== "connected";
+  const callPresentation = presentFamilyCall(
+    session?.status,
+    mediaStatus,
+    acceptedMediaFailure,
+  );
+  const canJoin = Boolean(session && callPresentation.canJoin);
 
   return (
     <div className="remote-call-layout">
@@ -234,17 +278,9 @@ export const RemoteCallPage = () => {
           <div className="video-placeholder">
             <Video aria-hidden="true" size={38} />
             <strong>
-              {mediaStatus === "connected"
-                ? "媒体已连接，等待服务器确认双方轨道"
-                : session
-                  ? "等待现场接听并建立媒体连接"
-                  : "尚未发起通话"}
+              {callPresentation.title}
             </strong>
-            <p>
-              {mediaStatus === "connected"
-                ? "只有 LiveKit Webhook 确认双方加入并发布所需轨道后，状态才会变为 ACTIVE。"
-                : "不会在未接听时打开陪伴端摄像头或麦克风。"}
-            </p>
+            <p>{callPresentation.message}</p>
           </div>
         )}
         <div className="remote-video-status">
@@ -314,6 +350,12 @@ export const RemoteCallPage = () => {
         {error && (
           <div className="form-message error" role="alert">
             {error}
+          </div>
+        )}
+        {callPresentation.state === "media-failed" && (
+          <div className="form-message error" role="alert">
+            <strong>{callPresentation.title}</strong>
+            <span>{callPresentation.message}</span>
           </div>
         )}
         {!session || terminal.has(session.status) ? (

@@ -50,6 +50,17 @@ data class HouseholdView(
     val version: Int,
 )
 
+data class HouseholdMemberView(
+    val id: String,
+    val householdId: String,
+    val userId: String,
+    val displayName: String,
+    val status: String,
+    val roleCodes: List<String>,
+    val joinedAt: String?,
+    val version: Int,
+)
+
 data class CareRecipientView(
     val id: String,
     val householdId: String,
@@ -68,6 +79,44 @@ data class CareRecipientInput(
     val birthDate: String?,
     val timezone: String,
     val homeLabel: String?,
+)
+
+data class CareAuthorityView(
+    val id: String,
+    val householdId: String,
+    val recipientId: String,
+    val memberId: String,
+    val userId: String,
+    val displayName: String,
+    val relationshipLabel: String?,
+    val accessLevel: String,
+    val canManageProfile: Boolean,
+    val canManageConsent: Boolean,
+    val canManageRoutine: Boolean,
+    val canViewEvents: Boolean,
+    val canViewConversation: Boolean,
+    val canActivateDevice: Boolean,
+    val canRemoteCall: Boolean,
+    val receiveNotifications: Boolean,
+    val contactPriority: Int?,
+    val status: String,
+    val version: Int,
+)
+
+data class CareAuthorityInput(
+    val relationshipLabel: String?,
+    val accessLevel: String,
+    val canManageProfile: Boolean,
+    val canManageConsent: Boolean,
+    val canManageRoutine: Boolean,
+    val canViewEvents: Boolean,
+    val canViewConversation: Boolean,
+    val canActivateDevice: Boolean,
+    val canRemoteCall: Boolean,
+    val receiveNotifications: Boolean,
+    val contactPriority: Int?,
+    val status: String,
+    val version: Int?,
 )
 
 data class MemoryRevisionView(
@@ -430,12 +479,16 @@ data class LighthouseUiState(
     val busy: Boolean = false,
     val role: AppRole = AppRole.FAMILY,
     val signedIn: Boolean = false,
+    val companionDeviceLocked: Boolean = false,
     val user: UserView? = null,
     val households: List<HouseholdView> = emptyList(),
+    val householdMembers: List<HouseholdMemberView> = emptyList(),
     val selectedHouseholdId: String? = null,
     val recipients: List<CareRecipientView> = emptyList(),
     val selectedRecipientId: String? = null,
     val bindings: List<CompanionBindingView> = emptyList(),
+    val careAuthorities: List<CareAuthorityView> = emptyList(),
+    val authoritiesLoadedRecipientId: String? = null,
     val memories: List<MemoryView> = emptyList(),
     val routines: List<RoutineView> = emptyList(),
     val occurrences: List<OccurrenceView> = emptyList(),
@@ -449,6 +502,9 @@ data class LighthouseUiState(
     val companionContext: DeviceContextView? = null,
     val incomingRemoteSession: RemoteSessionView? = null,
     val activeRemoteSession: RemoteSessionView? = null,
+    val remoteCallFailureSessionId: String? = null,
+    val remoteCallFailureTitle: String? = null,
+    val remoteCallFailure: String? = null,
     val pendingSystemAnswerSessionId: String? = null,
     val aiScreenVisible: Boolean = false,
     val qrScannerVisible: Boolean = false,

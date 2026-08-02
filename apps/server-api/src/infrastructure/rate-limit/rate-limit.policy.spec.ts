@@ -35,3 +35,24 @@ describe('device activation account rate limits', () => {
     );
   });
 });
+
+describe('sensitive write password reauthentication rate limit', () => {
+  it('limits attempts across IP, account, session, and their account/IP pair', () => {
+    const definitions =
+      RATE_LIMIT_POLICY_DEFINITIONS[
+        RateLimitPolicy.SENSITIVE_WRITE_REAUTHENTICATION
+      ];
+
+    expect(definitions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ dimensions: ['ip'] }),
+        expect.objectContaining({ dimensions: ['user-account'] }),
+        expect.objectContaining({ dimensions: ['user-session'] }),
+        expect.objectContaining({
+          limit: 5,
+          dimensions: ['ip', 'user-account'],
+        }),
+      ]),
+    );
+  });
+});

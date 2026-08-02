@@ -748,6 +748,10 @@ function harness(options: HarnessOptions = {}) {
     }),
   };
   const companionMedia = {
+    endForConsentRevocation: jest.fn(async () => 0),
+    endForBindingRevocation: jest.fn(async () => 0),
+    listConsentRevokedSessionsForLeaseCleanup: jest.fn(async () => []),
+    listEndedSessionsForBindingLeaseCleanup: jest.fn(async () => []),
     interruptForRemoteAssistance: jest.fn(
       async (client: typeof transaction, bindingId: string, now: Date) => {
         await client.modelSession.updateMany({
@@ -780,6 +784,7 @@ function harness(options: HarnessOptions = {}) {
     prisma as unknown as PrismaService,
     leases as unknown as MediaLeasePort,
     livekit as unknown as LiveKitPort,
+    companionMedia as unknown as CompanionMediaControlService,
   );
   const markBindingRevoked = jest
     .spyOn(mediaSecurity, 'markBindingRevoked')

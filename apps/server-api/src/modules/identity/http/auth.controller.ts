@@ -142,6 +142,21 @@ export class AuthController {
     return { loggedOut: true };
   }
 
+  @Post('device-mode-lock')
+  @RateLimited(RateLimitPolicy.AUTH_REFRESH)
+  @HttpCode(HttpStatus.OK)
+  async lockDeviceMode(
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<{ locked: true }> {
+    const refreshToken = readCookie(request, this.config.refreshCookieName);
+    if (refreshToken) {
+      await this.identity.revokeWebSessionByRefreshToken(refreshToken);
+    }
+    this.clearRefreshCookie(response);
+    return { locked: true };
+  }
+
   @Post('logout-all')
   @UseGuards(UserAccessGuard)
   @HttpCode(HttpStatus.OK)

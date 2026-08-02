@@ -261,4 +261,25 @@ export const RATE_LIMIT_POLICY_DEFINITIONS: Readonly<
       dimensions: ['ip', 'binding-id'],
     },
   ],
+  [RateLimitPolicy.SENSITIVE_WRITE_REAUTHENTICATION]: [
+    { id: 'ip', limit: 20, windowMs: 15 * MINUTE, dimensions: ['ip'] },
+    {
+      id: 'account',
+      limit: 5,
+      windowMs: 15 * MINUTE,
+      dimensions: ['user-account'],
+    },
+    {
+      id: 'source-session',
+      limit: 5,
+      windowMs: 15 * MINUTE,
+      dimensions: ['user-session'],
+    },
+    {
+      id: 'ip-account',
+      limit: 5,
+      windowMs: 15 * MINUTE,
+      dimensions: ['ip', 'user-account'],
+    },
+  ],
 };

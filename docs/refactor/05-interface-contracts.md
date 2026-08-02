@@ -44,6 +44,7 @@ POST   /v1/auth/login
 POST   /v1/auth/refresh
 POST   /v1/auth/logout
 POST   /v1/auth/logout-all
+POST   /v1/auth/device-mode-lock
 POST   /v1/auth/email-verifications
 POST   /v1/auth/email-verifications/confirm
 POST   /v1/auth/password-resets
@@ -56,6 +57,8 @@ DELETE /v1/me/sessions/:sessionId
 注册请求允许邮箱和用户名至少填一项；创建家庭或激活设备前必须存在已验证邮箱。登录只接收一个 `identifier`，服务器按规范化规则匹配邮箱或用户名，不返回“账号不存在”差异信息。
 
 Web 刷新令牌使用 HttpOnly Cookie；Android 在响应体取得经 Keystore 加密保存的刷新令牌。两者均执行轮换和重放检测。
+
+Web 在兑换或恢复 Device Identity 前必须先调用 `device-mode-lock`。该接口按 HttpOnly Refresh Cookie 查找并撤销整个 Web Session family、清除 Cookie，且不要求页面已经持有 Access Token；这样即使认证启动曾因瞬时网络错误进入匿名态，也不能把仍有效的家属 Refresh Cookie 带入陪伴模式。接口失败时客户端不得兑换凭据或加载设备上下文。
 
 ## 3. Household 与陪伴对象 Interface
 
@@ -80,6 +83,8 @@ PUT    /v1/households/:householdId/care-recipients/:recipientId/authorities/:mem
 ```
 
 家庭 ID 显式位于路径中，不使用前端提交的角色或“当前家庭”替代授权判断。
+
+成员角色修改、成员移除和 Care Authority 写入均属于高风险授权变更，JSON Body 必须额外携带 `currentPassword`。服务端以密码原值重新认证当前账号，不做 trim 或其他规范化，并按 IP、账号、登录会话及 IP/账号组合限流；密码错误时不得进入业务事务。Web/Android 只在内存/Compose state 中短暂保存该字段，每次提交、失败或取消后立即清空。
 
 ## 4. 设备安装与激活 Interface
 
@@ -127,7 +132,9 @@ DELETE /v1/households/:householdId/companion-bindings/:bindingId
 }
 ```
 
-二维码的秘密部分只展示一次。设备 Claim 后仍然没有家庭访问权，必须等待已登录家属批准并证明持有安装私钥，才能兑换 Device Credential。公开状态轮询只返回状态和时间，不返回设备信息；有当前 Care Authority 的家属通过 `approval-details` 读取厂商、型号、平台、系统/App 版本、公钥指纹后缀、认领时间和粗粒度网络类别。批准请求必须同时携带 `Idempotency-Key` 请求头及该详情响应中的 `claimSnapshotToken`；设备信息或挑战版本变化时返回 `ACTIVATION_APPROVAL_SNAPSHOT_CHANGED`，要求重新核对。设备认领按 IP、Challenge 与安装身份限流；家属创建/批准再按 IP、账号、登录会话、陪伴对象或 Challenge 的组合限流。
+二维码的秘密部分只展示一次。设备 Claim 后仍然没有家庭访问权，必须等待已登录家属批准并证明持有安装私钥，才能兑换 Device Credential。公开状态轮询只返回状态、时间，以及仅在 `CONSUMED` 时返回的短时不透明恢复令牌，不返回设备信息；有当前 Care Authority 的家属通过 `approval-details` 读取厂商、型号、平台、系统/App 版本、公钥指纹后缀、认领时间和粗粒度网络类别。批准请求必须同时携带 `Idempotency-Key` 请求头及该详情响应中的 `claimSnapshotToken`；设备信息或挑战版本变化时返回 `ACTIVATION_APPROVAL_SNAPSHOT_CHANGED`，要求重新核对。设备认领按 IP、Challenge 与安装身份限流；家属创建/批准再按 IP、账号、登录会话、陪伴对象或 Challenge 的组合限流。
+
+设备完成凭据兑换后，客户端立即注销并清除当前家属 Session，后续陪伴界面只使用 Device Access Token 与可轮换 Device Credential；不得保留家属 Access/Refresh Token 作为隐藏后门。首次 Device Credential 由服务端使用独立域和 Credential Pepper 对 `challengeId + installationId + approvedAt` 做 HMAC 派生，只持久化加 Pepper 的凭据哈希，不保存或加密保存可恢复明文。若数据库已经提交 `CONSUMED`、Binding 与 Credential，但 HTTP 响应丢失，状态接口签发绑定 `challengeId + installationId + approvedAt + challenge.version + expiresAt` 的 60 秒 HMAC 恢复令牌；同一安装必须用不可导出私钥签署包含完整令牌的独立 `exchange-recovery` proof。恢复事务复核 ACTIVE Device/Binding、公钥指纹、家庭与长者、初始 Credential 哈希、撤销/到期/轮换状态，并以 MySQL `status=CONSUMED AND version=<令牌版本>` CAS 原子消费 proof、递增版本，然后只重新呈现同一凭据并签发新的短时 Access Token，不创建第二条 Binding/Credential。首次 exchange 请求或已消费 recovery 请求的重放均返回 `ACTIVATION_ALREADY_CONSUMED`；响应再次丢失时客户端取得新版本令牌并重新签名。Redis 不是恢复授权事实。Web 将待兑换 Challenge 暂存于当前浏览器会话，Android 将其保存在 Keystore 加密存储中；两端都继续轮询 `APPROVED/CONSUMED`，直至凭据安全落盘。轮询取消不得删除恢复句柄；`CANCELLED / EXPIRED / ATTEMPTS_EXCEEDED` 是用户可见终态，网络/5xx/408/429 才自动重试，409 恢复冲突必须有界。若服务端响应成功但 Web 的 IndexedDB commit 中止，客户端必须停止当前自动轮询、跨刷新保留 Challenge，并在恢复完成前拒绝新 Claim 覆盖；运行中的旧 Challenge 兑换也不得被新代际重置。退出陪伴设备模式只导航到受保护的家属路由，必须重新输入账号密码登录。Binding 的状态修改与永久撤销也要求 JSON Body 中的 `currentPassword`，校验和限流规则与成员授权变更相同；撤销成功后设备访问令牌和凭据族立即失效。
 
 完整时序见 [device-activation-sequence.mmd](./diagrams/device-activation-sequence.mmd)。
 

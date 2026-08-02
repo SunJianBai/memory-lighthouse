@@ -57,8 +57,6 @@ class LighthouseRepository(
 
     fun hasActiveCompanionSession(): Boolean = activeCompanionSessionId.get() != null
 
-    fun deviceCredentialHouseholdId(): String? = vault.deviceCredential()?.householdId
-
     fun pendingDeviceActivation(): PendingDeviceActivation? = vault.pendingDeviceActivation()
 
     suspend fun login(identifier: String, password: String): UserView {
@@ -108,6 +106,24 @@ class LighthouseRepository(
         clearUserSession()
     }
 
+    suspend fun revokeUserSessionForCompanionMode() {
+        val session = vault.userSession()
+        // Device mode must stop retaining family authority before any network
+        // wait. The server-side logout is best effort; the local refresh token
+        // and every account-scoped pending command are already gone.
+        clearUserSession()
+        if (session != null) {
+            runCatching {
+                http.request(
+                    "POST",
+                    "auth/logout",
+                    JSONObject(),
+                    session.accessToken,
+                )
+            }
+        }
+    }
+
     suspend fun restoreUser(): UserView? {
         if (!hasUserSession()) return null
         return runCatching { getMe() }.getOrElse {
@@ -141,6 +157,75 @@ class LighthouseRepository(
     suspend fun listRecipients(householdId: String): List<CareRecipientView> =
         arrayData(userRequest("GET", "households/$householdId/care-recipients"))
             .mapObjects(::parseRecipient)
+
+    suspend fun listHouseholdMembers(householdId: String): List<HouseholdMemberView> =
+        arrayData(userRequest("GET", FamilyApiContract.householdMembersPath(householdId)))
+            .mapObjects(FamilyJsonMapper::parseHouseholdMember)
+
+    suspend fun updateHouseholdMember(
+        householdId: String,
+        member: HouseholdMemberView,
+        roleCodes: Set<String>,
+        currentPassword: String,
+    ): HouseholdMemberView {
+        require(currentPassword.isNotEmpty()) { "请输入当前账号密码以确认角色变更" }
+        return FamilyJsonMapper.parseHouseholdMember(
+            requireNotNull(
+                userRequest(
+                    "PATCH",
+                    FamilyApiContract.householdMemberPath(householdId, member.id),
+                    FamilyApiContract.updateHouseholdMemberBody(
+                        roleCodes,
+                        member.version,
+                        currentPassword,
+                    ),
+                ),
+            ),
+        )
+    }
+
+    suspend fun removeHouseholdMember(
+        householdId: String,
+        member: HouseholdMemberView,
+        currentPassword: String,
+    ) {
+        require(currentPassword.isNotEmpty()) { "请输入当前账号密码以确认移除成员" }
+        userRequest(
+            "DELETE",
+            FamilyApiContract.removeHouseholdMemberPath(
+                householdId,
+                member.id,
+                member.version,
+            ),
+            FamilyApiContract.removeHouseholdMemberBody(currentPassword),
+        )
+    }
+
+    suspend fun listCareAuthorities(
+        householdId: String,
+        recipientId: String,
+    ): List<CareAuthorityView> = arrayData(
+        userRequest("GET", FamilyApiContract.careAuthoritiesPath(householdId, recipientId)),
+    ).mapObjects(FamilyJsonMapper::parseCareAuthority)
+
+    suspend fun putCareAuthority(
+        householdId: String,
+        recipientId: String,
+        memberId: String,
+        input: CareAuthorityInput,
+        currentPassword: String,
+    ): CareAuthorityView {
+        require(currentPassword.isNotEmpty()) { "请输入当前账号密码以确认权限变更" }
+        return FamilyJsonMapper.parseCareAuthority(
+            requireNotNull(
+                userRequest(
+                    "PUT",
+                    FamilyApiContract.careAuthorityPath(householdId, recipientId, memberId),
+                    FamilyApiContract.careAuthorityBody(input, currentPassword),
+                ),
+            ),
+        )
+    }
 
     suspend fun createRecipient(
         householdId: String,
@@ -386,6 +471,20 @@ class LighthouseRepository(
         arrayData(userRequest("GET", "households/$householdId/companion-bindings"))
             .mapObjects(::parseBinding)
 
+    suspend fun revokeBinding(
+        householdId: String,
+        bindingId: String,
+        reasonCode: String?,
+        currentPassword: String,
+    ) {
+        require(currentPassword.isNotEmpty()) { "请输入当前账号密码以确认解绑设备" }
+        userRequest(
+            "DELETE",
+            FamilyApiContract.revokeBindingPath(householdId, bindingId),
+            FamilyApiContract.revokeBindingBody(reasonCode, currentPassword),
+        )
+    }
+
     suspend fun createActivationChallenge(
         householdId: String,
         recipientId: String,
@@ -488,34 +587,67 @@ class LighthouseRepository(
         ).also(vault::savePendingDeviceActivation)
     }
 
-    suspend fun exchangeApprovedActivation(pending: PendingDeviceActivation): DeviceCredential? {
+    fun abandonPendingDeviceActivation() = vault.savePendingDeviceActivation(null)
+
+    suspend fun exchangeApprovedActivation(
+        pending: PendingDeviceActivation,
+    ): ActivationExchangeOutcome {
         val status = requireNotNull(
             http.request("GET", "activation-challenges/${pending.challengeId}"),
         )
-        if (status.getString("status") != "APPROVED") return null
-        val approvedAt = status.optString("approvedAt").takeIf(String::isNotBlank) ?: return null
+        val activationStatus = status.getString("status")
+        when (activationChallengeDisposition(activationStatus)) {
+            ActivationChallengeDisposition.WAITING -> return ActivationExchangeOutcome.Waiting
+            ActivationChallengeDisposition.TERMINAL -> {
+                abandonPendingDeviceActivation()
+                return ActivationExchangeOutcome.Terminal(
+                    status = activationStatus,
+                    message = activationTerminalMessage(activationStatus),
+                )
+            }
+            ActivationChallengeDisposition.INVALID ->
+                error("服务端返回了未知的设备激活状态：$activationStatus")
+            ActivationChallengeDisposition.EXCHANGE -> Unit
+        }
+        val approvedAt = status.optString("approvedAt").takeIf(String::isNotBlank)
+            ?: error("设备激活响应缺少批准时间")
         val installation = requireNotNull(vault.deviceInstallation())
+        val recoveryToken = if (activationStatus == "CONSUMED") {
+            status.optString("recoveryToken").takeIf(String::isNotBlank)
+                ?: error("设备凭据恢复响应缺少恢复令牌")
+        } else {
+            null
+        }
         val signature = signer.sign(
-            DeviceProofProtocol.exchangeMessage(
+            recoveryToken?.let {
+                DeviceProofProtocol.exchangeRecoveryMessage(
+                    challengeId = pending.challengeId,
+                    installationId = installation.installationId,
+                    recoveryToken = it,
+                )
+            } ?: DeviceProofProtocol.exchangeMessage(
                 challengeId = pending.challengeId,
                 installationId = installation.installationId,
                 approvedAt = approvedAt,
             ),
         )
+        val exchangeBody = JSONObject()
+            .put("challengeId", pending.challengeId)
+            .put("installationId", installation.installationId)
+            .put("signature", signature)
+        recoveryToken?.let { exchangeBody.put("recoveryToken", it) }
         val result = requireNotNull(
             http.request(
                 "POST",
                 "device-credentials/exchange",
-                JSONObject()
-                    .put("challengeId", pending.challengeId)
-                    .put("installationId", installation.installationId)
-                    .put("signature", signature),
+                exchangeBody,
             ),
         )
-        return parseDeviceCredential(result).also {
+        val credential = parseDeviceCredential(result).also {
             vault.saveDeviceCredential(it)
             vault.savePendingDeviceActivation(null)
         }
+        return ActivationExchangeOutcome.Activated(credential)
     }
 
     suspend fun getDeviceContext(): DeviceContextView = parseDeviceContext(
@@ -774,9 +906,10 @@ class LighthouseRepository(
 
     private fun clearUserSession() {
         // Logout/terminal refresh failure is an explicit abandonment boundary.
+        // Remove access/refresh authority before ancillary retry metadata.
+        vault.saveUserSession(null)
         vault.saveCareCommandState(null)
         vault.saveUserCareNamespace(null)
-        vault.saveUserSession(null)
     }
 
     private suspend fun deviceRequest(

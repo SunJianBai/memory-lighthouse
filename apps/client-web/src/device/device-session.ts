@@ -13,6 +13,7 @@ import type {
   RemoteJoinTicketView,
   RemoteSessionView,
 } from "../api/types";
+import { DeviceCredentialPersistenceError } from "./device-storage-error";
 
 type DeviceCredential = {
   credential: string;
@@ -43,6 +44,8 @@ type ActivationStatus = {
   expiresAt: string;
   claimedAt: string | null;
   approvedAt: string | null;
+  recoveryToken: string | null;
+  recoveryTokenExpiresAt: string | null;
 };
 
 export type ActivationClaim = {
@@ -121,6 +124,24 @@ const canonicalProof = (
   return encoder.encode(`${lines.join("\n")}\n`);
 };
 
+export const buildDeviceExchangeProof = (input: {
+  challengeId: string;
+  installationId: string;
+  approvedAt: string;
+  recoveryToken?: string;
+}): Uint8Array =>
+  input.recoveryToken
+    ? canonicalProof("exchange-recovery", [
+        ["challenge-id", input.challengeId],
+        ["installation-id", input.installationId],
+        ["recovery-token", input.recoveryToken],
+      ])
+    : canonicalProof("exchange", [
+        ["challenge-id", input.challengeId],
+        ["installation-id", input.installationId],
+        ["approved-at", input.approvedAt],
+      ]);
+
 const sign = async (key: CryptoKey, message: Uint8Array): Promise<string> =>
   base64Url(
     await crypto.subtle.sign(
@@ -133,7 +154,7 @@ const sign = async (key: CryptoKey, message: Uint8Array): Promise<string> =>
     ),
   );
 
-class DeviceVault {
+export class DeviceVault {
   private database: Promise<IDBDatabase> | null = null;
 
   get(): Promise<InstallationRecord | null> {
@@ -180,10 +201,40 @@ class DeviceVault {
     const database = await this.open();
     return new Promise<T>((resolve, reject) => {
       const transaction = database.transaction("installation", mode);
-      const request = operation(transaction.objectStore("installation"));
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () =>
-        reject(request.error ?? new Error("设备安全存储操作失败"));
+      let request: IDBRequest<T>;
+      try {
+        request = operation(transaction.objectStore("installation"));
+      } catch (error) {
+        transaction.abort();
+        reject(error);
+        return;
+      }
+      let requestSucceeded = false;
+      let requestResult!: T;
+      let operationError: DOMException | null = null;
+      request.onsuccess = () => {
+        requestSucceeded = true;
+        requestResult = request.result;
+      };
+      request.onerror = () => {
+        operationError = request.error;
+      };
+      transaction.onerror = () => {
+        operationError ??= transaction.error;
+      };
+      transaction.onabort = () =>
+        reject(
+          transaction.error ??
+            operationError ??
+            new Error("设备安全存储事务已中止"),
+        );
+      transaction.oncomplete = () => {
+        if (!requestSucceeded) {
+          reject(operationError ?? new Error("设备安全存储操作未完成"));
+          return;
+        }
+        resolve(requestResult);
+      };
     });
   }
 }
@@ -266,15 +317,20 @@ export class DeviceSessionManager {
     );
   }
 
-  async exchange(challengeId: string, approvedAt: string): Promise<void> {
+  async exchange(
+    challengeId: string,
+    approvedAt: string,
+    recoveryToken?: string,
+  ): Promise<void> {
     const installation = await this.ensureInstallation();
     const signature = await sign(
       installation.privateKey,
-      canonicalProof("exchange", [
-        ["challenge-id", challengeId],
-        ["installation-id", installation.installationId],
-        ["approved-at", approvedAt],
-      ]),
+      buildDeviceExchangeProof({
+        challengeId,
+        installationId: installation.installationId,
+        approvedAt,
+        recoveryToken,
+      }),
     );
     const credential = await publicClient.request<DeviceCredential>(
       "/device-credentials/exchange",
@@ -284,13 +340,19 @@ export class DeviceSessionManager {
           challengeId,
           installationId: installation.installationId,
           signature,
+          ...(recoveryToken ? { recoveryToken } : {}),
         },
         authenticated: false,
         retryAuthentication: false,
       },
     );
-    this.record = { ...installation, credential };
-    await vault.put(this.record);
+    const persisted = { ...installation, credential };
+    try {
+      await vault.put(persisted);
+    } catch (storageError) {
+      throw new DeviceCredentialPersistenceError(storageError);
+    }
+    this.record = persisted;
     deviceClient.setAccessToken(credential.accessToken);
   }
 
@@ -544,8 +606,9 @@ export class DeviceSessionManager {
           retryAuthentication: false,
         },
       );
-      this.record = { ...installation, credential: rotated };
-      await vault.put(this.record);
+      const persisted = { ...installation, credential: rotated };
+      await vault.put(persisted);
+      this.record = persisted;
       deviceClient.setAccessToken(rotated.accessToken);
       return true;
     } catch (error) {
@@ -610,15 +673,16 @@ export class DeviceSessionManager {
       authenticated: false,
       retryAuthentication: false,
     });
-    this.record = {
+    const persisted: InstallationRecord = {
       id: "current",
       protocolVersion: CURRENT_INSTALLATION_PROTOCOL,
       publicKey: pair.publicKey,
       privateKey: pair.privateKey,
       ...registered,
     };
-    await vault.put(this.record);
-    return this.record;
+    await vault.put(persisted);
+    this.record = persisted;
+    return persisted;
   }
 
   private async loadSecureInstallation(): Promise<InstallationRecord | null> {

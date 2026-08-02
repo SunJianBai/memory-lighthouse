@@ -46,4 +46,25 @@ class DeviceProofProtocolTest {
         assertEquals("TBPhzBPPxli_kmldAd7trYvijeVxv2lrGPwKwQXsMnc", first)
         assertFalse(first.contains('='))
     }
+
+    @Test
+    fun recoveryMessageUsesAFreshTokenBoundProofAction() {
+        val message = DeviceProofProtocol.exchangeRecoveryMessage(
+            challengeId = "01HZY123456789ABCDEFGHJKM",
+            installationId = "01HZY987654321ABCDEFGHJKM",
+            recoveryToken = "v1.recovery-token.signature",
+        ).toString(Charsets.UTF_8)
+
+        assertEquals(
+            listOf(
+                "memory-lighthouse.device-proof.v1",
+                "action=exchange-recovery",
+                "challenge-id=01HZY123456789ABCDEFGHJKM",
+                "installation-id=01HZY987654321ABCDEFGHJKM",
+                "recovery-token=v1.recovery-token.signature",
+                "",
+            ).joinToString("\n"),
+            message,
+        )
+    }
 }

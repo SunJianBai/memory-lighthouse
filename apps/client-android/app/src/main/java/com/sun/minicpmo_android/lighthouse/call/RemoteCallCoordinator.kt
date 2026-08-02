@@ -13,9 +13,13 @@ import com.sun.minicpmo_android.lighthouse.realtime.CallSide
 import com.sun.minicpmo_android.lighthouse.realtime.LiveCallPhase
 import com.sun.minicpmo_android.lighthouse.realtime.LiveCallState
 import com.sun.minicpmo_android.lighthouse.realtime.LiveKitCallController
+import com.sun.minicpmo_android.lighthouse.realtime.remoteFailureMessage
+import com.sun.minicpmo_android.lighthouse.realtime.remoteFailureTitle
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,12 +29,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import livekit.org.webrtc.SurfaceViewRenderer
+import java.util.concurrent.ConcurrentHashMap
 
 data class CoordinatedRemoteCallState(
     val incoming: RemoteSessionView? = null,
     val active: RemoteSessionView? = null,
     val lifecycle: CallLifecycleState = CallLifecyclePolicy.initial(),
+    val failureTitle: String? = null,
+    val failureMessage: String? = null,
 )
 
 internal interface CompanionCallRuntime {
@@ -63,6 +72,7 @@ class RemoteCallCoordinator(
     private var discoveryJob: Job? = null
     private var heartbeatJob: Job? = null
     private val mediaStarts = mutableMapOf<String, CompletableDeferred<Boolean>>()
+    private val locallyTerminatedSessionIds = ConcurrentHashMap.newKeySet<String>()
     private var handlingLiveKitFailure = false
 
     private val telecom = CoreTelecomController(
@@ -141,9 +151,37 @@ class RemoteCallCoordinator(
     }
 
     suspend fun acceptIncoming(sessionId: String, fromTelecom: Boolean = false) =
-        mediaHandoff.handoffForRemoteAnswer(sessionId) {
-            acceptIncomingAfterLocalStop(sessionId, fromTelecom)
-        }
+        runHandoffWithTerminalCompensation(
+            handoff = {
+                mediaHandoff.handoffForRemoteAnswer(sessionId) {
+                    acceptIncomingAfterLocalStop(sessionId, fromTelecom)
+                }
+            },
+            alreadyTerminated = { locallyTerminatedSessionIds.contains(sessionId) },
+            terminateBeforeRethrow = { error ->
+                transitionMutex.withLock {
+                    if (locallyTerminatedSessionIds.contains(sessionId)) return@withLock
+                    terminateLocalFirst(
+                        sessionId = sessionId,
+                        event = CallLifecycleEvent.Failed(
+                            sessionId,
+                            error.message ?: "media_handoff_failed",
+                        ),
+                        causeCode = DisconnectCause.LOCAL,
+                        notifyTelecom = !fromTelecom,
+                        notifyServerAsynchronously = true,
+                    ) {
+                        try {
+                            repository.declineDeviceRemoteSession(sessionId)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Throwable) {
+                            repository.endDeviceRemoteSession(sessionId)
+                        }
+                    }
+                }
+            },
+        )
 
     fun attachLocalCompanionStopConsumer() = mediaHandoff.attachLocalStopConsumer()
 
@@ -154,6 +192,10 @@ class RemoteCallCoordinator(
 
     fun failLocalCompanionStop(requestId: Long, error: Throwable) =
         mediaHandoff.failLocalStop(requestId, error)
+
+    fun dismissFailure() {
+        _state.value = _state.value.copy(failureTitle = null, failureMessage = null)
+    }
 
     suspend fun applyDeviceHeartbeat(heartbeat: DeviceHeartbeatView) =
         mediaHandoff.applyMediaDirective(heartbeat.mediaDirective)
@@ -190,7 +232,7 @@ class RemoteCallCoordinator(
             var acceptedForCleanup: RemoteSessionView? = null
             try {
                 check(startMediaForeground(remote)) {
-                    "无法启动摄像头和麦克风前台服务；请在解锁后从来电通知重新接听"
+                    "无法启动摄像头和麦克风前台服务；本次来电已结束，请让家属重新发起"
                 }
                 val accepted = if (remote.status == "RINGING") {
                     repository.acceptDeviceRemoteSession(remote.id)
@@ -203,17 +245,33 @@ class RemoteCallCoordinator(
                 _state.value = _state.value.copy(
                     incoming = null,
                     active = accepted,
+                    failureTitle = null,
+                    failureMessage = null,
                 )
                 runtime?.showOngoing(accepted)
                 liveKit.connect(ticket, CallSide.DEVICE)
                 startHeartbeat(remote.id)
             } catch (error: Throwable) {
-                acceptedForCleanup?.let { runCatching { repository.endDeviceRemoteSession(it.id) } }
-                releaseLocal(
+                terminateLocalFirst(
                     sessionId,
                     CallLifecycleEvent.Failed(sessionId, error.message ?: "accept_failed"),
                     DisconnectCause.LOCAL,
-                )
+                    notifyTelecom = !fromTelecom,
+                ) {
+                    if (acceptedForCleanup != null) {
+                        repository.endDeviceRemoteSession(sessionId)
+                    } else {
+                        try {
+                            repository.declineDeviceRemoteSession(sessionId)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Throwable) {
+                            // accept may have committed while its response was
+                            // lost; fall back to ending that accepted session.
+                            repository.endDeviceRemoteSession(sessionId)
+                        }
+                    }
+                }
                 throw error
             }
         }
@@ -222,13 +280,12 @@ class RemoteCallCoordinator(
     suspend fun declineIncoming(sessionId: String, fromTelecom: Boolean = false) {
         transitionMutex.withLock {
             val incoming = _state.value.incoming?.takeIf { it.id == sessionId } ?: return
-            runCatching { repository.declineDeviceRemoteSession(incoming.id) }
-            releaseLocal(
+            terminateLocalFirst(
                 sessionId,
                 CallLifecycleEvent.LocalDecline(sessionId),
                 DisconnectCause.REJECTED,
                 notifyTelecom = !fromTelecom,
-            )
+            ) { repository.declineDeviceRemoteSession(incoming.id) }
         }
     }
 
@@ -240,20 +297,19 @@ class RemoteCallCoordinator(
         transitionMutex.withLock {
             val current = (_state.value.active ?: _state.value.incoming)
                 ?.takeIf { it.id == sessionId } ?: return
-            runCatching {
+            terminateLocalFirst(
+                sessionId,
+                CallLifecycleEvent.LocalHangup(sessionId),
+                DisconnectCause.LOCAL,
+                notifyTelecom = !fromTelecom,
+                reason = reason,
+            ) {
                 if (current.status == "RINGING") {
                     repository.declineDeviceRemoteSession(current.id)
                 } else {
                     repository.endDeviceRemoteSession(current.id)
                 }
             }
-            releaseLocal(
-                sessionId,
-                CallLifecycleEvent.LocalHangup(sessionId),
-                DisconnectCause.LOCAL,
-                notifyTelecom = !fromTelecom,
-                reason = reason,
-            )
         }
     }
 
@@ -310,13 +366,30 @@ class RemoteCallCoordinator(
 
     private suspend fun reconcile(remote: RemoteSessionView?) {
         val current = _state.value
-        if (remote == null || remote.status in TERMINAL_STATUSES) {
+        if (remote == null) {
+            locallyTerminatedSessionIds.clear()
             val sessionId = current.active?.id ?: current.incoming?.id ?: return
             releaseLocal(
                 sessionId,
                 CallLifecycleEvent.LocalHangup(sessionId),
                 DisconnectCause.REMOTE,
-                reason = remote?.endReason ?: "remote_ended",
+                reason = "remote_ended",
+            )
+            return
+        }
+        if (locallyTerminatedSessionIds.contains(remote.id)) {
+            if (remote.status in TERMINAL_STATUSES) {
+                locallyTerminatedSessionIds.remove(remote.id)
+            }
+            return
+        }
+        if (remote.status in TERMINAL_STATUSES) {
+            val sessionId = current.active?.id ?: current.incoming?.id ?: return
+            releaseLocal(
+                sessionId,
+                CallLifecycleEvent.LocalHangup(sessionId),
+                DisconnectCause.REMOTE,
+                reason = remote.endReason ?: "remote_ended",
             )
             return
         }
@@ -354,6 +427,8 @@ class RemoteCallCoordinator(
         return try {
             CompanionMediaService.start(appContext, remote)
             withTimeout(MEDIA_SERVICE_TIMEOUT_MILLIS) { ready.await() }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Throwable) {
             false
         } finally {
@@ -363,9 +438,18 @@ class RemoteCallCoordinator(
 
     private fun startHeartbeat(sessionId: String) {
         heartbeatJob?.cancel()
+        val leaseGuard = RemoteHeartbeatLeaseGuard(
+            renewHeartbeat = repository::remoteHeartbeat,
+            onLeaseLost = { failedSessionId, error ->
+                // Clear the field before failCompanionCall tears down media so
+                // releaseLocal does not cancel the coroutine performing teardown.
+                heartbeatJob = null
+                failCompanionCall(failedSessionId, error)
+            },
+        )
         heartbeatJob = scope.launch {
             while (isActive && _state.value.active?.id == sessionId) {
-                runCatching { repository.remoteHeartbeat(sessionId) }
+                if (!leaseGuard.renew(sessionId)) return@launch
                 delay(HEARTBEAT_INTERVAL_MILLIS)
             }
         }
@@ -376,18 +460,17 @@ class RemoteCallCoordinator(
         if (current?.id != sessionId || handlingLiveKitFailure) return
         handlingLiveKitFailure = true
         try {
-            runCatching {
+            terminateLocalFirst(
+                sessionId,
+                CallLifecycleEvent.Failed(sessionId, error.message ?: "media_failed"),
+                DisconnectCause.LOCAL,
+            ) {
                 if (current.status == "RINGING") {
                     repository.declineDeviceRemoteSession(sessionId)
                 } else {
                     repository.endDeviceRemoteSession(sessionId)
                 }
             }
-            releaseLocal(
-                sessionId,
-                CallLifecycleEvent.Failed(sessionId, error.message ?: "media_failed"),
-                DisconnectCause.LOCAL,
-            )
         } finally {
             handlingLiveKitFailure = false
         }
@@ -417,11 +500,24 @@ class RemoteCallCoordinator(
     ) {
         heartbeatJob?.cancel()
         heartbeatJob = null
-        val lifecycle = _state.value.lifecycle.transition(event)
+        val current = _state.value
+        val failureTitle = if (event is CallLifecycleEvent.Failed) {
+            current.lifecycle.remoteFailureTitle()
+        } else {
+            null
+        }
+        val failureMessage = if (event is CallLifecycleEvent.Failed) {
+            current.lifecycle.remoteFailureMessage()
+        } else {
+            null
+        }
+        val lifecycle = current.lifecycle.transition(event)
         _state.value = _state.value.copy(
             incoming = null,
             active = null,
             lifecycle = lifecycle,
+            failureTitle = failureTitle,
+            failureMessage = failureMessage,
         )
         liveKit.disconnect(reason)
         CompanionMediaService.stop(appContext)
@@ -433,10 +529,66 @@ class RemoteCallCoordinator(
         runtime?.showDiscovery()
     }
 
+    private suspend fun terminateLocalFirst(
+        sessionId: String,
+        event: CallLifecycleEvent,
+        causeCode: Int,
+        notifyTelecom: Boolean = true,
+        reason: String = "call_ended",
+        notifyServerAsynchronously: Boolean = false,
+        notifyServer: suspend () -> Unit,
+    ) {
+        locallyTerminatedSessionIds.add(sessionId)
+        discoveryJob?.cancel()
+        discoveryJob = null
+        try {
+            val serverNotification: suspend () -> Unit = if (notifyServerAsynchronously) {
+                { enqueueServerTerminationCompensation(notifyServer) }
+            } else {
+                notifyServer
+            }
+            releaseMediaBeforeServerNotification(
+                releaseLocalMedia = {
+                    withContext(NonCancellable) {
+                        releaseLocal(
+                            sessionId = sessionId,
+                            event = event,
+                            causeCode = causeCode,
+                            notifyTelecom = notifyTelecom,
+                            reason = reason,
+                        )
+                    }
+                },
+                notifyServerBestEffort = serverNotification,
+                onNotificationCancelled = {
+                    enqueueServerTerminationCompensation(notifyServer)
+                },
+            )
+        } finally {
+            if (scope.isActive && repository.hasDeviceCredential()) startDiscovery()
+        }
+    }
+
+    private fun enqueueServerTerminationCompensation(notifyServer: suspend () -> Unit) {
+        scope.launch {
+            withTimeoutOrNull(SERVER_TERMINATION_COMPENSATION_TIMEOUT_MILLIS) {
+                try {
+                    notifyServer()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    // The durable server lease/expiry cleanup remains the last
+                    // resort when this bounded app-scope retry also fails.
+                }
+            }
+        }
+    }
+
     private companion object {
         const val DISCOVERY_INTERVAL_MILLIS = 3_000L
         const val HEARTBEAT_INTERVAL_MILLIS = 15_000L
         const val MEDIA_SERVICE_TIMEOUT_MILLIS = 5_000L
+        const val SERVER_TERMINATION_COMPENSATION_TIMEOUT_MILLIS = 10_000L
         val TERMINAL_STATUSES = setOf(
             "DECLINED",
             "CANCELLED",

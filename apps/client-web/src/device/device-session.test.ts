@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  buildDeviceExchangeProof,
   buildDeviceInstallationRegistration,
+  DeviceVault,
   DeviceSessionManager,
   generateDeviceKeyPair,
   isNonExportableDeviceSigningKey,
@@ -66,7 +68,83 @@ describe("parseQrActivation", () => {
   });
 });
 
+describe("DeviceVault transaction durability", () => {
+  it("waits for commit and rejects an abort that follows request success", async () => {
+    const request = {
+      result: undefined,
+      error: null,
+      onsuccess: null,
+      onerror: null,
+    } as unknown as IDBRequest<undefined>;
+    const transaction = {
+      error: new DOMException("commit failed", "AbortError"),
+      objectStore: () =>
+        ({
+          delete: () => request,
+        }) as unknown as IDBObjectStore,
+      abort: vi.fn(),
+      oncomplete: null,
+      onabort: null,
+      onerror: null,
+    } as unknown as IDBTransaction;
+    const database = {
+      transaction: () => transaction,
+    } as unknown as IDBDatabase;
+    const vault = new DeviceVault();
+    (
+      vault as unknown as {
+        database: Promise<IDBDatabase> | null;
+      }
+    ).database = Promise.resolve(database);
+
+    const pending = vault.clear();
+    let settled = false;
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    request.onsuccess?.({} as Event);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    transaction.onabort?.({} as Event);
+    await expect(pending).rejects.toThrow("commit failed");
+  });
+});
+
 describe("browser device key protection", () => {
+  it("signs each committed-exchange recovery token with a distinct proof action", () => {
+    const initial = new TextDecoder().decode(
+      buildDeviceExchangeProof({
+        challengeId: "01J00000000000000000000000",
+        installationId: "01J11111111111111111111111",
+        approvedAt: "2026-08-02T00:00:00.000Z",
+      }),
+    );
+    const recovery = new TextDecoder().decode(
+      buildDeviceExchangeProof({
+        challengeId: "01J00000000000000000000000",
+        installationId: "01J11111111111111111111111",
+        approvedAt: "2026-08-02T00:00:00.000Z",
+        recoveryToken: "v1.recovery-token.signature",
+      }),
+    );
+
+    expect(initial).toContain("action=exchange\n");
+    expect(initial).not.toContain("recovery-token=");
+    expect(recovery).toContain("action=exchange-recovery\n");
+    expect(recovery).toContain(
+      "recovery-token=v1.recovery-token.signature\n",
+    );
+    expect(recovery).not.toContain("approved-at=");
+  });
+
   it("declares the non-exportable key protection protocol during registration", () => {
     expect(
       buildDeviceInstallationRegistration({

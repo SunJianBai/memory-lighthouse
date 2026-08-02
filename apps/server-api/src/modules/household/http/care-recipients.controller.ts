@@ -9,6 +9,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 
+import {
+  RateLimited,
+  RateLimitPolicy,
+} from '../../../infrastructure/rate-limit';
 import { CurrentUser } from '../../identity/http/current-user.decorator';
 import { UserAccessGuard } from '../../identity/http/user-access.guard';
 import type { UserPrincipal } from '../../identity/identity.types';
@@ -84,6 +88,7 @@ export class CareRecipientsController {
   }
 
   @Put(':recipientId/authorities/:memberId')
+  @RateLimited(RateLimitPolicy.SENSITIVE_WRITE_REAUTHENTICATION)
   putAuthority(
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,

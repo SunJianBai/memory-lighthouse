@@ -4,6 +4,7 @@ import type { Prisma } from '../../infrastructure/database/generated/prisma/clie
 import { PrismaService } from '../../infrastructure/database/prisma.service';
 import { newUlid } from '../identity/domain/ulid';
 import { VerifiedEmailPolicy } from '../identity/domain/verified-email.policy';
+import { IdentityApplicationService } from '../identity/identity.application.service';
 import type { HouseholdSecurityConfig } from './config/household-security.config';
 import { InvitationTokenService } from './crypto/invitation-token.service';
 import { HouseholdAccessPolicy } from './domain/household-access.policy';
@@ -46,6 +47,7 @@ import type {
   HouseholdMemberView,
   HouseholdView,
   PutCareAuthorityCommand,
+  RemoveHouseholdMemberCommand,
   RecipientAction,
   UpdateCareRecipientCommand,
   UpdateHouseholdCommand,
@@ -128,6 +130,7 @@ export class HouseholdApplicationService {
     @Inject(HOUSEHOLD_SECURITY_CONFIG)
     private readonly securityConfig: HouseholdSecurityConfig,
     private readonly mediaSecurity: RemoteMediaSecurityCoordinator,
+    private readonly identity: IdentityApplicationService,
   ) {}
 
   async listHouseholds(principal: AuthPrincipal): Promise<HouseholdView[]> {
@@ -294,6 +297,10 @@ export class HouseholdApplicationService {
     if (roleCodes.length === 0) {
       throw new InvalidHouseholdRoleException();
     }
+    await this.identity.reauthenticateUser(
+      principal.userId,
+      command.currentPassword,
+    );
 
     const result = await this.serializable(async (transaction) => {
       await this.policy.requireHouseholdAction(
@@ -357,8 +364,12 @@ export class HouseholdApplicationService {
     principal: AuthPrincipal,
     householdId: string,
     memberId: string,
-    version: number,
+    command: RemoveHouseholdMemberCommand,
   ): Promise<void> {
+    await this.identity.reauthenticateUser(
+      principal.userId,
+      command.currentPassword,
+    );
     await this.serializable(async (transaction) => {
       const removedAt = this.clock.now();
       await this.policy.requireHouseholdAction(
@@ -380,7 +391,7 @@ export class HouseholdApplicationService {
       if (!target) {
         throw new HouseholdAccessDeniedException();
       }
-      if (target.version !== version) {
+      if (target.version !== command.version) {
         throw new VersionConflictException();
       }
       if (this.roleCodes(target.roles).includes('OWNER')) {
@@ -392,7 +403,7 @@ export class HouseholdApplicationService {
           id: memberId,
           householdId,
           status: ACTIVE_MEMBER_STATUS,
-          version,
+          version: command.version,
         },
         data: {
           status: LEFT_MEMBER_STATUS,
@@ -809,6 +820,10 @@ export class HouseholdApplicationService {
     memberId: string,
     command: PutCareAuthorityCommand,
   ): Promise<CareAuthorityView> {
+    await this.identity.reauthenticateUser(
+      principal.userId,
+      command.currentPassword,
+    );
     const result = await this.serializable(async (transaction) => {
       await this.policy.requireRecipientAction(
         transaction,

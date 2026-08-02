@@ -2,7 +2,10 @@ import { describe, expect, it, jest } from '@jest/globals';
 
 import type { HouseholdSecurityConfig } from './config/household-security.config';
 import { VerifiedEmailPolicy } from '../identity/domain/verified-email.policy';
-import { EmailVerificationRequiredException } from '../identity/identity.errors';
+import {
+  EmailVerificationRequiredException,
+  InvalidCredentialsException,
+} from '../identity/identity.errors';
 import { InvitationTokenService } from './crypto/invitation-token.service';
 import {
   HouseholdAccessDeniedException,
@@ -101,6 +104,9 @@ function makeHarness() {
     markMemberRevoked: jest.fn(async () => 0),
     cleanupPendingForMember: jest.fn(async () => undefined),
   };
+  const identity = {
+    reauthenticateUser: jest.fn(async () => undefined),
+  };
   const service = new HouseholdApplicationService(
     prisma as never,
     verifiedEmailPolicy,
@@ -110,6 +116,7 @@ function makeHarness() {
     clock,
     config,
     mediaSecurity as never,
+    identity as never,
   );
 
   return {
@@ -120,6 +127,7 @@ function makeHarness() {
     delivery,
     tokens,
     mediaSecurity,
+    identity,
   };
 }
 
@@ -171,6 +179,161 @@ function memberRecord() {
 }
 
 describe('HouseholdApplicationService invariants', () => {
+  it('rejects a role update before opening a transaction when password reauthentication fails', async () => {
+    const harness = makeHarness();
+    harness.identity.reauthenticateUser.mockRejectedValue(
+      new InvalidCredentialsException(),
+    );
+
+    await expect(
+      harness.service.updateMember(principal, 'household-1', 'member-1', {
+        roleCodes: ['CAREGIVER'],
+        version: 0,
+        currentPassword: 'wrong-current-password',
+      } as never),
+    ).rejects.toBeInstanceOf(InvalidCredentialsException);
+
+    expect(harness.identity.reauthenticateUser).toHaveBeenCalledWith(
+      principal.userId,
+      'wrong-current-password',
+    );
+    expect(harness.prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects member removal before opening a transaction when password reauthentication fails', async () => {
+    const harness = makeHarness();
+    harness.identity.reauthenticateUser.mockRejectedValue(
+      new InvalidCredentialsException(),
+    );
+    await expect(
+      harness.service.removeMember(principal, 'household-1', 'member-1', {
+        version: 0,
+        currentPassword: 'wrong-current-password',
+      }),
+    ).rejects.toBeInstanceOf(InvalidCredentialsException);
+
+    expect(harness.identity.reauthenticateUser).toHaveBeenCalledWith(
+      principal.userId,
+      'wrong-current-password',
+    );
+    expect(harness.prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects a Care Authority write before opening a transaction when password reauthentication fails', async () => {
+    const harness = makeHarness();
+    harness.identity.reauthenticateUser.mockRejectedValue(
+      new InvalidCredentialsException(),
+    );
+
+    await expect(
+      harness.service.putCareAuthority(
+        principal,
+        'household-1',
+        'recipient-1',
+        'member-1',
+        {
+          relationshipLabel: 'daughter',
+          accessLevel: 'FULL',
+          canManageProfile: true,
+          canManageConsent: true,
+          canManageRoutine: true,
+          canViewEvents: true,
+          canViewConversation: true,
+          canActivateDevice: true,
+          canRemoteCall: true,
+          receiveNotifications: true,
+          status: 'ACTIVE',
+          currentPassword: 'wrong-current-password',
+        } as never,
+      ),
+    ).rejects.toBeInstanceOf(InvalidCredentialsException);
+
+    expect(harness.identity.reauthenticateUser).toHaveBeenCalledWith(
+      principal.userId,
+      'wrong-current-password',
+    );
+    expect(harness.prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('reauthenticates before creating canRemoteCall authority and never persists the password', async () => {
+    const harness = makeHarness();
+    harness.policy.requireRecipientAction.mockResolvedValue({
+      id: 'owner-member',
+    });
+    harness.transaction.careRecipient.findFirst.mockResolvedValue({
+      id: 'recipient-1',
+    });
+    harness.transaction.householdMember.findFirst.mockResolvedValue({
+      id: 'member-1',
+    });
+    harness.transaction.recipientMember.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: 'authority-1',
+        householdId: 'household-1',
+        recipientId: 'recipient-1',
+        householdMemberId: 'member-1',
+        relationshipLabel: 'daughter',
+        accessLevel: 'FULL',
+        canManageProfile: true,
+        canManageConsent: true,
+        canManageRoutine: true,
+        canViewEvents: true,
+        canViewConversation: true,
+        canActivateDevice: true,
+        canRemoteCall: true,
+        receiveNotifications: true,
+        contactPriority: 1,
+        status: 'ACTIVE',
+        version: 0,
+        member: {
+          userId: 'member-user-1',
+          user: { displayName: 'Family' },
+        },
+      });
+    harness.transaction.recipientMember.create.mockResolvedValue({});
+
+    await expect(
+      harness.service.putCareAuthority(
+        principal,
+        'household-1',
+        'recipient-1',
+        'member-1',
+        {
+          currentPassword: 'current-password',
+          relationshipLabel: 'daughter',
+          accessLevel: 'FULL',
+          canManageProfile: true,
+          canManageConsent: true,
+          canManageRoutine: true,
+          canViewEvents: true,
+          canViewConversation: true,
+          canActivateDevice: true,
+          canRemoteCall: true,
+          receiveNotifications: true,
+          contactPriority: 1,
+          status: 'ACTIVE',
+        },
+      ),
+    ).resolves.toMatchObject({
+      id: 'authority-1',
+      canRemoteCall: true,
+    });
+
+    expect(harness.identity.reauthenticateUser).toHaveBeenCalledWith(
+      principal.userId,
+      'current-password',
+    );
+    expect(harness.transaction.recipientMember.create).toHaveBeenCalledWith({
+      data: expect.not.objectContaining({ currentPassword: expect.anything() }),
+    });
+    expect(
+      JSON.stringify(
+        harness.transaction.recipientMember.create.mock.calls[0]?.[0],
+      ),
+    ).not.toContain('current-password');
+  });
+
   it('creates the household, ACTIVE owner member, and OWNER assignment atomically', async () => {
     const harness = makeHarness();
     harness.transaction.loginIdentity.findFirst.mockResolvedValue({
@@ -265,7 +428,7 @@ describe('HouseholdApplicationService invariants', () => {
         principal,
         'household-a',
         'member-from-household-b',
-        0,
+        { version: 0, currentPassword: 'current-password' },
       ),
     ).rejects.toBeInstanceOf(HouseholdAccessDeniedException);
     expect(
@@ -286,7 +449,10 @@ describe('HouseholdApplicationService invariants', () => {
     harness.transaction.householdMember.count.mockResolvedValue(1);
 
     await expect(
-      harness.service.removeMember(principal, 'household-1', 'owner-member', 3),
+      harness.service.removeMember(principal, 'household-1', 'owner-member', {
+        version: 3,
+        currentPassword: 'current-password',
+      }),
     ).rejects.toBeInstanceOf(LastOwnerException);
     expect(
       harness.transaction.householdMember.updateMany,
@@ -315,9 +481,13 @@ describe('HouseholdApplicationService invariants', () => {
         principal,
         'household-1',
         'caregiver-member',
-        2,
+        { version: 2, currentPassword: 'current-password' },
       ),
     ).resolves.toBeUndefined();
+    expect(harness.identity.reauthenticateUser).toHaveBeenCalledWith(
+      principal.userId,
+      'current-password',
+    );
     expect(
       harness.transaction.householdInvitation.updateMany,
     ).toHaveBeenCalledWith({

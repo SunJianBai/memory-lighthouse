@@ -36,6 +36,8 @@ export interface PublicActivationStatus {
   expiresAt: string;
   claimedAt: string | null;
   approvedAt: string | null;
+  recoveryToken: string | null;
+  recoveryTokenExpiresAt: string | null;
 }
 
 export type ClaimNetworkSource =

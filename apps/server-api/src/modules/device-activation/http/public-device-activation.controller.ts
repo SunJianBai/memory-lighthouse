@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Param,
@@ -43,6 +44,7 @@ export class PublicDeviceActivationController {
 
   @Get('activation-challenges/:challengeId')
   @RateLimited(RateLimitPolicy.DEVICE_ACTIVATION_STATUS)
+  @Header('Cache-Control', 'no-store')
   async getStatus(
     @Param('challengeId') challengeId: string,
   ): Promise<PublicActivationStatus> {

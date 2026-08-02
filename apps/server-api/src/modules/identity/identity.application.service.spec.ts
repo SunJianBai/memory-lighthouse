@@ -455,6 +455,39 @@ describe('IdentityApplicationService security paths', () => {
     });
   });
 
+  it('revokes the Web refresh family before entering device mode', async () => {
+    const harness = makeHarness();
+    harness.prisma.userSession.findUnique.mockResolvedValue(
+      activePreviousSession({ clientType: 'WEB' }),
+    );
+    harness.prisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+
+    await harness.service.revokeWebSessionByRefreshToken(
+      'web-refresh-token-for-device-lock',
+    );
+
+    expect(harness.prisma.userSession.updateMany).toHaveBeenCalledWith({
+      where: {
+        tokenFamilyId: '01JFAMILY00000000000000000',
+        revokedAt: null,
+      },
+      data: { revokedAt: now },
+    });
+  });
+
+  it('does not let the Web device lock revoke an Android refresh family', async () => {
+    const harness = makeHarness();
+    harness.prisma.userSession.findUnique.mockResolvedValue(
+      activePreviousSession({ clientType: 'ANDROID' }),
+    );
+
+    await harness.service.revokeWebSessionByRefreshToken(
+      'android-refresh-token-at-web-boundary',
+    );
+
+    expect(harness.prisma.userSession.updateMany).not.toHaveBeenCalled();
+  });
+
   it('treats a concurrent refresh claim loss as replay and revokes the family', async () => {
     const harness = makeHarness();
     harness.prisma.userSession.findUnique.mockResolvedValue(

@@ -128,4 +128,51 @@ describe('DeviceActivationCrypto', () => {
       ),
     ).toBe(false);
   });
+
+  it('binds short-lived recovery tokens to the challenge version and installation', () => {
+    const now = new Date('2026-08-02T00:00:00.000Z');
+    const input = {
+      challengeId: '01J00000000000000000000000',
+      installationId: '01J11111111111111111111111',
+      challengeVersion: 3,
+      approvedAt: '2026-08-01T23:59:00.000Z',
+      now,
+    };
+    const recovery = crypto.issueCredentialRecoveryToken(input);
+
+    expect(
+      crypto.verifyCredentialRecoveryToken({
+        ...input,
+        token: recovery.token,
+      }),
+    ).toBe(true);
+    expect(
+      crypto.verifyCredentialRecoveryToken({
+        ...input,
+        token: recovery.token,
+        challengeVersion: 4,
+      }),
+    ).toBe(false);
+    expect(
+      crypto.verifyCredentialRecoveryToken({
+        ...input,
+        token: recovery.token,
+        installationId: '01J22222222222222222222222',
+      }),
+    ).toBe(false);
+    const replacement = recovery.token.endsWith('A') ? 'B' : 'A';
+    expect(
+      crypto.verifyCredentialRecoveryToken({
+        ...input,
+        token: `${recovery.token.slice(0, -1)}${replacement}`,
+      }),
+    ).toBe(false);
+    expect(
+      crypto.verifyCredentialRecoveryToken({
+        ...input,
+        token: recovery.token,
+        now: new Date(recovery.expiresAt.getTime()),
+      }),
+    ).toBe(false);
+  });
 });

@@ -15,6 +15,7 @@ export enum RateLimitPolicy {
   DEVICE_CREDENTIAL_REFRESH = 'device-credential-refresh',
   REMOTE_POLICY_UPDATE = 'remote-policy-update',
   REMOTE_SESSION_REQUEST = 'remote-session-request',
+  SENSITIVE_WRITE_REAUTHENTICATION = 'sensitive-write-reauthentication',
 }
 
 export type RateLimitDimensionKind =

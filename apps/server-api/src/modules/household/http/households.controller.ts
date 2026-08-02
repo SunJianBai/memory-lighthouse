@@ -12,6 +12,10 @@ import {
   UseGuards,
 } from '@nestjs/common';
 
+import {
+  RateLimited,
+  RateLimitPolicy,
+} from '../../../infrastructure/rate-limit';
 import { CurrentUser } from '../../identity/http/current-user.decorator';
 import { UserAccessGuard } from '../../identity/http/user-access.guard';
 import type { UserPrincipal } from '../../identity/identity.types';
@@ -24,6 +28,7 @@ import type {
 import {
   CreateHouseholdDto,
   CreateHouseholdInvitationDto,
+  RemoveHouseholdMemberDto,
   UpdateHouseholdDto,
   UpdateHouseholdMemberDto,
   VersionQueryDto,
@@ -73,6 +78,7 @@ export class HouseholdsController {
   }
 
   @Patch(':householdId/members/:memberId')
+  @RateLimited(RateLimitPolicy.SENSITIVE_WRITE_REAUTHENTICATION)
   updateMember(
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
@@ -82,23 +88,24 @@ export class HouseholdsController {
     return this.households.updateMember(principal, householdId, memberId, {
       roleCodes: body.roleCodes,
       version: body.version,
+      currentPassword: body.currentPassword,
     });
   }
 
   @Delete(':householdId/members/:memberId')
+  @RateLimited(RateLimitPolicy.SENSITIVE_WRITE_REAUTHENTICATION)
   @HttpCode(HttpStatus.NO_CONTENT)
   async removeMember(
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
     @Param('memberId') memberId: string,
     @Query() query: VersionQueryDto,
+    @Body() body: RemoveHouseholdMemberDto,
   ): Promise<void> {
-    await this.households.removeMember(
-      principal,
-      householdId,
-      memberId,
-      query.version,
-    );
+    await this.households.removeMember(principal, householdId, memberId, {
+      version: query.version,
+      currentPassword: body.currentPassword,
+    });
   }
 
   @Post(':householdId/invitations')

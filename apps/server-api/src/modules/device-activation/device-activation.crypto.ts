@@ -19,6 +19,7 @@ import type {
 } from './device-activation.types';
 
 const ACTIVATION_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+const CREDENTIAL_RECOVERY_TOKEN_TTL_MS = 60_000;
 
 function decodeCanonicalBase64Url(
   value: string,
@@ -134,6 +135,18 @@ export function buildExchangeProofMessage(input: {
     ['challenge-id', input.challengeId],
     ['installation-id', input.installationId],
     ['approved-at', input.approvedAt],
+  ]);
+}
+
+export function buildExchangeRecoveryProofMessage(input: {
+  challengeId: string;
+  installationId: string;
+  recoveryToken: string;
+}): Buffer {
+  return proofMessage('exchange-recovery', [
+    ['challenge-id', input.challengeId],
+    ['installation-id', input.installationId],
+    ['recovery-token', input.recoveryToken],
   ]);
 }
 
@@ -266,6 +279,93 @@ export class DeviceActivationCrypto {
 
   generateCredential(): string {
     return randomBytes(32).toString('base64url');
+  }
+
+  deriveInitialCredential(input: {
+    challengeId: string;
+    installationId: string;
+    approvedAt: string;
+  }): string {
+    return Buffer.from(
+      this.hmac(
+        this.config.credentialPepper,
+        'initial-device-credential-v1',
+        `${input.challengeId}\0${input.installationId}\0${input.approvedAt}`,
+      ),
+    ).toString('base64url');
+  }
+
+  issueCredentialRecoveryToken(input: {
+    challengeId: string;
+    installationId: string;
+    challengeVersion: number;
+    approvedAt: string;
+    now: Date;
+  }): { token: string; expiresAt: Date } {
+    const expiresAt = new Date(
+      input.now.getTime() + CREDENTIAL_RECOVERY_TOKEN_TTL_MS,
+    );
+    const payload = Buffer.from(
+      `${input.challengeVersion}:${expiresAt.getTime()}`,
+      'utf8',
+    ).toString('base64url');
+    const mac = Buffer.from(
+      this.hmac(
+        this.config.activationPepper,
+        'device-credential-recovery-v1',
+        [
+          input.challengeId,
+          input.installationId,
+          input.approvedAt,
+          payload,
+        ].join('\0'),
+      ),
+    ).toString('base64url');
+    return { token: `v1.${payload}.${mac}`, expiresAt };
+  }
+
+  verifyCredentialRecoveryToken(input: {
+    token: string;
+    challengeId: string;
+    installationId: string;
+    challengeVersion: number;
+    approvedAt: string;
+    now: Date;
+  }): boolean {
+    const parts = input.token.split('.');
+    if (parts.length !== 3 || parts[0] !== 'v1') return false;
+    const payload = decodeCanonicalBase64Url(parts[1], 64);
+    if (
+      !payload ||
+      !/^(0|[1-9]\d{0,9}):\d{13}$/.test(payload.toString('utf8'))
+    ) {
+      return false;
+    }
+    const [versionText, expiresAtText] = payload.toString('utf8').split(':');
+    const version = Number(versionText);
+    const expiresAtMs = Number(expiresAtText);
+    if (
+      !Number.isSafeInteger(version) ||
+      version !== input.challengeVersion ||
+      !Number.isSafeInteger(expiresAtMs) ||
+      expiresAtMs <= input.now.getTime() ||
+      expiresAtMs > input.now.getTime() + CREDENTIAL_RECOVERY_TOKEN_TTL_MS
+    ) {
+      return false;
+    }
+    const expectedMac = Buffer.from(
+      this.hmac(
+        this.config.activationPepper,
+        'device-credential-recovery-v1',
+        [
+          input.challengeId,
+          input.installationId,
+          input.approvedAt,
+          parts[1],
+        ].join('\0'),
+      ),
+    ).toString('base64url');
+    return this.equalText(parts[2], expectedMac);
   }
 
   normalizeProof(type: ActivationProofType, value: string): string {

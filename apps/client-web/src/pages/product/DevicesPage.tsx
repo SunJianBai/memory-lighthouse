@@ -5,6 +5,7 @@ import {
   QrCode,
   RefreshCw,
   ShieldCheck,
+  Trash2,
   XCircle,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
@@ -41,7 +42,11 @@ export const DevicesPage = () => {
   const [approvalDetails, setApprovalDetails] =
     useState<ActivationApprovalDetails | null>(null);
   const [busy, setBusy] = useState(false);
+  const [bindingBusyId, setBindingBusyId] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
   const [error, setError] = useState("");
+  const [bindingError, setBindingError] = useState("");
+  const [message, setMessage] = useState("");
 
   const poll = useCallback(async () => {
     if (!challenge) return;
@@ -121,6 +126,39 @@ export const DevicesPage = () => {
     }
   };
 
+  const revokeBinding = async (bindingId: string, displayName: string) => {
+    if (currentPassword.length === 0) {
+      setBindingError("撤销设备前必须重新输入当前密码。");
+      return;
+    }
+    if (!window.confirm(`确认永久撤销陪伴设备“${displayName}”？设备凭据会立即失效。`)) {
+      setCurrentPassword("");
+      return;
+    }
+    setBindingBusyId(bindingId);
+    setBindingError("");
+    setMessage("");
+    try {
+      await apiClient.request(
+        `/households/${workspace.householdId}/companion-bindings/${bindingId}`,
+        {
+          method: "DELETE",
+          body: {
+            reasonCode: "FAMILY_REVOKED",
+            currentPassword,
+          },
+        },
+      );
+      await workspace.refreshBindings();
+      setMessage(`已撤销设备“${displayName}”。`);
+    } catch (revokeError) {
+      setBindingError(readableError(revokeError));
+    } finally {
+      setCurrentPassword("");
+      setBindingBusyId("");
+    }
+  };
+
   return (
     <div className="device-page-grid">
       <section className="panel-card activation-panel">
@@ -162,10 +200,16 @@ export const DevicesPage = () => {
 
       <section className="panel-card binding-panel">
         <div className="panel-heading"><div><p className="eyebrow">已绑定</p><h2>当前家庭设备</h2></div><button className="icon-button" type="button" onClick={() => void workspace.refreshBindings()} aria-label="刷新设备列表"><RefreshCw aria-hidden="true" size={19} /></button></div>
+        <label className="reauth-field" htmlFor="binding-current-password">
+          当前密码（撤销设备时验证，提交后立即清空）
+          <input id="binding-current-password" type="password" autoComplete="current-password" maxLength={128} value={currentPassword} onChange={(event) => { setCurrentPassword(event.target.value); setBindingError(""); }} />
+        </label>
+        {message && <div className="form-message success" role="status">{message}</div>}
+        {bindingError && <div className="form-message error" role="alert">{bindingError}</div>}
         {workspace.bindings.length === 0 ? (
           <div className="compact-empty"><MonitorSmartphone aria-hidden="true" size={30} /><strong>暂无已绑定设备</strong><p>完成 Claim、家属批准和凭据兑换后显示在这里。</p></div>
         ) : (
-          <div className="binding-list">{workspace.bindings.map((binding) => <article key={binding.id}><span className="device-icon"><MonitorSmartphone aria-hidden="true" size={23} /></span><div><strong>{binding.displayName}</strong><p>陪伴对象：{workspace.recipients.find((item) => item.id === binding.recipientId)?.preferredName ?? binding.recipientId}</p><small>激活于 {new Date(binding.activatedAt).toLocaleString("zh-CN")}</small></div><span className={`status-pill ${binding.status === "ACTIVE" ? "success" : "neutral"}`}>{binding.status}</span></article>)}</div>
+          <div className="binding-list">{workspace.bindings.map((binding) => <article key={binding.id}><span className="device-icon"><MonitorSmartphone aria-hidden="true" size={23} /></span><div><strong>{binding.displayName}</strong><p>陪伴对象：{workspace.recipients.find((item) => item.id === binding.recipientId)?.preferredName ?? binding.recipientId}</p><small>激活于 {new Date(binding.activatedAt).toLocaleString("zh-CN")}</small></div><span className={`status-pill ${binding.status === "ACTIVE" ? "success" : "neutral"}`}>{binding.status}</span>{binding.status !== "REVOKED" && <button className="danger-button compact" type="button" disabled={bindingBusyId === binding.id} onClick={() => void revokeBinding(binding.id, binding.displayName)}><Trash2 aria-hidden="true" size={16} /> {bindingBusyId === binding.id ? "正在撤销…" : "撤销"}</button>}</article>)}</div>
         )}
       </section>
     </div>
