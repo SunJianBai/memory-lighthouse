@@ -166,6 +166,10 @@ if [[ "$command_text" == *'/run/lock/openbmb-image-transfer.lock'* ]]; then
   cat >/dev/null
   exit 0
 fi
+# Real OpenSSH reads and forwards stdin even when the remote command ignores it.
+# This deliberate consumer catches callers that run SSH inside a redirected
+# `while read` loop without isolating the child from the loop's input file.
+cat >/dev/null
 if [[ "$host" =~ ^fake-prod-lane-[1-3]$ ]]; then
   [[ "$command_text" == *'.partial-'* || \
      "$command_text" == *'.openbmb-transfer/direct-v2/cache/'* ]]
@@ -189,6 +193,7 @@ cat > "$fake_bin/scp" <<'FAKE_SCP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 [[ $# -eq 2 ]]
+cat >/dev/null
 source_path="$1"
 target_path="$2"
 remote_home="${FAKE_REMOTE_HOME:?}"

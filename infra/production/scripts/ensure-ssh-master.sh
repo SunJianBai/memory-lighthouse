@@ -58,7 +58,7 @@ trap 'request_helper_termination 143' TERM
 run_child() {
   local child_status=0
   ssh_child_spawn_in_progress=true
-  "$@" &
+  "$@" </dev/null &
   ssh_child_pid=$!
   ssh_child_spawn_in_progress=false
   if [[ -n "$pending_signal_status" ]]; then
@@ -69,7 +69,7 @@ run_child() {
   return "$child_status"
 }
 
-ssh_config="$("$ssh_command" -G -T "$ssh_host" 2>/dev/null)" || {
+ssh_config="$("$ssh_command" -G -T "$ssh_host" </dev/null 2>/dev/null)" || {
   printf 'failed to resolve SSH control path for %s\n' "$ssh_host" >&2
   exit 1
 }
