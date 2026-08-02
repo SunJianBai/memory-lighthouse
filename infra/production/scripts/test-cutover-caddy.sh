@@ -56,6 +56,10 @@ cat > "$fake_bin/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'curl %s\n' "$*" >> "${FAKE_CUTOVER_LOG:?}"
+if [[ -n "${FAKE_CURL_FAIL_ONCE_FILE:-}" && ! -e "$FAKE_CURL_FAIL_ONCE_FILE" ]]; then
+  : > "$FAKE_CURL_FAIL_ONCE_FILE"
+  exit 56
+fi
 FAKE_CURL
 cat > "$fake_bin/systemctl" <<'FAKE_SYSTEMCTL'
 #!/usr/bin/env bash
@@ -140,8 +144,11 @@ run_cutover() {
 
 # Normal completion starts and enables Caddy without restoring the old public binding.
 export FAKE_CUTOVER_LOG="$test_root/success.log"
+export FAKE_CURL_FAIL_ONCE_FILE="$test_root/curl-failed-once"
 run_cutover state-success >"$test_root/success.out" 2>"$test_root/success.err"
+unset FAKE_CURL_FAIL_ONCE_FILE
 grep -Fxq cutover "$FAKE_CUTOVER_LOG"
+[[ "$(grep -c '^curl ' "$FAKE_CUTOVER_LOG")" -eq 2 ]]
 grep -Fxq 'systemctl start caddy' "$FAKE_CUTOVER_LOG"
 grep -Fxq health "$FAKE_CUTOVER_LOG"
 grep -Fxq 'systemctl enable caddy' "$FAKE_CUTOVER_LOG"

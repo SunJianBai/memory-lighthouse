@@ -43,6 +43,27 @@ assert_existing_loopback_service() {
   fi
 }
 
+wait_for_http_ready() {
+  local url="$1"
+  local timeout_seconds="${2:-30}"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while ! curl \
+    --fail \
+    --silent \
+    --connect-timeout 1 \
+    --max-time 2 \
+    "$url" \
+    --output /dev/null; do
+    if (( SECONDS >= deadline )); then
+      printf 'HTTP endpoint did not become ready within %s seconds: %s\n' \
+        "$timeout_seconds" "$url" >&2
+      return 1
+    fi
+    sleep 0.2
+  done
+}
+
 [[ -d "$campus_dir" ]] || { printf 'CampusHub directory not found\n' >&2; exit 1; }
 [[ -f "$campus_dir/$base_compose" ]] || { printf 'base Compose file not found\n' >&2; exit 1; }
 [[ -f "$campus_dir/$campus_env" ]] || { printf 'CampusHub environment file not found\n' >&2; exit 1; }
@@ -123,7 +144,7 @@ rollback_public() {
     systemctl stop caddy || true
     cd "$campus_dir"
     "${campus_compose[@]}" up -d --pull never --no-build --no-deps --force-recreate "$frontend_service" || true
-    curl --fail --silent --show-error http://127.0.0.1/ --output /dev/null || true
+    wait_for_http_ready http://127.0.0.1/ 30 || true
     if [[ "$initial_caddy_enable_state" == enabled ]]; then
       systemctl enable caddy || true
     else
@@ -155,7 +176,7 @@ published="$("${campus_cutover_compose[@]}" port "$frontend_service" 80)"
   printf 'unexpected CampusHub frontend binding: %s\n' "$published" >&2
   exit 1
 }
-curl --fail --silent --show-error http://127.0.0.1:18080/ --output /dev/null
+wait_for_http_ready http://127.0.0.1:18080/ 30
 assert_existing_loopback_service 8080
 assert_existing_loopback_service 33306
 
