@@ -82,18 +82,26 @@ jobs:
             IdentityFile ~/.ssh/openbmb_deploy
             IdentitiesOnly yes
             BatchMode yes
+            ConnectTimeout 20
+            ConnectionAttempts 1
             StrictHostKeyChecking yes
             UserKnownHostsFile ~/.ssh/known_hosts
             GlobalKnownHostsFile /dev/null
+            ControlMaster no
+            ControlPath ~/.ssh/openbmb-%C
+            ControlPersist 130m
+            ProxyCommand /bin/false
             ServerAliveInterval 30
             ServerAliveCountMax 6
           EOF
           chmod 0600 "$HOME/.ssh/config"
+          bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
 
       - name: Verify deployment host prerequisites
         shell: bash
         run: |
           set -euo pipefail
+          bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
           ssh tx4h4g-prod 'set -euo pipefail
              sudo -n true
              docker version >/dev/null
@@ -116,6 +124,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
           already_staged="$(ssh tx4h4g-prod \
             "set -euo pipefail
              release_root='/opt/openbmb/releases/$RELEASE_ID'
@@ -252,6 +261,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
           manifest_name="openbmb-images-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
           host_image_manifest="$RUNNER_TEMP/$manifest_name"
           source infra/production/scripts/release-image-set.sh
@@ -275,6 +285,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
           archive_name="openbmb-source-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
           manifest_name="openbmb-images-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
           transport_manifest_name="openbmb-transport-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
@@ -393,6 +404,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
           ssh tx4h4g-prod \
             "set -euo pipefail; test \"\$(sudo cat /opt/openbmb/releases/$RELEASE_ID/.openbmb-release-sha)\" = '$SOURCE_SHA'; sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env OPENBMB_API_ENV_FILE=/etc/openbmb/api.env bash /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/verify-release-images.sh"
 
@@ -416,6 +428,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
           ssh tx4h4g-prod \
             "sudo -n OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env OPENBMB_API_ENV_FILE=/etc/openbmb/api.env OPENBMB_SKIP_IMAGE_BUILD=true /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/deploy-release.sh"
 
@@ -424,9 +437,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
           ssh tx4h4g-prod \
             "sudo -n env OPENBMB_DOMAIN=sun227454.online bash /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/health-check.sh --public"
           curl --fail --silent --show-error \
             --retry 12 --retry-delay 5 --retry-all-errors \
             https://sun227454.online/openBMB/api/v1/health/ready \
             --output /dev/null
+
+      - name: Close pinned SSH master
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -O exit tx4h4g-prod >/dev/null 2>&1 || true

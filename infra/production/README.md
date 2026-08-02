@@ -218,6 +218,12 @@ registry digest 溯源。实际交付通过固定主机密钥的 SSH 完成，�
 全程至少保留 4 GiB Docker 磁盘余量。服务器不会从第三方公共加速器或 Docker Hub
 拉取镜像。
 
+Runner 在执行任何远端命令前，先通过 `ensure-ssh-master.sh` 建立不携带远端命令的认证
+ControlMaster；完整 SSH banner/KEX/认证失败最多重试 6 次，后续 `ssh`/`scp` 只复用该
+连接。普通连接配置以 `ProxyCommand /bin/false` 禁止主连接缺失时自动直连；重试辅助
+脚本不会重放可能已经开始执行的远端命令。主连接意外丢失时，当前步骤安全失败，由
+不可变发布与断点 cache 支持整次工作流重跑。
+
 仓库的 `production` Environment 需要两个 Base64 编码的 Actions Secret：
 `TX4H4G_SSH_PRIVATE_KEY_BASE64` 和 `TX4H4G_KNOWN_HOSTS_BASE64`。仓库变量
 `PRODUCTION_DEPLOY_ENABLED` 默认必须保持 `false`。手工运行工作流在任何情况下都
