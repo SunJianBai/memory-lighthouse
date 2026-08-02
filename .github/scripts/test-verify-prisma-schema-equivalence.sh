@@ -4,15 +4,28 @@ set -euo pipefail
 
 if [[ "$(basename -- "$0")" == "npx" ]]; then
   if [[ "${1:-}" == "prisma" && "${2:-}" == "validate" ]]; then
+    if [[ "$#" != "4" || "${3:-}" != "--config" || "${4:-}" != "docs/refactor/database/prisma.config.ts" ]]; then
+      printf 'Unexpected fixture validation command: %s\n' "$*" >&2
+      exit 65
+    fi
     exit 0
   fi
 
   if [[ "${1:-}" == "prisma" && "${2:-}" == "version" ]]; then
+    [[ "$#" == "2" ]] || exit 65
     printf 'fixture Prisma version\n'
     exit 0
   fi
 
-  if [[ "${1:-}" != "prisma" || "${2:-}" != "migrate" || "${3:-}" != "diff" ]]; then
+  if [[ "$#" != "8" \
+    || "${1:-}" != "prisma" \
+    || "${2:-}" != "migrate" \
+    || "${3:-}" != "diff" \
+    || "${4:-}" != "--from-schema" \
+    || "${5:-}" != "apps/server-api/prisma/schema.prisma" \
+    || "${6:-}" != "--to-schema" \
+    || "${7:-}" != "docs/refactor/database/schema.prisma" \
+    || "${8:-}" != "--exit-code" ]]; then
     printf 'Unexpected fixture command: %s\n' "$*" >&2
     exit 65
   fi
