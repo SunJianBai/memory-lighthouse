@@ -189,7 +189,9 @@ services:
     restart: unless-stopped
     ports:
       - 127.0.0.1:${OPENBMB_CLIENT_HOST_PORT:-14173}:8080
-    networks: [web]
+    networks:
+      - web
+      - web_host_access
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
       interval: 20s
@@ -220,7 +222,9 @@ services:
     restart: unless-stopped
     ports:
       - 127.0.0.1:${OPENBMB_ADMIN_HOST_PORT:-14174}:8080
-    networks: [web]
+    networks:
+      - web
+      - web_host_access
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
       interval: 20s
@@ -278,6 +282,11 @@ networks:
   web:
     name: openbmb_web
     internal: true
+  # An internal-only bridge has no host gateway, so Docker cannot materialize
+  # the loopback port publications above. Keep application isolation on `web`
+  # and give the two credential-free static sites a separate gateway network.
+  web_host_access:
+    name: openbmb_web_host_access
   # Only ClamAV joins this egress-capable network so FreshClam can update its
   # signatures without gaining lateral access to application data services.
   clamav_egress:

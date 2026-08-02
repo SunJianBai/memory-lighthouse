@@ -529,6 +529,10 @@ service_block() {
 
 api_block="$(service_block api)"
 clamav_block="$(service_block clamav)"
+client_web_block="$(service_block client-web)"
+admin_web_block="$(service_block admin-web)"
+web_internal_block="$(service_block web)"
+web_host_access_block="$(service_block web_host_access)"
 
 grep -Fq 'CLAMAV_HOST: 127.0.0.1' <<<"$api_block" || {
   printf 'API same-host ClamAV address invariant is missing\n' >&2
@@ -574,6 +578,46 @@ grep -Fq 'memswap_limit: "2147483648"' <<<"$clamav_block" || {
 
 grep -Fq '127.0.0.1:13100' <<<"$resolved" || {
   printf 'API loopback bind invariant is missing\n' >&2
+  exit 1
+}
+for web_block in "$client_web_block" "$admin_web_block"; do
+  grep -Fq 'web: null' <<<"$web_block" || {
+    printf 'web service internal network invariant is missing\n' >&2
+    exit 1
+  }
+  grep -Fq 'web_host_access: null' <<<"$web_block" || {
+    printf 'web service host-publish gateway invariant is missing\n' >&2
+    exit 1
+  }
+done
+grep -Fq 'name: openbmb_web' <<<"$web_internal_block" &&
+  grep -Fq 'internal: true' <<<"$web_internal_block" || {
+  printf 'web service isolation network invariant is missing\n' >&2
+  exit 1
+}
+grep -Fq 'name: openbmb_web_host_access' <<<"$web_host_access_block" || {
+  printf 'dedicated web host-publish network invariant is missing\n' >&2
+  exit 1
+}
+! grep -Fq 'internal: true' <<<"$web_host_access_block" || {
+  printf 'web host-publish network must provide a bridge gateway\n' >&2
+  exit 1
+}
+web_host_access_members="$(
+  awk '
+    /^services:$/ { in_services = 1; next }
+    in_services && /^[^[:space:]]/ { exit }
+    in_services && /^  [A-Za-z0-9_-]+:$/ {
+      service = $0
+      sub(/^  /, "", service)
+      sub(/:$/, "", service)
+      next
+    }
+    in_services && /^      web_host_access:/ { print service }
+  ' <<<"$resolved" | LC_ALL=C sort
+)"
+[[ "$web_host_access_members" == $'admin-web\nclient-web' ]] || {
+  printf 'only the two static web services may join the host-publish network\n' >&2
   exit 1
 }
 grep -Fq 'published: "14173"' <<<"$resolved" || {
