@@ -100,7 +100,7 @@ apps/client-web/src/api  统一 API client 与内存 access token
 apps/client-web/src/device 设备密钥、激活和凭据轮换
 apps/client-web/src/runtime MiniCPM-o 音视频与 Realtime runtime
 packages                 API 与事件契约
-infra                    MySQL、Redis、MinIO、LiveKit 与 Caddy
+infra                    MySQL、Redis、MinIO、同机 ClamAV、LiveKit 与 Caddy
 ```
 
-核心业务闭环和四端产物已实现，当前处于生产交付与公网验收阶段。TX4H4G 尚未切换公网流量；真实 SMTP、腾讯云媒体端口安全组确认，以及 Android 真机/双公网设备 LiveKit 验收仍待完成。陪伴端通过设备凭据保护的轮询接口发现跨设备来电，浏览器跨标签页通知只用于降低本机联调延迟；界面不会把通知或媒体失败伪装成成功。服务端鉴权 WSS 或 Android Push 可作为后续通知增强，但不是当前来电授权与媒体安全的替代品。
+核心业务闭环和四端产物已实现，当前处于生产交付与公网验收阶段。TX4H4G 尚未切换公网流量；ClamAV 已按同机回环方案纳入不可变发布，QQ SMTP 的非秘密配置已确定，但完整 QQ 邮箱与授权码尚未写入服务器。用户已说明媒体端口开放，仍需公网实测；Android 真机/双公网设备 LiveKit 验收由用户执行。陪伴端通过设备凭据保护的轮询接口发现跨设备来电，浏览器跨标签页通知只用于降低本机联调延迟；界面不会把通知或媒体失败伪装成成功。服务端鉴权 WSS 或 Android Push 可作为后续通知增强，但不是当前来电授权与媒体安全的替代品。

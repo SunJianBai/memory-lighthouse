@@ -11,6 +11,7 @@ done
 printf 'Shell syntax: OK\n'
 bash "$script_dir/test-security-state.sh"
 bash "$script_dir/audit-security-migration-recovery.sh" --self-test
+bash "$script_dir/test-clamav-watchdog.sh"
 
 line_of() {
   grep -nF -m 1 -- "$2" "$1" | cut -d: -f1
@@ -34,14 +35,33 @@ assert_before() {
 deploy_script="$script_dir/deploy-release.sh"
 backup_script="$script_dir/backup.sh"
 service_control_script="$script_dir/service-control.sh"
+health_check_script="$script_dir/health-check.sh"
+clamav_check_script="$script_dir/verify-clamav.sh"
+clamav_watchdog_script="$script_dir/clamav-watchdog.sh"
+smtp_check_script="$script_dir/verify-smtp.sh"
 backup_service="$production_dir/systemd/openbmb-backup.service"
+stack_service="$production_dir/systemd/openbmb.service"
+clamav_watchdog_service="$production_dir/systemd/openbmb-clamav-watchdog.service"
+clamav_watchdog_timer="$production_dir/systemd/openbmb-clamav-watchdog.timer"
 rollback_script="$script_dir/rollback-release.sh"
 delivery_workflow="$project_root/.github/workflows/production-delivery.yml"
+production_compose="$production_dir/compose.production.yml"
+release_image_set="$script_dir/release-image-set.sh"
+production_api_env="$production_dir/env/api.env.example"
 key_capability_migration="$project_root/apps/server-api/prisma/migrations/20260802151000_require_non_exportable_device_key_protection/migration.sql"
 join_ticket_migration="$project_root/apps/server-api/prisma/migrations/20260802141000_one_time_remote_join_tickets/migration.sql"
 server_schema="$project_root/apps/server-api/prisma/schema.prisma"
 reference_schema="$project_root/docs/refactor/database/schema.prisma"
 migration_lock="$project_root/apps/server-api/prisma/migrations/migration_lock.toml"
+
+source "$release_image_set"
+openbmb_load_release_image_set git-000000000000
+[[ "${#OPENBMB_REQUIRED_IMAGES[@]}" -eq 10 ]]
+[[ "${#OPENBMB_SOURCE_IMAGES[@]}" -eq 10 ]]
+[[ "${#OPENBMB_DELIVERY_COMPONENTS[@]}" -eq 10 ]]
+[[ "${OPENBMB_REQUIRED_IMAGES[9]}" == openbmb-clamav:git-000000000000 ]]
+[[ "${OPENBMB_SOURCE_IMAGES[9]}" == clamav/clamav-debian:1.4.5_base ]]
+[[ "${OPENBMB_DELIVERY_COMPONENTS[9]}" == clamav ]]
 
 while IFS= read -r -d '' migration_file; do
   awk -v file="$migration_file" '
@@ -61,6 +81,43 @@ while IFS= read -r -d '' migration_file; do
 done < <(find "$project_root/apps/server-api/prisma/migrations" \
   -type f -name migration.sql -print0)
 
+assert_before "$deploy_script" \
+  'bash "$script_dir/preflight.sh" --skip-clamav-runtime' \
+  'bash "$script_dir/verify-release-images.sh"'
+assert_before "$deploy_script" \
+  'bash "$script_dir/verify-release-images.sh"' \
+  'bash "$script_dir/verify-smtp.sh"'
+assert_before "$deploy_script" \
+  'bash "$script_dir/verify-smtp.sh"' \
+  "printf 'Starting and validating the same-host ClamAV scanner before state changes."
+assert_before "$deploy_script" \
+  'bash "$script_dir/verify-smtp.sh"' \
+  'deployment_mutated=true'
+assert_before "$smtp_check_script" \
+  'bash "$script_dir/verify-release-images.sh"' \
+  'bash "$script_dir/compose.sh" run \'
+assert_before "$deploy_script" \
+  'post_clamav_disk_kib=' \
+  'mv -Tf -- "$temporary_link" "$current_link"'
+awk '
+  /clamav_target_attempted=true/ {
+    in_target_bootstrap = 1
+    target_up = 0
+    target_watchdog = 0
+    next
+  }
+  in_target_bootstrap && /bash "\$script_dir\/compose.sh" up -d --pull never --no-build clamav/ {
+    target_up += 1
+  }
+  in_target_bootstrap && /bash "\$script_dir\/clamav-watchdog.sh"/ {
+    target_watchdog += 1
+  }
+  in_target_bootstrap && /post_clamav_disk_kib=/ {
+    checked_target_bootstrap = 1
+    exit target_up == 1 && target_watchdog == 1 ? 0 : 1
+  }
+  END { if (!checked_target_bootstrap) exit 1 }
+' "$deploy_script"
 assert_before "$deploy_script" \
   'mv -Tf -- "$temporary_link" "$current_link"' \
   "printf 'Starting or reconciling data services while realtime media remains drained."
@@ -159,6 +216,50 @@ grep -Fq "trap 'rollback_on_signal 143' TERM" "$deploy_script"
 grep -Fq "trap 'restore_on_signal 143' TERM" "$rollback_script"
 grep -Fq 'bash "$security_epoch_script" assert-start "$application_target"' \
   "$service_control_script"
+grep -Fq 'bash "$script_dir/clamav-watchdog.sh"' \
+  "$service_control_script"
+[[ "$(grep -Fc 'bash "$script_dir/clamav-watchdog.sh"' "$service_control_script")" -eq 2 ]]
+grep -Fq 'bash "$script_dir/verify-clamav.sh" --once' "$backup_script"
+grep -Fq 'bash "$current_stack/infra/production/scripts/clamav-watchdog.sh"' \
+  "$rollback_script"
+[[ "$(grep -Fc 'verify-clamav.sh" --once' "$rollback_script")" -ge 1 ]]
+grep -Fq 'recovery_services+=(clamav)' "$deploy_script"
+grep -Fq 'up -d --pull never --no-build "${recovery_services[@]}"' "$deploy_script"
+! grep -Fq 'bash "$recovery_stack/infra/production/scripts/verify-clamav.sh"' \
+  "$deploy_script"
+grep -Fq 'Restoring the previous release ClamAV image after deployment failure.' \
+  "$deploy_script"
+grep -Fq 'Keeping the attested target ClamAV scanner for the active pre-ClamAV application stack.' \
+  "$deploy_script"
+grep -Fq 'existing_clamav_image" =~ ^openbmb-clamav:' "$deploy_script"
+grep -Fq 'bash "$old_clamav_watchdog"' "$deploy_script"
+grep -Fq 'previous ClamAV stack has no full freshness watchdog; keeping it stopped.' \
+  "$deploy_script"
+grep -Fq 'clamav_target_attested=true' "$deploy_script"
+grep -Fq 'clamav_recovery_attested=true' "$deploy_script"
+grep -Fq 'if [[ "$clamav_recovery_attested" == true ]]' "$deploy_script"
+assert_before "$deploy_script" \
+  'bash "$script_dir/clamav-watchdog.sh"' \
+  'clamav_target_attested=true'
+assert_before "$deploy_script" \
+  'clamav_target_attested=true' \
+  'post_clamav_disk_kib='
+awk '
+  /if \[\[ "\$old_stack_has_clamav" == true \]\]/ {
+    in_old_restore = 1
+  }
+  in_old_restore && /bash "\$old_clamav_watchdog"/ {
+    full_watchdog = 1
+  }
+  in_old_restore && /previous ClamAV stack has no full freshness watchdog/ {
+    missing_watchdog_fail_closed = 1
+  }
+  in_old_restore && /elif \[\[ -n "\$old_application_target" \]\]/ {
+    checked_old_restore = 1
+    exit full_watchdog && missing_watchdog_fail_closed ? 0 : 1
+  }
+  END { if (!checked_old_restore) exit 1 }
+' "$deploy_script"
 grep -Fq 'bash "$security_epoch_script" assert-rollback "$target"' \
   "$rollback_script"
 grep -Fq '[[ "$current_stack_epoch" == 0 ]]' "$rollback_script"
@@ -173,6 +274,8 @@ grep -Fq '[[ "$irreversible_boundary_started" == false && -n "$old_application_t
 grep -Fq 'if [[ "$old_release_epoch" == 0 ]]; then' "$deploy_script"
 grep -Fq 'Skipping the ordinary backup because this deployment is resuming a pending security boundary.' \
   "$deploy_script"
+grep -Fq 'rm --force --stop clamav' "$deploy_script"
+grep -Fq 'post_clamav_docker_kib=' "$deploy_script"
 grep -Fq 'minimum-security-epoch' "$backup_script"
 grep -Fq 'Refusing an ordinary backup while a security boundary is pending.' \
   "$backup_script"
@@ -215,13 +318,74 @@ for livekit_config in \
 done
 grep -Fq 'ExecStopPost=/bin/bash /opt/openbmb/current/infra/production/scripts/service-control.sh reload' \
   "$backup_service"
-grep -Fq 'TimeoutStopSec=600' "$backup_service"
+grep -Fq 'TimeoutStopSec=3600' "$backup_service"
+grep -Fq 'RuntimeDirectoryPreserve=yes' "$backup_service"
+grep -Fq 'ReadWritePaths=/var/backups/openbmb /run/lock /run/openbmb' \
+  "$backup_service"
+grep -Fq 'TimeoutStartSec=3600' "$stack_service"
+grep -Fq 'TimeoutStopSec=120' "$stack_service"
+grep -Fq 'SuccessExitStatus=75' "$clamav_watchdog_service"
+grep -Fq 'TimeoutStartSec=3600' "$clamav_watchdog_service"
+grep -Fq 'TimeoutStopSec=120' "$clamav_watchdog_service"
+grep -Fq 'RuntimeDirectory=openbmb' "$clamav_watchdog_service"
+grep -Fq 'RuntimeDirectoryPreserve=yes' "$clamav_watchdog_service"
+grep -Fq 'DOCKER_CONFIG=/tmp/openbmb-watchdog-docker-config' \
+  "$clamav_watchdog_service"
+grep -Fq 'OnUnitActiveSec=15m' "$clamav_watchdog_timer"
 grep -Fq 'MINIO_KMS_SECRET_KEY:' "$production_dir/../compose/compose.yml"
 grep -Fq 'MINIO_KMS_AUTO_ENCRYPTION: "on"' "$production_dir/../compose/compose.yml"
 grep -Fq 'mc encrypt set sse-s3' "$production_dir/../minio/init-minio.sh"
 grep -Fq 's3:ListBucketVersions' "$production_dir/../minio/init-minio.sh"
 grep -Fq 's3:DeleteObjectVersion' "$production_dir/../minio/init-minio.sh"
-grep -Fq 'zINSTREAM' "$script_dir/preflight.sh"
+grep -Fq 'zINSTREAM' "$clamav_check_script"
+grep -Fq '/run/lock/openbmb-operation.lock' "$clamav_watchdog_script"
+grep -Fq 'SuccessExitStatus=75' "$clamav_watchdog_service"
+grep -Fq '/proc/[0-9]*/comm' "$clamav_watchdog_script"
+grep -Fq '/var/lib/clamav/daily.cvd' "$clamav_watchdog_script"
+grep -Fq '/var/lib/clamav/daily.cld' "$clamav_watchdog_script"
+grep -Fq 'sigtool --info "$database"' "$clamav_watchdog_script"
+grep -Fq 'printf "zVERSION\0"' "$clamav_watchdog_script"
+grep -Fq '[[ "$disk_version" == "$loaded_version" ]]' "$clamav_watchdog_script"
+grep -Fq 'max_signature_age_seconds=259200' "$clamav_watchdog_script"
+grep -Fq 'minimum_recovery_interval_seconds=3600' "$clamav_watchdog_script"
+grep -Fq 'attestation_grace_seconds=180' "$clamav_watchdog_script"
+grep -Fq 'auxiliary_wait_seconds=900' "$clamav_watchdog_script"
+grep -Fq "trap 'stop_on_signal 143' TERM" "$clamav_watchdog_script"
+grep -Fq 'watchdog_state_dir=/run/openbmb' "$clamav_watchdog_script"
+grep -Fq '[[ ! -L "$watchdog_state_dir" ]]' "$clamav_watchdog_script"
+grep -Fq 'com.docker.compose.project' "$clamav_watchdog_script"
+grep -Fq 'docker stop --time 90 openbmb-clamav' "$clamav_watchdog_script"
+grep -Fq 'stop --timeout 90 clamav' "$clamav_watchdog_script"
+grep -Fq -- '--force-recreate clamav' "$clamav_watchdog_script"
+grep -Fq 'bash "$script_dir/verify-clamav.sh" --wait' "$clamav_watchdog_script"
+grep -Fq 'bash "$script_dir/compose.sh" run \' "$smtp_check_script"
+grep -Fq -- '--no-deps' "$smtp_check_script"
+grep -Fq -- '--pull never' "$smtp_check_script"
+grep -Fq '/run/lock/openbmb-operation.lock' "$smtp_check_script"
+grep -Fq 'export OPENBMB_APPLICATION_RELEASE="$release_id"' "$smtp_check_script"
+grep -Fq 'SMTP_PASSWORD=.*(CHANGE_ME|REPLACE_WITH)' "$smtp_check_script"
+grep -Fq 'await adapter.onModuleInit();' "$smtp_check_script"
+! grep -Fq 'sendMail' "$smtp_check_script"
+! grep -Eq -- '--env([=[:space:]]+)[^[:space:]]*SMTP_PASSWORD' "$smtp_check_script"
+grep -Fq 'DOCKER_CONFIG=/tmp/openbmb-backup-docker-config' "$backup_service"
+grep -Fq 'bash "$script_dir/verify-clamav.sh" --once' "$script_dir/preflight.sh"
+grep -Fq "docker info --format '{{.DockerRootDir}}'" "$script_dir/preflight.sh"
+grep -Fq 'assert_unique_env_keys "$secret_file"' "$script_dir/preflight.sh"
+grep -Fq '3145728' "$script_dir/preflight.sh"
+grep -Fq 'bash "$script_dir/verify-clamav.sh" --once' "$health_check_script"
+grep -Fq 'openbmb-clamav:$release_id' "$release_image_set"
+grep -Fq 'clamav/clamav-debian:1.4.5_base' "$release_image_set"
+grep -Fq '127.0.0.1:${CLAMAV_HOST_PORT:-13310}:3310' "$production_compose"
+grep -Fq 'clamav_database:/var/lib/clamav' "$production_compose"
+grep -Fq 'CLAMD_CONF_ConcurrentDatabaseReload: "no"' "$production_compose"
+grep -Fq 'CLAMD_CONF_StreamMaxLength: 100M' "$production_compose"
+grep -Fq 'FRESHCLAM_CONF_TestDatabases: "no"' "$production_compose"
+grep -Fq 'CLAMD_CONF_MaxThreads: "1"' "$production_compose"
+grep -Fq 'CLAMD_CONF_MaxConnectionQueueLength: "2"' "$production_compose"
+grep -Fxq 'SMTP_HOST=smtp.qq.com' "$production_api_env"
+grep -Fxq 'SMTP_PORT=465' "$production_api_env"
+grep -Fxq 'SMTP_SECURE=true' "$production_api_env"
+grep -Fxq 'SMTP_REQUIRE_TLS=false' "$production_api_env"
 grep -Fq 'test "$(sudo -n stat -c %U:%G /opt/openbmb)" = root:openbmb' \
   "$delivery_workflow"
 grep -Fq 'if sudo -n test -e "$release_root" || sudo -n test -L "$release_root"; then' \
@@ -256,6 +420,60 @@ resolved="$(
     bash "$script_dir/compose.sh" config
 )"
 
+service_block() {
+  local service="$1"
+  awk -v header="  $service:" '
+    $0 == header { inside = 1; print; next }
+    inside && /^  [A-Za-z0-9_-]+:$/ { exit }
+    inside { print }
+  ' <<<"$resolved"
+}
+
+api_block="$(service_block api)"
+clamav_block="$(service_block clamav)"
+
+grep -Fq 'CLAMAV_HOST: 127.0.0.1' <<<"$api_block" || {
+  printf 'API same-host ClamAV address invariant is missing\n' >&2
+  exit 1
+}
+grep -Fq 'CLAMAV_PORT: "13310"' <<<"$api_block" || {
+  printf 'API same-host ClamAV port invariant is missing\n' >&2
+  exit 1
+}
+grep -A2 -F '    clamav:' <<<"$api_block" | grep -Fq 'condition: service_healthy' || {
+  printf 'API does not require healthy ClamAV\n' >&2
+  exit 1
+}
+grep -Fq 'image: openbmb-clamav:static-validation' <<<"$clamav_block" || {
+  printf 'ClamAV does not use the release-scoped image\n' >&2
+  exit 1
+}
+[[ "$(grep -Fc 'host_ip: 127.0.0.1' <<<"$clamav_block")" -eq 1 && \
+   "$(grep -Fc 'published: "13310"' <<<"$clamav_block")" -eq 1 ]] || {
+  printf 'ClamAV must publish exactly one loopback port\n' >&2
+  exit 1
+}
+[[ "$(grep -Fc 'clamav_egress: null' <<<"$resolved")" -eq 1 ]] || {
+  printf 'only ClamAV may join the signature-update egress network\n' >&2
+  exit 1
+}
+! grep -Eq '^[[:space:]]+(private|web|host_access): null$' <<<"$clamav_block" || {
+  printf 'ClamAV must not join application data networks\n' >&2
+  exit 1
+}
+grep -Fq 'source: clamav_database' <<<"$clamav_block" || {
+  printf 'ClamAV signature volume invariant is missing\n' >&2
+  exit 1
+}
+grep -Fq 'mem_limit: "1610612736"' <<<"$clamav_block" || {
+  printf 'ClamAV memory limit invariant is missing\n' >&2
+  exit 1
+}
+grep -Fq 'memswap_limit: "2147483648"' <<<"$clamav_block" || {
+  printf 'ClamAV memory+swap limit invariant is missing\n' >&2
+  exit 1
+}
+
 grep -Fq '127.0.0.1:13100' <<<"$resolved" || {
   printf 'API loopback bind invariant is missing\n' >&2
   exit 1
@@ -266,6 +484,10 @@ grep -Fq 'published: "14173"' <<<"$resolved" || {
 }
 grep -Fq 'published: "14174"' <<<"$resolved" || {
   printf 'admin loopback publish invariant is missing\n' >&2
+  exit 1
+}
+grep -Fq 'published: "13310"' <<<"$resolved" || {
+  printf 'ClamAV loopback publish invariant is missing\n' >&2
   exit 1
 }
 [[ "$(grep -Fc 'host_ip: 127.0.0.1' <<<"$resolved")" -ge 7 ]] || {

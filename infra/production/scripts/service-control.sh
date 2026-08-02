@@ -48,12 +48,16 @@ case "$1" in
   start)
     assert_application_start_allowed
     bash "$script_dir/compose.sh" up -d --pull never --no-build \
-      mysql redis redis-livekit minio livekit minio-init \
+      mysql redis redis-livekit minio clamav livekit minio-init
+    bash "$script_dir/clamav-watchdog.sh"
+    bash "$script_dir/compose.sh" up -d --pull never --no-build \
       api client-web admin-web
     bash "$script_dir/health-check.sh" --local
     ;;
   reload)
     assert_application_start_allowed
+    bash "$script_dir/compose.sh" up -d --pull never --no-build clamav
+    bash "$script_dir/clamav-watchdog.sh"
     bash "$script_dir/compose.sh" up -d --pull never --no-build --no-deps \
       api client-web admin-web
     bash "$script_dir/health-check.sh" --local

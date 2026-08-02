@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic OpenBMB ClamAV process and signature verification
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=15m
+RandomizedDelaySec=2m
+Persistent=true
+Unit=openbmb-clamav-watchdog.service
+
+[Install]
+WantedBy=timers.target

@@ -52,6 +52,26 @@ describe('createMailDeliveryConfig', () => {
     ).toThrow('SMTP transport must require TLS in production');
   });
 
+  it('accepts QQ SMTP over implicit TLS without requesting STARTTLS', () => {
+    const config = create({
+      ...productionValues,
+      SMTP_HOST: 'smtp.qq.com',
+      SMTP_PORT: '465',
+      SMTP_SECURE: 'true',
+      SMTP_REQUIRE_TLS: 'false',
+      SMTP_USER: '123456@qq.com',
+      SMTP_FROM_ADDRESS: '123456@qq.com',
+    });
+
+    expect(config.smtp).toMatchObject({
+      host: 'smtp.qq.com',
+      port: 465,
+      secure: true,
+      requireTls: false,
+      username: '123456@qq.com',
+    });
+  });
+
   it('preserves SMTP password bytes instead of trimming the secret', () => {
     const config = create({
       ...productionValues,

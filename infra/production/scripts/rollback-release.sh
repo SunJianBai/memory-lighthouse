@@ -127,11 +127,20 @@ restore_with_status() {
   fi
   if [[ "$application_pointer_safe" == true ]]; then
     printf 'Application rollback failed; restoring the previous application images.\n' >&2
-    OPENBMB_RELEASE="$stack_release_id" \
-      OPENBMB_INFRASTRUCTURE_RELEASE="$stack_release_id" \
-      OPENBMB_APPLICATION_RELEASE="$old_application_release" \
-      bash "$current_stack/infra/production/scripts/compose.sh" \
-        up -d --pull never --no-build --no-deps api client-web admin-web || true
+    if bash "$current_stack/infra/production/scripts/verify-clamav.sh" --once; then
+      OPENBMB_RELEASE="$stack_release_id" \
+        OPENBMB_INFRASTRUCTURE_RELEASE="$stack_release_id" \
+        OPENBMB_APPLICATION_RELEASE="$old_application_release" \
+        bash "$current_stack/infra/production/scripts/compose.sh" \
+          up -d --pull never --no-build --no-deps api client-web admin-web || true
+    else
+      printf 'ClamAV is unavailable; refusing to restore application containers.\n' >&2
+      OPENBMB_RELEASE="$stack_release_id" \
+        OPENBMB_INFRASTRUCTURE_RELEASE="$stack_release_id" \
+        OPENBMB_APPLICATION_RELEASE="$old_application_release" \
+        bash "$current_stack/infra/production/scripts/compose.sh" \
+          stop --timeout 30 api client-web admin-web || true
+    fi
   else
     OPENBMB_RELEASE="$stack_release_id" \
       OPENBMB_INFRASTRUCTURE_RELEASE="$stack_release_id" \
@@ -153,6 +162,7 @@ trap 'restore_on_signal 129' HUP
 trap 'restore_on_signal 130' INT
 trap 'restore_on_signal 143' TERM
 
+bash "$current_stack/infra/production/scripts/clamav-watchdog.sh"
 OPENBMB_RELEASE="$stack_release_id" \
   OPENBMB_INFRASTRUCTURE_RELEASE="$stack_release_id" \
   OPENBMB_APPLICATION_RELEASE="$release_id" \

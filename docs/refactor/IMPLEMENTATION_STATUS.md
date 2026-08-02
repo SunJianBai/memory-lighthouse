@@ -38,7 +38,7 @@ LiveKit:   wss://sun227454.online（SDK 使用标准 /rtc/v1；媒体端口不�
 | M4 用户 Web 与管理员 Web | 完成 | React 统一角色 Web 与 Vue 3 管理端均已完成类型检查、生产构建、权限/能力门控和真实 API 接入；隐私中心向当前家庭 OWNER 展示管理员访问类别、原因、时间及独立已读状态 |
 | M5 原生 Android | 源码与构建完成 | Kotlin/Compose 单 APK 已实现角色切换、认证、家庭/记忆/日程/Consent、不可导出设备密钥激活、MiniCPM-o 与 LiveKit；强制重跑 53 个 Gradle 任务全部成功，15 suites/70 tests、Lint 0 errors、Debug APK 均通过，运行时与媒体能力仍待真机验收 |
 | M6 LiveKit、ASR 与全链路安全测试 | 自动化完成，外部验收待办 | 最小 LiveKit Grant、唯一 session-wide 建房 owner、一次性票据 saga、AI/远程媒体原子切换、现场接听、终态删房屏障、远程通话不录制/不转写和开发检查授权均已实现；独立并发复核未发现剩余 P1/P2。Android 真机及双公网设备 RTC 尚未验收。ModelBest 当前协议不提供用户转写，系统不会伪造 USER/ASR 原文 |
-| M7 TX4H4G 部署与公网验证 | 进行中 | 生产 Compose/Caddy、服务器 secrets、不可变发布和自动 CD 已配置，CampusHub 未受影响；改用私有 GHCR 摘要固定与服务器本地镜像清单双重校验，stage-only 运行状态以 [Production delivery](https://github.com/SunJianBai/memory-lighthouse/actions/workflows/production-delivery.yml) 为准。真实 SMTP 未配置，尚未激活或切换公网 |
+| M7 TX4H4G 部署与公网验证 | 进行中 | 生产 Compose/Caddy、不可变发布和自动 CD 已配置，CampusHub 未受影响；ClamAV 已按同机回环、独立签名卷和第 10 个摘要固定镜像纳入发布链，QQ SMTP 非秘密参数已锁定。完整 QQ 地址/授权码尚未安全写入服务器，当前尚未激活或切换公网；stage-only 运行状态以 [Production delivery](https://github.com/SunJianBai/memory-lighthouse/actions/workflows/production-delivery.yml) 为准 |
 
 ## 当前策略
 
@@ -51,9 +51,11 @@ LiveKit:   wss://sun227454.online（SDK 使用标准 /rtc/v1；媒体端口不�
 - Prisma 7.9.1 实施 schema 包含 64 个模型、camelCase 应用字段与 snake_case 映射；17 个迁移已在干净 MySQL 8.4.8 全量应用并与实现 schema 做严格零差异校验，文档物理模型也由 CI 做等价 diff；尚未对 TX4H4G 执行生产迁移。
 - 本地 Compose 的 MySQL、Redis ACL、MinIO 私有版本化 Bucket 与最小权限账号、LiveKit/Redis 均达到 healthy；`infra/scripts/verify-local-stack.ps1` 回归通过。
 - 修复并锁定两个真实基础设施问题：Redis Alpine 镜像改用自带 `setpriv` 降权；数据服务增加仅用于回环端口发布的 `host_access` bridge，同时继续通过 `openbmb_private` 隔离服务数据流。
-- 服务端完整质量门通过：72 个测试套件、401 个单元/集成测试、2 个 E2E 套件/6 个真实 HTTP E2E、ESLint 与 Nest 生产构建。Client Web 为 18 文件/103 测试，Admin Web 为 3 文件/8 测试，两端 typecheck/build、检查版管理端构建及两套契约 check/build 均通过；Android 为 15 suites/70 tests，完整 lint 与 APK 构建通过。
+- 服务端完整质量门通过：72 个测试套件、402 个单元/集成测试、2 个 E2E 套件/6 个真实 HTTP E2E、ESLint 与 Nest 生产构建。Client Web 为 18 文件/103 测试，Admin Web 为 3 文件/8 测试，两端 typecheck/build、检查版管理端构建及两套契约 check/build 均通过；Android 为 15 suites/70 tests，完整 lint 与 APK 构建通过。
 - 管理员每次成功读取开发期原文时，`ContentInspection`、哈希链审计、站内通知和所有当时 ACTIVE OWNER 的独立回执在同一事务中写入；通知失败会阻断原文返回，家庭接口不暴露管理员、资源、授权、请求或工单标识。
 - 生产交付按 GHCR registry digest 拉取并在 TX4H4G 写入独立的 transport/local-ID 清单；`current` 栈指针先于基础设施持久化，`current-app` 只在应用健康后切换。备份采用 partial 目录、根清单摘要完成标记和信号/systemd 双重 API 恢复，6 类隔离故障注入通过。
+- 生产 ClamAV 固定为 `clamav/clamav-debian:1.4.5_base` 的 release-scoped 镜像，只发布 `127.0.0.1:13310`。部署在任何指针、备份或数据库变更前先校验镜像，再完成完整 watchdog 认证；兼容恢复只会重新上线同样通过完整签名认证的旧扫描器，或在旧栈尚无该服务时保留已经认证的新扫描器，缺少 watchdog/认证失败时扫描器与应用保持停止。签名卷始终是可重建缓存。
+- ClamAV systemd watchdog 每 15 分钟交叉校验 clamd 实际加载版本、磁盘 daily 签名时间和 FreshClam 进程；正常 reload 有界宽限后仍失败时按当前 release 重建，恢复失败则停止扫描器并冷却一小时，阻止陈旧签名继续产出 CLEAN 结论。
 - 家属来电在 AI 陪伴时保持响铃；只有设备现场接受后，Redis 媒体租约才从 `AI_COMPANION` 原子切换为 `REMOTE_ASSISTANCE`，并在数据库事务中结束模型会话。
 - 首张远程 Join Ticket 采用显式 `FOR UPDATE` 选择唯一 `PROVISIONING` owner；LiveKit RPC 位于两个短事务之间，只有 `room_provisioned_at + ROOM_READY` 提交后才签 JWT。并发签票、迟到 CreateRoom、终止、撤权、清理、连接超时和 P2034 死锁重试均有确定性回归。
 - 设备刷新凭据与不可导出安装密钥做 PoP 绑定；即使攻击者取得已轮换的旧凭据字符串，没有安装私钥也不能触发整族撤销。
@@ -63,7 +65,7 @@ LiveKit:   wss://sun227454.online（SDK 使用标准 /rtc/v1；媒体端口不�
 
 - Android 单元测试、Lint、Debug APK 构建和 CI 产物已经完成；当前没有已连接真机，摄像头、麦克风、后台释放及真实 RTC 仍需硬件验收。
 - 当前 Debug APK 为 `122,820,389` bytes，SHA-256 `5A5AE35F6D5593A156E4E4DEE0E6267299B29533BCF75777AAA5789205BAD114`；体积优化与 41 条非阻断 Android Lint warning 不影响本轮功能验收。
-- TX4H4G 内存和磁盘余量有限，LiveKit 仅承诺单家庭开发验收容量。
-- LiveKit 信令复用根域 `sun227454.online/rtc/v1`，无需新增 RTC DNS；腾讯云安全组是否已开放 `7881/TCP`、`7882/UDP`、`3478/UDP` 仍待确认。
-- 真实 SMTP 凭据尚未提供，是生产注册、验证和密码重置流程及公网切流的明确阻塞项。当前来电通知采用已认证轮询，Android Push 仅是可选后续增强。
-- 生产私网 ClamAV 节点尚未提供；资产扫描 Adapter 与失败隔离已实现，但公网生产激活必须继续保持 `PRODUCTION_DEPLOY_ENABLED=false`，直至 SMTP、ClamAV、RTC 安全组与真机双端验收完成。
+- TX4H4G 内存和磁盘余量有限；ClamAV 签名引擎常驻内存与上传量无关，已通过单 Worker、单 clamd 线程、禁并发签名重载、1.5 GiB RAM/2 GiB RAM+swap 上限控制，并要求部署前可用 RAM+swap 至少 3 GiB。LiveKit 仍仅承诺单家庭开发验收容量。
+- LiveKit 信令复用根域 `sun227454.online/rtc/v1`，无需新增 RTC DNS；用户已说明服务器端口开放，`7881/TCP`、`7882/UDP`、`3478/UDP` 仍需用两台公网设备做实际媒体验收。
+- QQ SMTP 已选择 `smtp.qq.com:465` 隐式 TLS，但完整 QQ 邮箱和 SMTP 授权码尚未安全写入 `/etc/openbmb/api.env`，因此生产注册、验证、密码重置与公网切流仍不能验收。当前来电通知采用已认证轮询，Android Push 仅是可选后续增强。
+- 同机 ClamAV 编排和失败隔离已完成，待新发布在服务器首次下载签名并通过 INSTREAM 实测。`PRODUCTION_DEPLOY_ENABLED` 继续保持 `false`，直至 QQ SMTP、ClamAV、RTC 与 Android 真机验收完成。

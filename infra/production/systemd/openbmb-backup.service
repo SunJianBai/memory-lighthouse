@@ -8,6 +8,7 @@ ConditionPathIsSymbolicLink=/opt/openbmb/current-app
 [Service]
 Type=oneshot
 Environment=OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env
+Environment=DOCKER_CONFIG=/tmp/openbmb-backup-docker-config
 Environment=OPENBMB_BACKUP_ROOT=/var/backups/openbmb
 ExecStart=/bin/bash /opt/openbmb/current/infra/production/scripts/backup.sh
 ExecStopPost=/bin/bash /opt/openbmb/current/infra/production/scripts/service-control.sh reload
@@ -17,7 +18,10 @@ UMask=0077
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/backups/openbmb /run/lock
+RuntimeDirectory=openbmb
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=/var/backups/openbmb /run/lock /run/openbmb
 NoNewPrivileges=true
 TimeoutStartSec=3600
-TimeoutStopSec=600
+TimeoutStopSec=3600
