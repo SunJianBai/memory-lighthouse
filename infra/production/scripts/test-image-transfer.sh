@@ -16,11 +16,15 @@ fake_bin="$test_root/bin"
 local_state="$test_root/local-docker"
 remote_state="$test_root/remote-docker"
 remote_home="$test_root/remote-home"
+active_remote_home="$test_root/active-remote-home"
 runner_temp="$test_root/runner-temp"
 fake_docker_root="$test_root/docker-root"
+fake_master_state="$test_root/ssh-masters"
+fake_home="$test_root/home"
 install -d -m 0700 "$fake_bin" "$local_state/refs" "$local_state/payloads" \
-  "$remote_state/refs" "$remote_state/payloads" "$remote_home" "$runner_temp" \
-  "$fake_docker_root"
+  "$remote_state/refs" "$remote_state/payloads" "$remote_home" \
+  "$active_remote_home" "$runner_temp" "$fake_docker_root" "$fake_master_state" \
+  "$fake_home" "$fake_home/.ssh"
 
 cat > "$fake_bin/docker" <<'FAKE_DOCKER'
 #!/usr/bin/env bash
@@ -103,19 +107,70 @@ FAKE_DF
 cat > "$fake_bin/ssh" <<'FAKE_SSH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+valid_host() {
+  [[ "$1" == fake-prod || "$1" =~ ^fake-prod-lane-[1-3]$ ]]
+}
+master_path() {
+  printf '%s/%s' "${FAKE_MASTER_STATE:?}" "$1"
+}
+control_path_for() {
+  local host="$1"
+  local host_hash
+  valid_host "$host"
+  [[ "${HOME:?}" == /* && -d "$HOME/.ssh" && ! -L "$HOME/.ssh" ]]
+  host_hash="$(printf '%s' "$host" | sha1sum | awk '{ print $1 }')"
+  [[ "$host_hash" =~ ^[0-9a-f]{40}$ ]]
+  printf '%s/.ssh/openbmb-%s-%s' "$HOME" "$host" "$host_hash"
+}
+if [[ "${1:-}" == -G && "${2:-}" == -T && $# -eq 3 ]]; then
+  printf 'controlpath %s\n' "$(control_path_for "$3")"
+  exit 0
+fi
+if [[ "${1:-}" == -O && "${2:-}" == check && $# -eq 3 ]]; then
+  host="$3"
+  valid_host "$host"
+  [[ -e "$(master_path "$host")" ]]
+  printf 'master-check=%s\n' "$host" >> "${FAKE_SSH_LOG:?}"
+  exit 0
+fi
+if [[ "${1:-}" == -MNf ]]; then
+  host="${!#}"
+  valid_host "$host"
+  [[ "$host" =~ ^fake-prod-lane-[1-3]$ ]]
+  : > "$(master_path "$host")"
+  printf 'master-start=%s\n' "$host" >> "${FAKE_SSH_LOG:?}"
+  exit 0
+fi
 [[ $# -eq 2 ]]
 host="$1"
 command_text="$2"
-[[ "$host" == fake-prod ]]
+valid_host "$host"
+[[ -e "$(master_path "$host")" ]]
 printf 'ssh\n' >> "${FAKE_SSH_LOG:?}"
+printf 'ssh-host=%s\n' "$host" >> "$FAKE_SSH_LOG"
 if [[ "$command_text" == *'/run/lock/openbmb-image-transfer.lock'* ]]; then
+  [[ "$host" == fake-prod ]]
   printf 'lock\n' >> "$FAKE_SSH_LOG"
   printf 'locked\n'
   if [[ "${FAKE_LOCK_EXIT_AFTER_HANDSHAKE:-false}" == true ]]; then
     exit 255
   fi
+  if [[ "${FAKE_LOCK_EXIT_WHEN_UPLOAD_STARTED:-false}" == true ]]; then
+    for _ in {1..6000}; do
+      [[ -e "${FAKE_UPLOAD_STARTED_MARKER:?}" ]] && exit 255
+      sleep 0.01
+    done
+    printf 'timed out waiting for an active upload\n' >&2
+    exit 1
+  fi
   cat >/dev/null
   exit 0
+fi
+if [[ "$host" =~ ^fake-prod-lane-[1-3]$ ]]; then
+  [[ "$command_text" == *'.partial-'* || \
+     "$command_text" == *'.openbmb-transfer/direct-v2/cache/'* ]]
+  [[ "$command_text" != *' import '* && "$command_text" != *' finalize '* && \
+     "$command_text" != *'/sessions/'* ]]
 fi
 if [[ "$command_text" == *"import 'git-0123456789ab'"*"'migrator'"* && \
       ! -e "${FAKE_IMPORT_FAILURE_MARKER:?}" ]]; then
@@ -137,17 +192,46 @@ set -Eeuo pipefail
 source_path="$1"
 target_path="$2"
 remote_home="${FAKE_REMOTE_HOME:?}"
-if [[ "$source_path" == fake-prod:* ]]; then
-  remote_relative="${source_path#fake-prod:}"
+valid_host() {
+  [[ "$1" == fake-prod || "$1" =~ ^fake-prod-lane-[1-3]$ ]]
+}
+master_path() {
+  printf '%s/%s' "${FAKE_MASTER_STATE:?}" "$1"
+}
+if [[ "$source_path" == *:* ]]; then
+  host="${source_path%%:*}"
+  valid_host "$host"
+  [[ "$host" == fake-prod && -e "$(master_path "$host")" ]]
+  remote_relative="${source_path#*:}"
+  printf 'scp-host=%s\n' "$host" >> "${FAKE_SSH_LOG:?}"
   cp "$remote_home/$remote_relative" "$target_path"
   exit 0
 fi
-[[ "$target_path" == fake-prod:* ]]
-remote_relative="${target_path#fake-prod:}"
-if [[ "$remote_relative" == *'/migrator/'*'/part-000000.partial-1-1' && \
+[[ "$target_path" == *:* ]]
+host="${target_path%%:*}"
+valid_host "$host"
+[[ -e "$(master_path "$host")" ]]
+remote_relative="${target_path#*:}"
+printf 'scp-host=%s\n' "$host" >> "${FAKE_SSH_LOG:?}"
+if [[ "$host" =~ ^fake-prod-lane-[1-3]$ ]]; then
+  [[ "$remote_relative" == *'/part-'*'.partial-'*'-lane-'*'-attempt-'* ]]
+else
+  [[ "$remote_relative" == *'/sessions/'* || \
+     "$remote_relative" == *'/cache/'*'/chunks.manifest.incoming-'* ]]
+fi
+if [[ "${FAKE_BLOCK_ACTIVE_UPLOAD:-false}" == true && \
+      "$host" =~ ^fake-prod-lane-[1-3]$ ]]; then
+  printf '%s\n' "$$" >> "${FAKE_ACTIVE_SCP_PIDS:?}"
+  trap 'printf "%s\n" "$$" >> "${FAKE_ACTIVE_SCP_TERMINATED:?}"; exit 143' HUP INT TERM
+  : > "${FAKE_UPLOAD_STARTED_MARKER:?}"
+  for _ in {1..400}; do sleep 0.05; done
+  printf '%s\n' "$$" >> "${FAKE_ACTIVE_SCP_COMPLETED:?}"
+fi
+if [[ "$remote_relative" =~ /migrator/.*/part-000000\.partial-1-1-lane-[1-3]-attempt-1$ && \
       ! -e "${FAKE_SCP_RETRY_MARKER:?}" ]]; then
   cp "$source_path" "$remote_home/$remote_relative"
   : > "$FAKE_SCP_RETRY_MARKER"
+  rm -f -- "$(master_path "$host")"
   printf 'forced-chunk-retry\n' >> "${FAKE_SSH_LOG:?}"
   exit 1
 fi
@@ -156,6 +240,7 @@ FAKE_SCP
 chmod 0700 "$fake_bin"/*
 
 export PATH="$fake_bin:$PATH"
+export HOME="$fake_home"
 export RUNNER_TEMP="$runner_temp"
 export FAKE_DOCKER_STATE="$local_state"
 export FAKE_REMOTE_DOCKER_STATE="$remote_state"
@@ -163,8 +248,17 @@ export FAKE_DOCKER_ROOT="$fake_docker_root"
 export FAKE_REMOTE_HOME="$remote_home"
 export FAKE_REMOTE_PATH="$fake_bin:$PATH"
 export FAKE_SSH_LOG="$test_root/ssh.log"
+export FAKE_MASTER_STATE="$fake_master_state"
 export FAKE_IMPORT_FAILURE_MARKER="$test_root/import-failed-once"
 export FAKE_SCP_RETRY_MARKER="$test_root/scp-retried-once"
+export FAKE_UPLOAD_STARTED_MARKER="$test_root/upload-started"
+export FAKE_ACTIVE_SCP_PIDS="$test_root/active-scp-pids"
+export FAKE_ACTIVE_SCP_TERMINATED="$test_root/active-scp-terminated"
+export FAKE_ACTIVE_SCP_COMPLETED="$test_root/active-scp-completed"
+export OPENBMB_TRANSFER_SSH_LANES=3
+export OPENBMB_TRANSFER_CHUNK_BYTES=2048
+export OPENBMB_SSH_COMMAND="$fake_bin/ssh"
+: > "$fake_master_state/fake-prod"
 
 key_for() {
   printf '%s' "$1" | sha256sum | awk '{ print $1 }'
@@ -208,6 +302,32 @@ unset FAKE_LOCK_EXIT_AFTER_HANDSHAKE
 [[ "$lock_loss_status" -ne 0 ]]
 [[ ! -e "$lock_loss_manifest" ]]
 [[ ! -e "$remote_home/.openbmb-transfer/direct-v2/cache/$release_id" ]]
+
+# If the main lease reaches EOF while data SCP processes are in flight, the owner
+# must fail closed, terminate every active child, and publish no final chunk or
+# host manifest. Use an isolated remote home so the resumability fixtures below
+# cannot accidentally hide a partially published active-upload attempt.
+original_remote_home="$FAKE_REMOTE_HOME"
+export FAKE_REMOTE_HOME="$active_remote_home"
+export FAKE_BLOCK_ACTIVE_UPLOAD=true
+export FAKE_LOCK_EXIT_WHEN_UPLOAD_STARTED=true
+active_loss_manifest="$runner_temp/openbmb-images-$source_sha-8-1.txt"
+set +e
+bash "$script_dir/transfer-release-images.sh" \
+  "$release_id" "$source_sha" 8 1 fake-prod "$active_loss_manifest" \
+  >"$test_root/active-lock-loss.out" 2>"$test_root/active-lock-loss.err"
+active_loss_status=$?
+set -e
+unset FAKE_BLOCK_ACTIVE_UPLOAD FAKE_LOCK_EXIT_WHEN_UPLOAD_STARTED
+export FAKE_REMOTE_HOME="$original_remote_home"
+[[ "$active_loss_status" -ne 0 ]]
+[[ -s "$FAKE_ACTIVE_SCP_PIDS" && -s "$FAKE_ACTIVE_SCP_TERMINATED" ]]
+[[ ! -e "$FAKE_ACTIVE_SCP_COMPLETED" && ! -e "$active_loss_manifest" ]]
+[[ -z "$(find "$active_remote_home/.openbmb-transfer/direct-v2/cache/$release_id" \
+  -type f -name 'part-[0-9][0-9][0-9][0-9][0-9][0-9]' -print -quit 2>/dev/null)" ]]
+while IFS= read -r active_scp_pid; do
+  ! kill -0 "$active_scp_pid" 2>/dev/null
+done < "$FAKE_ACTIVE_SCP_PIDS"
 
 # Attempt 1 uploads a verified migrator chunk (including one retry), then loses SSH
 # immediately before import. Session metadata and content-addressed cache must survive.
@@ -258,6 +378,10 @@ grep -Fq 'Reused exact image ID for openbmb-api:' "$test_root/attempt-2.out"
 [[ ! -e "$remote_home/.openbmb-transfer/direct-v2/sessions/2-1" ]]
 [[ ! -e "$release_cache" ]]
 [[ "$(grep -Fc forced-chunk-retry "$FAKE_SSH_LOG")" -eq 1 ]]
-[[ "$(grep -Fc lock "$FAKE_SSH_LOG")" -eq 3 ]]
+for lane in 1 2 3; do
+  grep -Fq "scp-host=fake-prod-lane-$lane" "$FAKE_SSH_LOG"
+done
+[[ "$(grep -Fc 'master-start=fake-prod-lane-1' "$FAKE_SSH_LOG")" -ge 2 ]]
+[[ "$(grep -Fc lock "$FAKE_SSH_LOG")" -eq 4 ]]
 
 printf 'Resumable SSH image transfer fixtures: OK\n'

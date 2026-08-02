@@ -20,9 +20,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+test_home="$test_root/home"
+install -d -m 0700 "$test_home" "$test_home/.ssh"
+export HOME="$test_home"
+
 extracted_config="$test_root/extracted-ssh-config"
 rendered_config="$test_root/rendered-ssh-config"
 effective_config="$test_root/effective-ssh-config"
+effective_lane_one_config="$test_root/effective-ssh-lane-one-config"
+effective_lane_eight_config="$test_root/effective-ssh-lane-eight-config"
 awk '
   /cat > "\$HOME\/\.ssh\/config" <<EOF/ { capture = 1; next }
   capture && /^          EOF$/ { complete = 1; exit }
@@ -36,24 +42,43 @@ awk '
 sed \
   -e 's/\$DEPLOY_HOST/127.0.0.1/g' \
   -e 's/\$DEPLOY_USER/openbmbtest/g' \
+  -e "s#~/.ssh#$HOME/.ssh#g" \
   "$extracted_config" > "$rendered_config"
 ssh -G -T -F "$rendered_config" tx4h4g-prod > "$effective_config"
-grep -Fxq 'hostname 127.0.0.1' "$effective_config"
-grep -Fxq 'user openbmbtest' "$effective_config"
-grep -Fxq 'batchmode yes' "$effective_config"
-grep -Fxq 'identitiesonly yes' "$effective_config"
-grep -Fxq 'stricthostkeychecking true' "$effective_config"
-grep -Fxq 'connecttimeout 20' "$effective_config"
-grep -Fxq 'connectionattempts 1' "$effective_config"
-grep -Fxq 'controlmaster false' "$effective_config"
-grep -Fxq 'controlpersist 7800' "$effective_config"
-grep -Fxq 'proxycommand /bin/false' "$effective_config"
-grep -Fxq 'serveraliveinterval 30' "$effective_config"
-grep -Fxq 'serveralivecountmax 6' "$effective_config"
-grep -Fxq 'globalknownhostsfile /dev/null' "$effective_config"
-grep -Eq '^userknownhostsfile .*/\.ssh/known_hosts$' "$effective_config"
-grep -Eq '^identityfile .*/\.ssh/openbmb_deploy$' "$effective_config"
-grep -Eq '^controlpath .*/\.ssh/openbmb-[^[:space:]]+$' "$effective_config"
+ssh -G -T -F "$rendered_config" tx4h4g-prod-lane-1 > "$effective_lane_one_config"
+ssh -G -T -F "$rendered_config" tx4h4g-prod-lane-8 > "$effective_lane_eight_config"
+for effective_host_config in \
+  "$effective_config" "$effective_lane_one_config" "$effective_lane_eight_config"; do
+  grep -Fxq 'hostname 127.0.0.1' "$effective_host_config"
+  grep -Fxq 'user openbmbtest' "$effective_host_config"
+  grep -Fxq 'batchmode yes' "$effective_host_config"
+  grep -Fxq 'identitiesonly yes' "$effective_host_config"
+  grep -Fxq 'stricthostkeychecking true' "$effective_host_config"
+  grep -Fxq 'connecttimeout 20' "$effective_host_config"
+  grep -Fxq 'connectionattempts 1' "$effective_host_config"
+  grep -Fxq 'controlmaster false' "$effective_host_config"
+  grep -Fxq 'controlpersist 7800' "$effective_host_config"
+  grep -Fxq 'proxycommand /bin/false' "$effective_host_config"
+  grep -Fxq 'serveraliveinterval 30' "$effective_host_config"
+  grep -Fxq 'serveralivecountmax 6' "$effective_host_config"
+  grep -Fxq 'globalknownhostsfile /dev/null' "$effective_host_config"
+  grep -Eq '^userknownhostsfile .*/\.ssh/known_hosts$' "$effective_host_config"
+  grep -Eq '^identityfile .*/\.ssh/openbmb_deploy$' "$effective_host_config"
+  grep -Eq '^controlpath .*/\.ssh/openbmb-[^[:space:]]+$' "$effective_host_config"
+done
+main_control_path="$(awk '$1 == "controlpath" { print $2 }' "$effective_config")"
+lane_one_control_path="$(awk '$1 == "controlpath" { print $2 }' "$effective_lane_one_config")"
+lane_eight_control_path="$(awk '$1 == "controlpath" { print $2 }' "$effective_lane_eight_config")"
+[[ -n "$main_control_path" && -n "$lane_one_control_path" && -n "$lane_eight_control_path" ]]
+[[ "$main_control_path" != "$lane_one_control_path" ]]
+[[ "$main_control_path" != "$lane_eight_control_path" ]]
+[[ "$lane_one_control_path" != "$lane_eight_control_path" ]]
+[[ "$(basename -- "$main_control_path")" =~ ^openbmb-tx4h4g-prod-[0-9a-f]{40}$ ]]
+[[ "$(basename -- "$lane_one_control_path")" =~ ^openbmb-tx4h4g-prod-lane-1-[0-9a-f]{40}$ ]]
+[[ "$(basename -- "$lane_eight_control_path")" =~ ^openbmb-tx4h4g-prod-lane-8-[0-9a-f]{40}$ ]]
+[[ "$(dirname -- "$main_control_path")" == "$HOME/.ssh" ]]
+[[ "$(dirname -- "$lane_one_control_path")" == "$HOME/.ssh" ]]
+[[ "$(dirname -- "$lane_eight_control_path")" == "$HOME/.ssh" ]]
 
 guard_listener_script="$test_root/guard-listener.py"
 guard_port_file="$test_root/guard-port"
@@ -105,9 +130,18 @@ scp -F "$fail_closed_config" "$test_root/scp-source" \
   tx4h4g-prod:must-not-transfer \
   > "$test_root/scp-fail-closed.out" 2> "$test_root/scp-fail-closed.err"
 scp_fail_closed_status=$?
+ssh -T -F "$fail_closed_config" tx4h4g-prod-lane-8 true \
+  > "$test_root/lane-fail-closed.out" 2> "$test_root/lane-fail-closed.err"
+lane_fail_closed_status=$?
+scp -F "$fail_closed_config" "$test_root/scp-source" \
+  tx4h4g-prod-lane-8:must-not-transfer \
+  > "$test_root/lane-scp-fail-closed.out" 2> "$test_root/lane-scp-fail-closed.err"
+lane_scp_fail_closed_status=$?
 set -e
 [[ "$fail_closed_status" -ne 0 ]]
 [[ "$scp_fail_closed_status" -ne 0 ]]
+[[ "$lane_fail_closed_status" -ne 0 ]]
+[[ "$lane_scp_fail_closed_status" -ne 0 ]]
 wait "$listener_pid"
 listener_pid=''
 [[ "$(cat "$guard_connection_count_file")" == 0 ]]
@@ -172,18 +206,50 @@ EOF
 fake_ssh="$test_root/fake-ssh"
 master_state="$test_root/master-state"
 attempt_file="$test_root/master-attempts"
+fake_ssh_log="$test_root/fake-ssh.log"
 cat > "$fake_ssh" <<'FAKE_SSH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ "${1:-}" == -O && "${2:-}" == check && "${3:-}" == fake-prod && $# -eq 3 ]]; then
-  [[ -e "${FAKE_MASTER_STATE:?}" ]]
+control_path_for() {
+  local host="$1"
+  local host_hash
+  [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+  [[ "${HOME:?}" == /* && -d "$HOME/.ssh" && ! -L "$HOME/.ssh" ]]
+  host_hash="$(printf '%s' "$host" | sha1sum | awk '{ print $1 }')"
+  [[ "$host_hash" =~ ^[0-9a-f]{40}$ ]]
+  printf '%s/.ssh/openbmb-%s-%s' "$HOME" "$host" "$host_hash"
+}
+state_for() {
+  printf '%s/%s' "${FAKE_MASTER_STATE_DIR:?}" "$1"
+}
+if [[ "${1:-}" == -G && "${2:-}" == -T && $# -eq 3 ]]; then
+  printf 'controlpath %s\n' "$(control_path_for "$3")"
+  exit 0
+fi
+if [[ "${1:-}" == -O && "${2:-}" == check && $# -eq 3 ]]; then
+  printf 'check=%s\n' "$3" >> "${FAKE_SSH_LOG:?}"
+  [[ -e "$(state_for "$3")" ]]
   exit
 fi
 [[ "${1:-}" == -MNf && "${2:-}" == -o && \
    "${3:-}" == ProxyCommand=none && "${4:-}" == -o && \
    "${5:-}" == ControlMaster=yes && "${6:-}" == -o && \
-   "${7:-}" == ControlPersist=130m && "${8:-}" == fake-prod && $# -eq 8 ]]
+   "${7:-}" == ControlPersist=130m && $# -eq 8 ]]
+
+host="$8"
+printf 'start=%s\n' "$host" >> "$FAKE_SSH_LOG"
+if [[ "$host" == signal-prod ]]; then
+  printf '%s\n' "$$" > "${FAKE_SIGNAL_CHILD_PID:?}"
+  trap 'printf "terminated\n" > "${FAKE_SIGNAL_TERMINATED:?}"; exit 143' HUP INT TERM
+  : > "${FAKE_SIGNAL_STARTED:?}"
+  while :; do sleep 1; done
+fi
+
+if [[ "$host" != fake-prod ]]; then
+  : > "$(state_for "$host")"
+  exit 0
+fi
 
 attempt=1
 if [[ -s "${FAKE_MASTER_ATTEMPTS:?}" ]]; then
@@ -205,12 +271,14 @@ with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5) as cli
 PY
 )"
 [[ "$response" == READY ]]
-: > "$FAKE_MASTER_STATE"
+: > "$(state_for "$host")"
 FAKE_SSH
 chmod 0700 "$fake_ssh"
 
-export FAKE_MASTER_STATE="$master_state"
+install -d -m 0700 "$master_state"
+export FAKE_MASTER_STATE_DIR="$master_state"
 export FAKE_MASTER_ATTEMPTS="$attempt_file"
+export FAKE_SSH_LOG="$fake_ssh_log"
 export REAL_SSH_COMMAND="$(command -v ssh)"
 export RESET_SSH_CONFIG="$reset_config"
 export RESET_PORT="$reset_port"
@@ -239,5 +307,92 @@ set -e
 [[ "$invalid_attempts_status" -ne 0 ]]
 [[ "$(cat "$attempt_file")" == 2 ]]
 grep -Fq 'between 1 and 6' "$test_root/invalid-attempts.err"
+
+control_path_for() {
+  local host="$1"
+  local host_hash
+  host_hash="$(printf '%s' "$host" | sha1sum | awk '{ print $1 }')"
+  printf '%s/.ssh/openbmb-%s-%s' "$HOME" "$host" "$host_hash"
+}
+
+# A failed control check may remove only a user-owned, non-symlink Unix socket,
+# and only after the helper repeats both the control check and type validation.
+stale_control_path="$(control_path_for stale-prod)"
+python3 - "$stale_control_path" <<'PY'
+import socket
+import sys
+
+path = sys.argv[1]
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.bind(path)
+sock.close()
+PY
+[[ -S "$stale_control_path" && ! -L "$stale_control_path" ]]
+OPENBMB_SSH_COMMAND="$fake_ssh" \
+  bash "$script_dir/ensure-ssh-master.sh" stale-prod 1 0 \
+  > "$test_root/stale.out" 2> "$test_root/stale.err"
+[[ ! -e "$stale_control_path" && ! -L "$stale_control_path" ]]
+[[ -e "$master_state/stale-prod" ]]
+[[ "$(grep -Fc 'check=stale-prod' "$fake_ssh_log")" -eq 4 ]]
+grep -Fq 'Established authenticated SSH master for stale-prod.' "$test_root/stale.out"
+
+regular_control_path="$(control_path_for regular-prod)"
+printf 'must survive\n' > "$regular_control_path"
+set +e
+OPENBMB_SSH_COMMAND="$fake_ssh" \
+  bash "$script_dir/ensure-ssh-master.sh" regular-prod 1 0 \
+  > "$test_root/regular.out" 2> "$test_root/regular.err"
+regular_status=$?
+set -e
+[[ "$regular_status" -ne 0 ]]
+[[ -f "$regular_control_path" && ! -L "$regular_control_path" ]]
+[[ "$(cat "$regular_control_path")" == 'must survive' ]]
+grep -Fq 'not a private user-owned socket' "$test_root/regular.err"
+
+symlink_target="$test_root/symlink-target"
+printf 'must survive\n' > "$symlink_target"
+symlink_control_path="$(control_path_for symlink-prod)"
+ln -s -- "$symlink_target" "$symlink_control_path"
+set +e
+OPENBMB_SSH_COMMAND="$fake_ssh" \
+  bash "$script_dir/ensure-ssh-master.sh" symlink-prod 1 0 \
+  > "$test_root/symlink.out" 2> "$test_root/symlink.err"
+symlink_status=$?
+set -e
+[[ "$symlink_status" -ne 0 ]]
+[[ -L "$symlink_control_path" && "$(readlink -- "$symlink_control_path")" == "$symlink_target" ]]
+[[ "$(cat "$symlink_target")" == 'must survive' ]]
+grep -Fq 'not a private user-owned socket' "$test_root/symlink.err"
+
+# TERM received while the helper is waiting for a spawned SSH process must be
+# forwarded to that exact child, reaped, and surfaced as the signal exit status.
+export FAKE_SIGNAL_STARTED="$test_root/signal-started"
+export FAKE_SIGNAL_CHILD_PID="$test_root/signal-child-pid"
+export FAKE_SIGNAL_TERMINATED="$test_root/signal-terminated"
+OPENBMB_SSH_COMMAND="$fake_ssh" \
+  bash "$script_dir/ensure-ssh-master.sh" signal-prod 1 0 \
+  > "$test_root/signal.out" 2> "$test_root/signal.err" &
+helper_pid=$!
+for _ in {1..500}; do
+  [[ -e "$FAKE_SIGNAL_STARTED" && -s "$FAKE_SIGNAL_CHILD_PID" ]] && break
+  sleep 0.01
+done
+if [[ ! -e "$FAKE_SIGNAL_STARTED" || ! -s "$FAKE_SIGNAL_CHILD_PID" ]]; then
+  printf 'signal fixture did not reach the blocking SSH child\n' >&2
+  cat "$test_root/signal.out" >&2 || true
+  cat "$test_root/signal.err" >&2 || true
+  cat "$fake_ssh_log" >&2 || true
+  exit 1
+fi
+signal_child_pid="$(cat "$FAKE_SIGNAL_CHILD_PID")"
+kill -TERM "$helper_pid"
+set +e
+wait "$helper_pid"
+helper_status=$?
+set -e
+[[ "$helper_status" -eq 143 ]]
+[[ -s "$FAKE_SIGNAL_TERMINATED" ]]
+! kill -0 "$signal_child_pid" 2>/dev/null
+[[ ! -e "$master_state/signal-prod" ]]
 
 printf 'Pinned SSH master retry fixtures: OK\n'

@@ -38,7 +38,7 @@ LiveKit:   wss://sun227454.online（SDK 使用标准 /rtc/v1；媒体端口不�
 | M4 用户 Web 与管理员 Web | 完成 | React 统一角色 Web 与 Vue 3 管理端均已完成类型检查、生产构建、权限/能力门控和真实 API 接入；隐私中心向当前家庭 OWNER 展示管理员访问类别、原因、时间及独立已读状态 |
 | M5 原生 Android | 源码与构建完成 | Kotlin/Compose 单 APK 已实现角色切换、认证、家庭/记忆/日程/Consent、不可导出设备密钥激活、MiniCPM-o 与 LiveKit；强制重跑 53 个 Gradle 任务全部成功，15 suites/70 tests、Lint 0 errors、Debug APK 均通过，运行时与媒体能力仍待真机验收 |
 | M6 LiveKit、ASR 与全链路安全测试 | 自动化完成，外部验收待办 | 最小 LiveKit Grant、唯一 session-wide 建房 owner、一次性票据 saga、AI/远程媒体原子切换、现场接听、终态删房屏障、远程通话不录制/不转写和开发检查授权均已实现；独立并发复核未发现剩余 P1/P2。Android 真机及双公网设备 RTC 尚未验收。ModelBest 当前协议不提供用户转写，系统不会伪造 USER/ASR 原文 |
-| M7 TX4H4G 部署与公网验证 | 进行中 | 生产 Compose/Caddy、不可变发布和自动 CD 已配置，CampusHub 未受影响；同机 ClamAV 已在 `127.0.0.1:13310` 完成签名新鲜度、EICAR INSTREAM、watchdog 和故障恢复实测。首轮 stage-only 暴露 TX4H4G→GHCR 大层连接重置，交付已改为保留 GHCR digest 溯源、Runner 经 pinned SSH 分镜像断点直传。系统发件地址已选定，但轮换后的 QQ 授权码尚未通过安全通道写入服务器；完整栈尚未激活或切换公网，状态以 [Production delivery](https://github.com/SunJianBai/memory-lighthouse/actions/workflows/production-delivery.yml) 为准 |
+| M7 TX4H4G 部署与公网验证 | 进行中 | 生产 Compose/Caddy、不可变发布和自动 CD 已配置，CampusHub 未受影响；同机 ClamAV 已在 `127.0.0.1:13310` 完成签名新鲜度、EICAR INSTREAM、watchdog 和故障恢复实测。首轮 stage-only 暴露 TX4H4G→GHCR 大层连接重置；第二轮确认单条 Runner→TX4H4G SSH TCP 仅约 14 KiB/s，现改为主 lease 与 8 条 fail-closed 数据连接分离、8 MiB 分块断点直传，并继续保留 GHCR digest 溯源。系统发件地址已选定，但轮换后的 QQ 授权码尚未通过安全通道写入服务器；完整栈尚未激活或切换公网，状态以 [Production delivery](https://github.com/SunJianBai/memory-lighthouse/actions/workflows/production-delivery.yml) 为准 |
 
 ## 当前策略
 
@@ -53,7 +53,7 @@ LiveKit:   wss://sun227454.online（SDK 使用标准 /rtc/v1；媒体端口不�
 - 修复并锁定两个真实基础设施问题：Redis Alpine 镜像改用自带 `setpriv` 降权；数据服务增加仅用于回环端口发布的 `host_access` bridge，同时继续通过 `openbmb_private` 隔离服务数据流。
 - 服务端完整质量门通过：72 个测试套件、402 个单元/集成测试、2 个 E2E 套件/6 个真实 HTTP E2E、ESLint 与 Nest 生产构建。Client Web 为 18 文件/103 测试，Admin Web 为 3 文件/8 测试，两端 typecheck/build、检查版管理端构建及两套契约 check/build 均通过；Android 为 15 suites/70 tests，完整 lint 与 APK 构建通过。
 - 管理员每次成功读取开发期原文时，`ContentInspection`、哈希链审计、站内通知和所有当时 ACTIVE OWNER 的独立回执在同一事务中写入；通知失败会阻断原文返回，家庭接口不暴露管理员、资源、授权、请求或工单标识。
-- 生产交付在 Runner 推送 GHCR registry digest 留作溯源，再通过 pinned SSH 按精确 image ID 复用、逐镜像 32 MiB 分块校验和断点 cache 写入 TX4H4G；服务器不接收 GHCR Token。transport/local-ID 清单独立保存，local-ID 清单在十个镜像及应用 OCI revision 全部复核后原子生成。`current` 栈指针先于基础设施持久化，`current-app` 只在应用健康后切换。备份采用 partial 目录、根清单摘要完成标记和信号/systemd 双重 API 恢复，6 类隔离故障注入通过。
+- 生产交付在 Runner 推送 GHCR registry digest 留作溯源，再通过 pinned SSH 按精确 image ID 复用；主连接持有独立 transfer lease，8 条独立 fail-closed TCP 并行写入逐镜像 8 MiB 分块校验和断点 cache，服务器不接收 GHCR Token。transport/local-ID 清单独立保存，local-ID 清单在十个镜像及应用 OCI revision 全部复核后原子生成。`current` 栈指针先于基础设施持久化，`current-app` 只在应用健康后切换。备份采用 partial 目录、根清单摘要完成标记和信号/systemd 双重 API 恢复，6 类隔离故障注入通过。
 - 生产 ClamAV 固定为 `clamav/clamav-debian:1.4.5_base` 的 release-scoped 镜像，只发布 `127.0.0.1:13310`。部署在任何指针、备份或数据库变更前先校验镜像，再完成完整 watchdog 认证；兼容恢复只会重新上线同样通过完整签名认证的旧扫描器，或在旧栈尚无该服务时保留已经认证的新扫描器，缺少 watchdog/认证失败时扫描器与应用保持停止。签名卷始终是可重建缓存。
 - ClamAV systemd watchdog 每 15 分钟交叉校验 clamd 实际加载版本、磁盘 daily 签名时间和 FreshClam 进程；正常 reload 有界宽限后仍失败时按当前 release 重建，恢复失败则停止扫描器并冷却一小时，阻止陈旧签名继续产出 CLEAN 结论。
 - 家属来电在 AI 陪伴时保持响铃；只有设备现场接受后，Redis 媒体租约才从 `AI_COMPANION` 原子切换为 `REMOTE_ASSISTANCE`，并在数据库事务中结束模型会话。
