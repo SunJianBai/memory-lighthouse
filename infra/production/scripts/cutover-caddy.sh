@@ -135,7 +135,8 @@ public_mutation_started=false
 cutover_complete=false
 rollback_public() {
   local status="$1"
-  trap - EXIT HUP INT TERM
+  trap - EXIT
+  trap '' HUP INT TERM
   if [[ "$cutover_complete" == true ]]; then
     exit "$status"
   fi

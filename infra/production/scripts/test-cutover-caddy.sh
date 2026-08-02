@@ -56,7 +56,9 @@ cat > "$fake_bin/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'curl %s\n' "$*" >> "${FAKE_CUTOVER_LOG:?}"
-if [[ -n "${FAKE_CURL_FAIL_ONCE_FILE:-}" && ! -e "$FAKE_CURL_FAIL_ONCE_FILE" ]]; then
+if [[ -n "${FAKE_CURL_FAIL_ONCE_FILE:-}" &&
+      "$*" == *'http://127.0.0.1:18080/'* &&
+      ! -e "$FAKE_CURL_FAIL_ONCE_FILE" ]]; then
   : > "$FAKE_CURL_FAIL_ONCE_FILE"
   exit 56
 fi

@@ -218,6 +218,8 @@ grep -Fq "'openbmb:media-owner:*'" "$script_dir/drain-realtime.sh"
 grep -Fq 'openbmb-redis-livekit livekit REDIS_LIVEKIT_PASSWORD' \
   "$script_dir/drain-realtime.sh"
 grep -Fq 'bash "$script_dir/health-check.sh" --local' "$backup_script"
+grep -Fq -- '--connect-timeout 2' "$health_check_script"
+grep -Fq -- '--max-time 10' "$health_check_script"
 grep -Fq 'sha256sum --check SHA256SUMS.tmp' "$backup_script"
 grep -Fq '! -path ./SHA256SUMS' "$backup_script"
 grep -Fq "trap 'rollback_on_signal 143' TERM" "$deploy_script"

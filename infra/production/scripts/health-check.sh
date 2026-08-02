@@ -24,21 +24,31 @@ clamav_ready() {
   bash "$script_dir/verify-clamav.sh" --once >/dev/null 2>&1
 }
 
+http_ready() {
+  curl \
+    --fail \
+    --silent \
+    --connect-timeout 2 \
+    --max-time 10 \
+    "$1" \
+    --output /dev/null
+}
+
 if [[ "$mode" == --local ]]; then
   retry 'ClamAV PING and INSTREAM' clamav_ready
-  retry 'client web container' curl --fail --silent --show-error http://127.0.0.1:14173/healthz --output /dev/null
-  retry 'admin web container' curl --fail --silent --show-error http://127.0.0.1:14174/healthz --output /dev/null
-  retry 'API liveness' curl --fail --silent --show-error http://127.0.0.1:13100/openBMB/api/v1/health/live --output /dev/null
-  retry 'API readiness' curl --fail --silent --show-error http://127.0.0.1:13100/openBMB/api/v1/health/ready --output /dev/null
-  retry 'LiveKit signal' curl --fail --silent --show-error http://127.0.0.1:17880/ --output /dev/null
+  retry 'client web container' http_ready http://127.0.0.1:14173/healthz
+  retry 'admin web container' http_ready http://127.0.0.1:14174/healthz
+  retry 'API liveness' http_ready http://127.0.0.1:13100/openBMB/api/v1/health/live
+  retry 'API readiness' http_ready http://127.0.0.1:13100/openBMB/api/v1/health/ready
+  retry 'LiveKit signal' http_ready http://127.0.0.1:17880/
 elif [[ "$mode" == --public ]]; then
   retry 'ClamAV PING and INSTREAM (host loopback)' clamav_ready
-  retry 'CampusHub fallback' curl --fail --silent --show-error "https://$root_domain/" --output /dev/null
-  retry 'OpenBMB client' curl --fail --silent --show-error "https://$root_domain/openBMB/" --output /dev/null
-  retry 'OpenBMB admin' curl --fail --silent --show-error "https://$root_domain/openBMB/admin/" --output /dev/null
-  retry 'OpenBMB API readiness' curl --fail --silent --show-error "https://$root_domain/openBMB/api/v1/health/ready" --output /dev/null
-  retry 'LiveKit TLS signal' curl --fail --silent --show-error "https://$root_domain/openBMB/rtc-health" --output /dev/null
-  retry 'private S3 endpoint' curl --fail --silent --show-error "https://$root_domain/openBMB/object-storage-health" --output /dev/null
+  retry 'CampusHub fallback' http_ready "https://$root_domain/"
+  retry 'OpenBMB client' http_ready "https://$root_domain/openBMB/"
+  retry 'OpenBMB admin' http_ready "https://$root_domain/openBMB/admin/"
+  retry 'OpenBMB API readiness' http_ready "https://$root_domain/openBMB/api/v1/health/ready"
+  retry 'LiveKit TLS signal' http_ready "https://$root_domain/openBMB/rtc-health"
+  retry 'private S3 endpoint' http_ready "https://$root_domain/openBMB/object-storage-health"
 else
   printf 'usage: %s [--local|--public]\n' "${BASH_SOURCE[0]}" >&2
   exit 2
