@@ -213,7 +213,7 @@ assert_transfer_lock_alive() {
 ssh() {
   local command_status=0
   assert_transfer_lock_alive
-  "$ssh_command" "$@" || command_status=$?
+  "$ssh_command" "$@" </dev/null || command_status=$?
   assert_transfer_lock_alive
   return "$command_status"
 }
@@ -221,7 +221,7 @@ ssh() {
 scp() {
   local command_status=0
   assert_transfer_lock_alive
-  "$scp_command" "$@" || command_status=$?
+  "$scp_command" "$@" </dev/null || command_status=$?
   assert_transfer_lock_alive
   return "$command_status"
 }
@@ -230,7 +230,7 @@ lane_ssh() {
   local command_status=0
   assert_transfer_lock_alive
   upload_child_spawn_in_progress=true
-  "$ssh_command" "$@" &
+  "$ssh_command" "$@" </dev/null &
   upload_child_pid=$!
   upload_child_spawn_in_progress=false
   if [[ -n "$pending_upload_signal_status" ]]; then
@@ -246,7 +246,7 @@ lane_scp() {
   local command_status=0
   assert_transfer_lock_alive
   upload_child_spawn_in_progress=true
-  "$scp_command" "$@" &
+  "$scp_command" "$@" </dev/null &
   upload_child_pid=$!
   upload_child_spawn_in_progress=false
   if [[ -n "$pending_upload_signal_status" ]]; then
@@ -264,7 +264,7 @@ ensure_data_lane() {
   assert_transfer_lock_alive
   upload_child_spawn_in_progress=true
   env OPENBMB_SSH_COMMAND="$ssh_command" \
-    bash "$ssh_master_file" "$lane_host" 3 2 >/dev/null &
+    bash "$ssh_master_file" "$lane_host" 3 2 </dev/null >/dev/null &
   upload_child_pid=$!
   upload_child_spawn_in_progress=false
   if [[ -n "$pending_upload_signal_status" ]]; then
@@ -689,7 +689,7 @@ for index in "${!OPENBMB_REQUIRED_IMAGES[@]}"; do
       trap 'request_upload_termination 143' TERM
       upload_chunk "$lane_host" "$component" "$chunk_name" "$chunk_sha256" \
         "$chunk_bytes" "$chunk_path" "$remote_chunk" "$remote_partial_base"
-    ) &
+    ) </dev/null &
     worker_pid=$!
     upload_pids+=("$worker_pid")
     worker_spawn_in_progress=false
