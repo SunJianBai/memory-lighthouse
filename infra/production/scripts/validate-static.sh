@@ -12,6 +12,9 @@ printf 'Shell syntax: OK\n'
 bash "$script_dir/test-security-state.sh"
 bash "$script_dir/audit-security-migration-recovery.sh" --self-test
 bash "$script_dir/test-clamav-watchdog.sh"
+bash "$script_dir/test-image-import.sh"
+bash "$script_dir/test-image-transfer.sh"
+bash "$script_dir/test-cutover-caddy.sh"
 
 line_of() {
   grep -nF -m 1 -- "$2" "$1" | cut -d: -f1
@@ -47,6 +50,9 @@ rollback_script="$script_dir/rollback-release.sh"
 delivery_workflow="$project_root/.github/workflows/production-delivery.yml"
 production_compose="$production_dir/compose.production.yml"
 release_image_set="$script_dir/release-image-set.sh"
+image_import_script="$script_dir/import-release-image.sh"
+image_transfer_script="$script_dir/transfer-release-images.sh"
+cutover_script="$script_dir/cutover-caddy.sh"
 production_api_env="$production_dir/env/api.env.example"
 key_capability_migration="$project_root/apps/server-api/prisma/migrations/20260802151000_require_non_exportable_device_key_protection/migration.sql"
 join_ticket_migration="$project_root/apps/server-api/prisma/migrations/20260802141000_one_time_remote_join_tickets/migration.sql"
@@ -307,7 +313,7 @@ for livekit_config in \
   "$production_dir/../livekit/livekit.yaml" \
   "$production_dir/livekit/livekit.production.yaml"; do
   awk '
-    /^[^[:space:]#]/ { section = $1 }
+    /^[^[:space:]#]/ { section = $1; sub(/\r$/, "", section) }
     section == "room:" && \
       /^[[:space:]]+auto_create:[[:space:]]*false([[:space:]]*(#.*)?)?$/ { found += 1 }
     END { exit found == 1 ? 0 : 1 }
@@ -392,6 +398,39 @@ grep -Fq 'if sudo -n test -e "$release_root" || sudo -n test -L "$release_root";
   "$delivery_workflow"
 grep -Fq 'sudo -n test ! -e "$incoming"' "$delivery_workflow"
 grep -Fq 'sudo -n env OPENBMB_DOMAIN=sun227454.online bash' "$delivery_workflow"
+grep -Fq 'test "${docker_free_kib:-0}" -ge 4194304' "$delivery_workflow"
+grep -Fq 'bash infra/production/scripts/transfer-release-images.sh \' "$delivery_workflow"
+! grep -Fq 'pull-release-images.sh' "$delivery_workflow"
+! grep -Fq 'printf '\''%s\n'\'' "$GHCR_TOKEN" | ssh' "$delivery_workflow"
+grep -Fq '/run/lock/openbmb-operation.lock' "$image_import_script"
+grep -Fq 'minimum_free_kib=4194304' "$image_import_script"
+grep -Fq 'cat -- "${chunk_paths[@]}" | sha256sum' "$image_import_script"
+grep -Fq 'gzip -dc | docker load' "$image_import_script"
+grep -Fq 'OCI revision differs' "$image_import_script"
+grep -Fq 'cmp --silent "$expected_manifest" "$host_manifest"' "$image_import_script"
+assert_before "$image_import_script" \
+  'for index in "${!OPENBMB_REQUIRED_IMAGES[@]}"; do' \
+  'mv -- "$script_dir/$host_manifest_tmp" "$host_manifest"'
+grep -Fq 'docker save --output "$raw_archive" "$image_name"' "$image_transfer_script"
+grep -Fq 'split --bytes=32M' "$image_transfer_script"
+grep -Fq 'Reused verified chunk' "$image_transfer_script"
+grep -Fq 'for upload_attempt in {1..6}; do' "$image_transfer_script"
+grep -Fq 'cmp --silent "$expected_manifest" "$host_manifest_incoming"' "$image_transfer_script"
+grep -Fq 'assert_transfer_lock_alive' "$image_transfer_script"
+grep -Fq 'kill -TERM "$transfer_owner_pid"' "$image_transfer_script"
+! grep -Fq 'GHCR_TOKEN' "$image_transfer_script"
+! grep -Fq 'docker login' "$image_transfer_script"
+grep -Fq "trap 'rollback_public 129' HUP" "$cutover_script"
+grep -Fq "trap 'rollback_public 130' INT" "$cutover_script"
+grep -Fq "trap 'rollback_public 143' TERM" "$cutover_script"
+grep -Fq 'initial_caddy_enable_state="$(systemctl is-enabled caddy' "$cutover_script"
+grep -Fq 'systemctl disable caddy || true' "$cutover_script"
+assert_before "$cutover_script" \
+  'public_mutation_started=true' \
+  'published="$("${campus_cutover_compose[@]}" port "$frontend_service" 80)"'
+assert_before "$cutover_script" \
+  'systemctl enable caddy' \
+  'cutover_complete=true'
 grep -Fq 'CREATE INDEX `remote_participants_ticket_status_expiry_idx`' \
   "$join_ticket_migration"
 grep -Fq '@@index([joinTicketStatus, joinTicketExpiresAt], map: "remote_participants_ticket_status_expiry_idx")' \

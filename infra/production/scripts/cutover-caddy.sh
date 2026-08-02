@@ -23,10 +23,12 @@ base_compose="$2"
 campus_env="$3"
 override_compose="$4"
 frontend_service="$5"
-state_root="/var/lib/openbmb/cutover"
+state_root="${OPENBMB_CUTOVER_STATE_ROOT:-/var/lib/openbmb/cutover}"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 state_dir="$state_root/$stamp"
-caddy_env="/etc/caddy/openbmb.env"
+caddy_env="${OPENBMB_CADDY_ENV_FILE:-/etc/caddy/openbmb.env}"
+caddy_config="${OPENBMB_CADDY_CONFIG_FILE:-/etc/caddy/Caddyfile}"
+health_check_script="${OPENBMB_CUTOVER_HEALTH_CHECK:-$script_dir/health-check.sh}"
 
 caddy_value() {
   local key="$1"
@@ -47,6 +49,11 @@ assert_existing_loopback_service() {
 [[ -f "$campus_dir/$override_compose" ]] || { printf 'override Compose file not found\n' >&2; exit 1; }
 command -v ss >/dev/null 2>&1 || { printf 'ss command is required\n' >&2; exit 1; }
 [[ -f "$caddy_env" ]] || { printf 'Caddy environment file not found\n' >&2; exit 1; }
+[[ -f "$caddy_config" ]] || { printf 'Caddy configuration file not found\n' >&2; exit 1; }
+[[ -f "$health_check_script" && ! -L "$health_check_script" ]] || {
+  printf 'public health-check script not found\n' >&2
+  exit 1
+}
 if find "$caddy_env" -maxdepth 0 -perm /0037 -print -quit | grep -q .; then
   printf 'Caddy environment file must be 0640 or stricter\n' >&2
   exit 1
@@ -93,26 +100,53 @@ assert_existing_loopback_service 33306
 chmod 0600 "$state_dir"/*
 
 sudo -u caddy caddy validate \
-  --config /etc/caddy/Caddyfile \
+  --config "$caddy_config" \
   --adapter caddyfile \
   --envfile "$caddy_env"
+initial_caddy_enable_state="$(systemctl is-enabled caddy 2>/dev/null || true)"
+[[ "$initial_caddy_enable_state" == enabled || "$initial_caddy_enable_state" == disabled ]] || {
+  printf 'Caddy must be either enabled or disabled before cutover, got: %s\n' \
+    "$initial_caddy_enable_state" >&2
+  exit 1
+}
 
+public_mutation_started=false
+cutover_complete=false
 rollback_public() {
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    return
+  local status="$1"
+  trap - EXIT HUP INT TERM
+  if [[ "$cutover_complete" == true ]]; then
+    exit "$status"
   fi
-  printf 'Cutover failed; restoring CampusHub directly on port 80.\n' >&2
-  systemctl stop caddy || true
-  cd "$campus_dir"
-  "${campus_compose[@]}" up -d --pull never --no-build --no-deps --force-recreate "$frontend_service" || true
-  curl --fail --silent --show-error http://127.0.0.1/ --output /dev/null || true
+  if [[ "$public_mutation_started" == true ]]; then
+    printf 'Cutover failed or was interrupted; restoring CampusHub directly on port 80.\n' >&2
+    systemctl stop caddy || true
+    cd "$campus_dir"
+    "${campus_compose[@]}" up -d --pull never --no-build --no-deps --force-recreate "$frontend_service" || true
+    curl --fail --silent --show-error http://127.0.0.1/ --output /dev/null || true
+    if [[ "$initial_caddy_enable_state" == enabled ]]; then
+      systemctl enable caddy || true
+    else
+      systemctl disable caddy || true
+    fi
+  fi
   exit "$status"
 }
-trap rollback_public ERR
+finish_on_exit() {
+  local status=$?
+  if [[ "$status" -eq 0 && "$cutover_complete" == true ]]; then
+    return
+  fi
+  rollback_public "$status"
+}
+trap finish_on_exit EXIT
+trap 'rollback_public 129' HUP
+trap 'rollback_public 130' INT
+trap 'rollback_public 143' TERM
 
 campus_cutover_compose=(docker compose --env-file "$campus_env" -f "$base_compose" -f "$override_compose")
 "${campus_cutover_compose[@]}" config > "$state_dir/campus.after.yml"
+public_mutation_started=true
 "${campus_cutover_compose[@]}" \
   up -d --pull never --no-build --no-deps --force-recreate "$frontend_service"
 
@@ -126,10 +160,11 @@ assert_existing_loopback_service 8080
 assert_existing_loopback_service 33306
 
 systemctl start caddy
-bash "$script_dir/health-check.sh" --public
+bash "$health_check_script" --public
 assert_existing_loopback_service 8080
 assert_existing_loopback_service 33306
 systemctl enable caddy
 
-trap - ERR
+cutover_complete=true
+trap - EXIT HUP INT TERM
 printf 'Caddy cutover succeeded. Snapshot: %s\n' "$state_dir"
