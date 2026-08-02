@@ -22,7 +22,7 @@ value_from() {
   awk -F= -v wanted="$key" '$1 == wanted { sub(/^[^=]*=/, ""); print; exit }' "$file"
 }
 
-for command_name in docker curl getent grep awk stat df openssl; do
+for command_name in docker curl getent grep awk stat df openssl timeout mktemp readlink sync; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
 
@@ -71,8 +71,15 @@ for key in "${infra_secret_keys[@]}"; do
   seen_secrets[$value]="$key"
 done
 
+kms_secret="$(value_from MINIO_KMS_SECRET_KEY "$infra_env")"
+if [[ ! "$kms_secret" =~ ^([A-Za-z0-9._-]{1,64}):([A-Za-z0-9+/]+={0,2})$ ]] || \
+   [[ "$(printf '%s' "${BASH_REMATCH[2]:-}" | openssl base64 -d -A 2>/dev/null | wc -c)" -ne 32 ]]; then
+  fail 'MINIO_KMS_SECRET_KEY must be a key name plus standard Base64 for exactly 32 random bytes'
+fi
+
 declare -a api_base64url_keys=(
-  AUTH_ACCESS_TOKEN_SECRET AUTH_REFRESH_TOKEN_PEPPER
+  AUTH_ACCESS_TOKEN_SECRET AUTH_ADMIN_ACCESS_TOKEN_SECRET
+  AUTH_REFRESH_TOKEN_PEPPER
   AUTH_ONE_TIME_TOKEN_PEPPER HOUSEHOLD_INVITATION_TOKEN_PEPPER
   RATE_LIMIT_KEY_SECRET DEVICE_ACTIVATION_PEPPER
   DEVICE_CREDENTIAL_PEPPER DEVICE_ACCESS_TOKEN_SECRET
@@ -124,6 +131,47 @@ smtp_from="$(value_from SMTP_FROM_ADDRESS "$api_env")"
 [[ "$smtp_port" =~ ^[0-9]+$ ]] || fail 'SMTP_PORT must be numeric'
 [[ -n "$smtp_from" && "$smtp_from" != *@example.com ]] || fail 'real SMTP_FROM_ADDRESS is required'
 getent ahosts "$smtp_host" >/dev/null || fail "SMTP host does not resolve: $smtp_host"
+
+clamav_host="$(value_from CLAMAV_HOST "$api_env")"
+clamav_port="$(value_from CLAMAV_PORT "$api_env")"
+clamav_timeout_ms="$(value_from CLAMAV_SCAN_TIMEOUT_MS "$api_env")"
+asset_worker_enabled="$(value_from ASSET_LIFECYCLE_WORKER_ENABLED "$api_env")"
+asset_lease_ms="$(value_from ASSET_LIFECYCLE_LEASE_MS "$api_env")"
+[[ "${asset_worker_enabled,,}" == true ]] || \
+  fail 'ASSET_LIFECYCLE_WORKER_ENABLED must be true in production'
+[[ "$clamav_host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]] || \
+  fail 'CLAMAV_HOST must be a private DNS name or IPv4 address'
+[[ "$clamav_host" != *.example ]] || fail 'a real private CLAMAV_HOST is required'
+[[ "$clamav_port" =~ ^[0-9]+$ && "$clamav_port" -ge 1 && "$clamav_port" -le 65535 ]] || \
+  fail 'CLAMAV_PORT must be between 1 and 65535'
+[[ "$clamav_timeout_ms" =~ ^[0-9]+$ && "$clamav_timeout_ms" -ge 1000 && "$clamav_timeout_ms" -le 300000 ]] || \
+  fail 'CLAMAV_SCAN_TIMEOUT_MS must be between 1000 and 300000'
+[[ "$asset_lease_ms" =~ ^[0-9]+$ && "$asset_lease_ms" -ge 60000 && "$asset_lease_ms" -le 1800000 ]] || \
+  fail 'ASSET_LIFECYCLE_LEASE_MS must be between 60000 and 1800000'
+[[ "$asset_lease_ms" -ge "$((clamav_timeout_ms + 30000))" ]] || \
+  fail 'ASSET_LIFECYCLE_LEASE_MS must exceed CLAMAV_SCAN_TIMEOUT_MS by at least 30 seconds'
+
+clamav_query() {
+  timeout 5 bash -c '
+    set -e
+    exec 3<>"/dev/tcp/$1/$2"
+    if [[ "$3" == ping ]]; then
+      printf "zPING\0" >&3
+    else
+      printf "zINSTREAM\0\0\0\0\0" >&3
+    fi
+    IFS= read -r -d "" response <&3
+    printf "%s" "$response"
+  ' bash "$clamav_host" "$clamav_port" "$1"
+}
+
+[[ "$(clamav_query ping 2>/dev/null)" == PONG ]] || \
+  fail 'private clamd did not answer PING'
+clamav_scan_reply="$(clamav_query scan 2>/dev/null)" || \
+  fail 'private clamd did not accept INSTREAM'
+[[ "$clamav_scan_reply" =~ (^|:)[[:space:]]*OK$ ]] || \
+  fail 'private clamd INSTREAM health scan failed'
+note 'private clamd accepts real INSTREAM scanning'
 
 note 'Tencent Cloud and UFW must separately allow 80/TCP, 443/TCP, 7881/TCP, 7882/UDP and 3478/UDP'
 note 'preflight checks passed'

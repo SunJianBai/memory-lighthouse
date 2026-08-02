@@ -2,11 +2,14 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Param,
   Post,
+  Req,
 } from '@nestjs/common';
+import type { Request } from 'express';
 
 import {
   RateLimited,
@@ -41,6 +44,7 @@ export class PublicDeviceActivationController {
 
   @Get('activation-challenges/:challengeId')
   @RateLimited(RateLimitPolicy.DEVICE_ACTIVATION_STATUS)
+  @Header('Cache-Control', 'no-store')
   async getStatus(
     @Param('challengeId') challengeId: string,
   ): Promise<PublicActivationStatus> {
@@ -53,9 +57,11 @@ export class PublicDeviceActivationController {
   async claim(
     @Param('publicId') publicId: string,
     @Body() input: ClaimActivationChallengeDto,
+    @Req() request: Request,
   ): Promise<{ claimed: true; challengeId: string }> {
     return this.deviceActivation.claimActivationChallenge({
       publicId,
+      ipAddress: request.ip,
       ...input,
     });
   }

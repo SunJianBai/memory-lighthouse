@@ -1,6 +1,8 @@
 package com.sun.minicpmo_android.lighthouse.data
 
 import com.sun.minicpmo_android.lighthouse.model.CareEventView
+import com.sun.minicpmo_android.lighthouse.model.CareAuthorityInput
+import com.sun.minicpmo_android.lighthouse.model.CareAuthorityView
 import com.sun.minicpmo_android.lighthouse.model.CareRecipientInput
 import com.sun.minicpmo_android.lighthouse.model.CareRecipientView
 import com.sun.minicpmo_android.lighthouse.model.ConsentDocumentVersionView
@@ -8,6 +10,7 @@ import com.sun.minicpmo_android.lighthouse.model.ConsentEventView
 import com.sun.minicpmo_android.lighthouse.model.ConsentStateView
 import com.sun.minicpmo_android.lighthouse.model.FamilyTaskView
 import com.sun.minicpmo_android.lighthouse.model.HouseholdView
+import com.sun.minicpmo_android.lighthouse.model.HouseholdMemberView
 import com.sun.minicpmo_android.lighthouse.model.MemoryInput
 import com.sun.minicpmo_android.lighthouse.model.MemoryRevisionView
 import com.sun.minicpmo_android.lighthouse.model.MemoryView
@@ -29,6 +32,62 @@ internal object FamilyApiContract {
 
     fun recipientsPath(householdId: String) =
         "households/$householdId/care-recipients"
+
+    fun householdMembersPath(householdId: String) =
+        "households/$householdId/members"
+
+    fun householdMemberPath(householdId: String, memberId: String) =
+        "${householdMembersPath(householdId)}/$memberId"
+
+    fun updateHouseholdMemberBody(
+        roleCodes: Set<String>,
+        version: Int,
+        currentPassword: String,
+    ) = JSONObject()
+        .put("roleCodes", JSONArray(roleCodes.sorted()))
+        .put("version", version)
+        .put("currentPassword", currentPassword)
+
+    fun removeHouseholdMemberPath(householdId: String, memberId: String, version: Int) =
+        "${householdMemberPath(householdId, memberId)}?version=$version"
+
+    fun removeHouseholdMemberBody(currentPassword: String) = JSONObject()
+        .put("currentPassword", currentPassword)
+
+    fun careAuthoritiesPath(householdId: String, recipientId: String) =
+        "households/$householdId/care-recipients/$recipientId/authorities"
+
+    fun careAuthorityPath(householdId: String, recipientId: String, memberId: String) =
+        "${careAuthoritiesPath(householdId, recipientId)}/$memberId"
+
+    fun careAuthorityBody(
+        input: CareAuthorityInput,
+        currentPassword: String,
+    ) = JSONObject()
+        .put(
+            "relationshipLabel",
+            input.relationshipLabel?.trim()?.takeIf(String::isNotBlank) ?: JSONObject.NULL,
+        )
+        .put("accessLevel", input.accessLevel)
+        .put("canManageProfile", input.canManageProfile)
+        .put("canManageConsent", input.canManageConsent)
+        .put("canManageRoutine", input.canManageRoutine)
+        .put("canViewEvents", input.canViewEvents)
+        .put("canViewConversation", input.canViewConversation)
+        .put("canActivateDevice", input.canActivateDevice)
+        .put("canRemoteCall", input.canRemoteCall)
+        .put("receiveNotifications", input.receiveNotifications)
+        .put("contactPriority", input.contactPriority ?: JSONObject.NULL)
+        .put("status", input.status)
+        .put("currentPassword", currentPassword)
+        .apply { input.version?.let { put("version", it) } }
+
+    fun revokeBindingPath(householdId: String, bindingId: String) =
+        "households/$householdId/companion-bindings/$bindingId"
+
+    fun revokeBindingBody(reasonCode: String?, currentPassword: String) = JSONObject()
+        .putOptionalText("reasonCode", reasonCode)
+        .put("currentPassword", currentPassword)
 
     fun createRecipientBody(input: CareRecipientInput) = JSONObject()
         .put("name", input.name.trim())
@@ -163,6 +222,17 @@ internal object FamilyJsonMapper {
         version = json.optInt("version", 0),
     )
 
+    fun parseHouseholdMember(json: JSONObject) = HouseholdMemberView(
+        id = json.getString("id"),
+        householdId = json.getString("householdId"),
+        userId = json.getString("userId"),
+        displayName = json.getString("displayName"),
+        status = json.getString("status"),
+        roleCodes = json.optJSONArray("roleCodes").strings(),
+        joinedAt = json.nullableString("joinedAt"),
+        version = json.getInt("version"),
+    )
+
     fun parseRecipient(json: JSONObject) = CareRecipientView(
         id = json.getString("id"),
         householdId = json.getString("householdId"),
@@ -173,6 +243,28 @@ internal object FamilyJsonMapper {
         homeLabel = json.nullableString("homeLabel"),
         status = json.optString("status", "ACTIVE"),
         version = json.optInt("version", 0),
+    )
+
+    fun parseCareAuthority(json: JSONObject) = CareAuthorityView(
+        id = json.getString("id"),
+        householdId = json.getString("householdId"),
+        recipientId = json.getString("recipientId"),
+        memberId = json.getString("memberId"),
+        userId = json.getString("userId"),
+        displayName = json.getString("displayName"),
+        relationshipLabel = json.nullableString("relationshipLabel"),
+        accessLevel = json.getString("accessLevel"),
+        canManageProfile = json.getBoolean("canManageProfile"),
+        canManageConsent = json.getBoolean("canManageConsent"),
+        canManageRoutine = json.getBoolean("canManageRoutine"),
+        canViewEvents = json.getBoolean("canViewEvents"),
+        canViewConversation = json.getBoolean("canViewConversation"),
+        canActivateDevice = json.getBoolean("canActivateDevice"),
+        canRemoteCall = json.getBoolean("canRemoteCall"),
+        receiveNotifications = json.getBoolean("receiveNotifications"),
+        contactPriority = if (json.isNull("contactPriority")) null else json.getInt("contactPriority"),
+        status = json.getString("status"),
+        version = json.getInt("version"),
     )
 
     fun parseMemory(json: JSONObject) = MemoryView(

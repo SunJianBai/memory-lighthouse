@@ -2,9 +2,10 @@ import { describe, expect, it, jest } from '@jest/globals';
 import type { ExecutionContext } from '@nestjs/common';
 import type { Reflector } from '@nestjs/core';
 
-import type { PrismaService } from '../../../infrastructure/database/prisma.service';
-import type { UserAccessGuard } from '../../identity/http/user-access.guard';
+import type { AdminAccessGuard } from '../../identity/http/admin-access.guard';
+import { InvalidAccessTokenException } from '../../identity/identity.errors';
 import { PlatformAccessDeniedException } from '../platform-operations.errors';
+import type { PlatformRoleAuthorizer } from '../platform-role.authorizer';
 import { PlatformRoleGuard } from './platform-role.guard';
 
 function contextFor(request: Record<string, unknown>): ExecutionContext {
@@ -16,61 +17,57 @@ function contextFor(request: Record<string, unknown>): ExecutionContext {
 }
 
 describe('PlatformRoleGuard', () => {
-  it('reuses user authentication and resolves platform roles from MySQL on every request', async () => {
+  it('authenticates only the admin audience and resolves current roles on every request', async () => {
     const request: Record<string, unknown> = {};
-    const userGuard = {
+    const adminGuard = {
       canActivate: jest.fn(async () => {
-        request.userPrincipal = {
-          kind: 'USER',
+        request.adminPrincipal = {
+          kind: 'ADMIN',
           userId: 'user-auditor',
-          sessionId: 'session-1',
-          tokenId: 'token-1',
+          sessionId: 'admin-session-1',
+          tokenId: 'admin-token-1',
           status: 'ACTIVE',
         };
         return true;
       }),
     };
-    const findMany = jest.fn(async () => [
-      { role: { code: 'CONTENT_AUDITOR' } },
-    ]);
-    const prisma = { platformRoleAssignment: { findMany } };
+    const requireAny = jest.fn(async () => ['CONTENT_AUDITOR'] as const);
     const reflector = {
       getAllAndOverride: jest.fn(() => ['CONTENT_AUDITOR']),
     };
     const guard = new PlatformRoleGuard(
-      userGuard as unknown as UserAccessGuard,
-      prisma as unknown as PrismaService,
+      adminGuard as unknown as AdminAccessGuard,
+      { requireAny } as unknown as PlatformRoleAuthorizer,
       reflector as unknown as Reflector,
     );
 
     await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
     await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
 
-    expect(userGuard.canActivate).toHaveBeenCalledTimes(1);
-    expect(findMany).toHaveBeenCalledTimes(2);
-    expect(findMany).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ userId: 'user-auditor' }),
-      }),
-    );
+    expect(adminGuard.canActivate).toHaveBeenCalledTimes(1);
+    expect(requireAny).toHaveBeenCalledTimes(2);
+    expect(requireAny).toHaveBeenLastCalledWith('user-auditor', [
+      'CONTENT_AUDITOR',
+    ]);
     expect(request.platformRoles).toEqual(['CONTENT_AUDITOR']);
   });
 
-  it('does not trust authentication alone when the current assignment is missing', async () => {
+  it('rejects an existing admin token immediately after its role is revoked', async () => {
     const request = {
-      userPrincipal: {
-        kind: 'USER',
+      adminPrincipal: {
+        kind: 'ADMIN',
         userId: 'former-admin',
-        sessionId: 'session-1',
-        tokenId: 'token-1',
+        sessionId: 'admin-session-1',
+        tokenId: 'admin-token-1',
         status: 'ACTIVE',
       },
     };
+    const requireAny = jest.fn(async () => {
+      throw new PlatformAccessDeniedException();
+    });
     const guard = new PlatformRoleGuard(
-      { canActivate: jest.fn() } as unknown as UserAccessGuard,
-      {
-        platformRoleAssignment: { findMany: jest.fn(async () => []) },
-      } as unknown as PrismaService,
+      { canActivate: jest.fn() } as unknown as AdminAccessGuard,
+      { requireAny } as unknown as PlatformRoleAuthorizer,
       {
         getAllAndOverride: jest.fn(() => ['ADMIN']),
       } as unknown as Reflector,
@@ -79,32 +76,27 @@ describe('PlatformRoleGuard', () => {
     await expect(guard.canActivate(contextFor(request))).rejects.toBeInstanceOf(
       PlatformAccessDeniedException,
     );
+    expect(requireAny).toHaveBeenCalledWith('former-admin', ['ADMIN']);
   });
 
-  it('rejects an ordinary household user from the admin boundary', async () => {
-    const request = {
-      userPrincipal: {
-        kind: 'USER',
-        userId: 'household-user',
-        sessionId: 'session-1',
-        tokenId: 'token-1',
-        status: 'ACTIVE',
-      },
+  it('cannot fall back to ordinary user-token authentication', async () => {
+    const adminGuard = {
+      canActivate: jest.fn(async () => {
+        throw new InvalidAccessTokenException();
+      }),
     };
-    const findMany = jest.fn(async () => []);
+    const requireAny = jest.fn();
     const guard = new PlatformRoleGuard(
-      { canActivate: jest.fn() } as unknown as UserAccessGuard,
+      adminGuard as unknown as AdminAccessGuard,
+      { requireAny } as unknown as PlatformRoleAuthorizer,
       {
-        platformRoleAssignment: { findMany },
-      } as unknown as PrismaService,
-      {
-        getAllAndOverride: jest.fn(() => ['ADMIN', 'CONTENT_AUDITOR']),
+        getAllAndOverride: jest.fn(() => ['ADMIN']),
       } as unknown as Reflector,
     );
 
-    await expect(guard.canActivate(contextFor(request))).rejects.toBeInstanceOf(
-      PlatformAccessDeniedException,
+    await expect(guard.canActivate(contextFor({}))).rejects.toBeInstanceOf(
+      InvalidAccessTokenException,
     );
-    expect(request).not.toHaveProperty('platformRoles');
+    expect(requireAny).not.toHaveBeenCalled();
   });
 });

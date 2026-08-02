@@ -6,6 +6,7 @@ import { HouseholdAccessPolicy } from '../household/domain/household-access.poli
 import { newUlid } from '../identity/domain/ulid';
 import {
   ASSET_DOWNLOAD_TTL_SECONDS,
+  ASSET_LIFECYCLE_EVENT,
   ASSET_SCAN_STATUS,
   ASSET_STATUS,
   ASSET_UPLOAD_TTL_SECONDS,
@@ -191,6 +192,21 @@ export class AssetApplicationService {
       if (updated.count !== 1) {
         throw new MemoryVersionConflictException();
       }
+      const now = new Date();
+      await transaction.outboxEvent.create({
+        data: {
+          id: newUlid(now.getTime()),
+          aggregateType: 'ASSET',
+          aggregateId: current.id,
+          eventType: ASSET_LIFECYCLE_EVENT.scanRequested,
+          payloadJson: {
+            assetId: current.id,
+            householdId: current.householdId,
+          },
+          occurredAt: now,
+          availableAt: now,
+        },
+      });
       return this.requireAsset(transaction, command.householdId, current.id);
     });
     return this.toAssetView(completed);
@@ -280,7 +296,7 @@ export class AssetApplicationService {
           id: newUlid(now.getTime()),
           aggregateType: 'ASSET',
           aggregateId: asset.id,
-          eventType: 'asset.delete-requested',
+          eventType: ASSET_LIFECYCLE_EVENT.deleteRequested,
           payloadJson: {
             assetId: asset.id,
             householdId: asset.householdId,
@@ -288,7 +304,7 @@ export class AssetApplicationService {
             objectKey: asset.objectKey,
           },
           occurredAt: now,
-          availableAt: now,
+          availableAt: this.deletionAvailableAt(asset, now),
         },
       });
       return {
@@ -333,16 +349,34 @@ export class AssetApplicationService {
     assetId: string,
     result: 'CLEAN' | 'QUARANTINED' | 'FAILED',
   ): Promise<void> {
+    const asset = (await this.prisma.asset.findUnique({
+      where: { id: assetId },
+    })) as AssetRecord | null;
+    if (!asset || asset.status !== ASSET_STATUS.active) {
+      return;
+    }
+    if (asset.scanStatus === result) {
+      return;
+    }
+    if (
+      asset.scanStatus !== ASSET_SCAN_STATUS.pending &&
+      asset.scanStatus !== ASSET_SCAN_STATUS.failed
+    ) {
+      return;
+    }
     const updated = await this.prisma.asset.updateMany({
       where: {
         id: assetId,
         status: ASSET_STATUS.active,
-        scanStatus: ASSET_SCAN_STATUS.pending,
+        scanStatus: asset.scanStatus,
+        version: asset.version,
       },
       data: { scanStatus: result, version: { increment: 1 } },
     });
     if (updated.count !== 1) {
-      throw new AssetUnavailableException();
+      // A duplicate worker may have completed the same deterministic scan or
+      // a deletion request may have won the race. Both outcomes remain safe.
+      return;
     }
   }
 
@@ -398,6 +432,7 @@ export class AssetApplicationService {
       contentLength: number | null;
       contentType: string | null;
       checksumSha256Base64: string | null;
+      serverSideEncryption: string | null;
       metadata: Record<string, string>;
     },
   ): void {
@@ -409,6 +444,9 @@ export class AssetApplicationService {
     }
     if (head.contentType?.toLowerCase() !== asset.mimeType.toLowerCase()) {
       mismatches.mimeType = 'MISMATCH';
+    }
+    if (head.serverSideEncryption !== 'AES256') {
+      mismatches.encryption = 'MISMATCH';
     }
     if (
       head.checksumSha256Base64 !== expectedHashBase64 &&
@@ -453,7 +491,7 @@ export class AssetApplicationService {
           id: newUlid(now.getTime()),
           aggregateType: 'ASSET',
           aggregateId: asset.id,
-          eventType: 'asset.delete-requested',
+          eventType: ASSET_LIFECYCLE_EVENT.deleteRequested,
           payloadJson: {
             assetId: asset.id,
             householdId: asset.householdId,
@@ -461,7 +499,7 @@ export class AssetApplicationService {
             objectKey: asset.objectKey,
           },
           occurredAt: now,
-          availableAt: now,
+          availableAt: this.deletionAvailableAt(asset, now),
         },
       });
     });
@@ -475,6 +513,16 @@ export class AssetApplicationService {
       throw new AssetUploadStateException();
     }
     return key;
+  }
+
+  private deletionAvailableAt(asset: AssetRecord, now: Date): Date {
+    // A granted PUT remains usable even after database state moves to
+    // PENDING_DELETE. Wait past its maximum lifetime (plus clock/signing
+    // margin), then permanently remove every object version.
+    const uploadGrantExpiry = new Date(
+      asset.createdAt.getTime() + (ASSET_UPLOAD_TTL_SECONDS + 60) * 1_000,
+    );
+    return uploadGrantExpiry > now ? uploadGrantExpiry : now;
   }
 
   private toAssetView(asset: AssetRecord): AssetView {

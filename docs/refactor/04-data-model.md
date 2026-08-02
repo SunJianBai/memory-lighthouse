@@ -2,7 +2,7 @@
 
 ## 1. 数据库职责
 
-MySQL 是账号、授权、资料、日程、事件、会话生命周期和审计的唯一业务事实源。Redis 只保存可过期、可重建的在线状态、媒体租约、限流和任务队列；MinIO 只保存对象内容，任何对象都必须先有 MySQL 元数据和授权关系。
+MySQL 是账号、授权、资料、日程、事件、会话生命周期、审计和持久 Outbox 的唯一业务事实源。资产扫描/删除等隐私关键任务的租约与重试状态也保存在 MySQL，确保业务提交后任务不会因 Redis 丢失而消失。Redis 只保存可过期、可重建的在线状态、媒体租约、限流和非权威调度提示；MinIO 只保存对象内容，任何对象都必须先有 MySQL 元数据和授权关系。
 
 ## 2. 全局物理约定
 
@@ -63,9 +63,11 @@ erDiagram
 ### 4.3 Device 与 Companion Binding
 
 - Device 表示一次 App 或浏览器安装，不采集 IMEI、Android ID 等永久硬件标识。
+- Device 必须显式保存 `installation_key_algorithm`（`ED25519` 或 `ECDSA_P256_SHA256`）和 `key_protection=NON_EXPORTABLE_V1` 才能进入激活或设备鉴权链路；迁移前安装统一标记为 `LEGACY_UNVERIFIED` 并撤销，两个字段不提供默认值以阻止旧服务创建可用设备。
 - 一台设备同一时刻只允许一个当前 Companion Binding；历史写入不可变的 Binding Event。
 - MySQL 没有通用部分唯一索引，当前绑定使用独立当前表或自定义生成列约束，不能依赖 `UNIQUE(device_id, status)`。
 - 激活成功后签发 Device Credential，家属 User Session 从陪伴模式清除。
+- 首次 Device Credential 明文由服务端使用独立域标签、激活 Challenge、安装标识、批准时间和服务端 Pepper 确定性派生，数据库仍只保存加 Pepper 的摘要。首次事务已经提交但 HTTP 响应丢失时，公开状态接口签发绑定当前 Challenge `version` 的 60 秒恢复令牌，设备必须用安装私钥签署独立的 `exchange-recovery` proof；恢复事务以 MySQL `version` CAS 原子消费该证明，成功后只呈现同一凭据并递增版本。旧 exchange/recovery 请求、Redis 状态丢失或并发重放都不能恢复授权；仅当 Binding、设备、公钥、未轮换凭据和摘要仍完全一致时允许再次取得新恢复令牌。
 
 ### 4.4 Consent
 
@@ -104,6 +106,8 @@ erDiagram
 - 当前模型是一次会话对应一台 Companion Binding 和一名发起家属；后续 LiveKit 房间可增加受控参与者。
 - MySQL 保存生命周期和授权快照，Redis 保存在线、短时票据和媒体排他租约。
 - `ACTIVE` 必须由媒体服务器 Webhook 确认双方加入且陪伴端发布必要轨道，不能只信任客户端按钮。
+- `room_provisioned_at` 是首张票之前的持久建房栅栏：只有锁定会话行的建房事务成功提交后才非空；其后所有参与者复用同一房间，不再发起 CreateRoom。
+- `room_cleanup_status/room_cleanup_completed_at/room_cleanup_not_before` 记录终态删房屏障、完成检查点及保守重删窗口；清理未完成前不得释放对应 Binding 的媒体隔离租约。
 - 默认不录制；媒体服务器房间名使用不可猜测随机值，令牌和媒体密钥不入库。
 
 ## 5. 索引计划
@@ -111,10 +115,13 @@ erDiagram
 | 表 | 关键索引或唯一约束 |
 | --- | --- |
 | `login_identities` | `UNIQUE(type, normalized_value)` |
-| `user_sessions` | `UNIQUE(refresh_token_hash)`；`(user_id, revoked_at, expires_at)` |
+| `user_sessions` | `UNIQUE(refresh_token_hash)`；`(user_id, revoked_at, expires_at)`；`(user_id, purpose, revoked_at, expires_at)` |
 | `household_members` | `UNIQUE(household_id, user_id)` |
 | `recipient_members` | `UNIQUE(recipient_id, household_member_id)` |
-| `device_activation_challenges` | `UNIQUE(public_id)`；`UNIQUE(secret_hash)`；`(status, expires_at)` |
+| `device_activation_challenges` | `UNIQUE(public_id)`；`UNIQUE(secret_hash)`；`UNIQUE(approval_idempotency_key)`；`(status, expires_at)` |
+| `family_task_actions` | `UNIQUE(idempotency_key)`；`(task_id, occurred_at)` |
+| `care_command_receipts` | `UNIQUE(idempotency_key)`；`(command_type, created_at)`；完整命令 SHA-256 与首次响应快照 |
+| `remote_session_participants` | `UNIQUE(join_ticket_id)`；`(join_ticket_status, join_ticket_expires_at)` |
 | `device_credentials` | `UNIQUE(credential_hash)`；`(binding_id, revoked_at, expires_at)` |
 | `recipient_consent_states` | `UNIQUE(recipient_id, scope)` |
 | `memory_revisions` | `UNIQUE(memory_id, revision_no)` |
@@ -140,7 +147,7 @@ erDiagram
 7. 发起 Remote Assistance，同时快照授权、创建会话并取得 Redis 媒体租约；租约失败则回滚。
 8. 签发 Inspection Grant 和执行 Content Inspection 时分别写 Audit Entry。
 
-事务内禁止调用 MiniCPM-o、MinIO、LiveKit、邮件或推送网络接口。
+事务内禁止调用 MiniCPM-o、MinIO、LiveKit、邮件或推送网络接口。远程会话首次建房拆成两个短 SERIALIZABLE 事务：前一事务锁定会话行并选定唯一 `PROVISIONING` owner，事务外执行有 3 秒硬超时的 LiveKit CreateRoom，后一事务重新锁定会话行并原子提交 `room_provisioned_at` 与 `ROOM_READY`；只有后一事务成功后才允许签首张票。并发请求不能成为第二个建房者，失败或超时必须终止整个会话。
 
 ## 7. 删除与保留
 
@@ -161,4 +168,3 @@ erDiagram
 - Outbox Worker 使用参数化 TypedSQL 或 `$queryRaw`，禁止 Unsafe 字符串拼接。
 - MySQL 默认隔离级别下仍会发生死锁；事务保持固定加锁顺序，幂等命令允许有限重试。
 - 集成测试必须验证跨 Household 外键、当前绑定唯一性和当前媒体会话唯一性，而不只验证 TypeScript。
-

@@ -131,8 +131,10 @@ AI_COMPANION_ACTIVE
 - 初始有效期建议 1～2 分钟，只允许加入指定房间。
 - 家属可发布麦克风和可选摄像头；陪伴设备可发布本地摄像头/麦克风并订阅家属轨道。
 - 普通参与者没有房间管理权限。
-- 会话结束时移除参与者或删除房间。
-- 自托管 Token 撤销能力有限，因此依赖短 TTL、停止续签和服务端移除参与者。[LiveKit Token 与 Grants](https://docs.livekit.io/home/server/generating-tokens/)、[自托管部署](https://docs.livekit.io/transport/self-hosting/deployment/)
+- NestJS 只在会话的首张 Join Ticket 前显式创建一次最多 2 人的房间。第一个短 SERIALIZABLE 事务锁定 `remote_assistance_sessions` 行，并把唯一参与者选为 session-wide `PROVISIONING` owner；其他并发签票保持 `ISSUING`、返回忙且绝不调用 CreateRoom。owner 在事务外执行有硬超时的建房调用，成功后由第二个短 SERIALIZABLE 事务提交 `room_provisioned_at` 与 `ROOM_READY`。任一阶段失败或超时都会终止整个会话，不能把 owner 交给第二个请求继续建房；事务提交前绝不签票。后续家属端或陪伴端签票看到该标记后复用房间，不再发出可能迟到的 CreateRoom 请求。只有持久会话仍为非终态、采用现场接听且 `accepted_at` 已写入时才允许创建或签发。LiveKit 的 `room.auto_create` 在开发和生产环境均关闭。
+- Join Ticket 在返回 JWT 前持久经过 `ISSUING → PROVISIONING → ROOM_READY → ISSUED`；只有 `ISSUED` 才可能返回客户端。进程崩溃遗留的 `ISSUING/ROOM_READY` 可按状态和时间做 CAS 复位，遗留的 `PROVISIONING` 必须在同一个串行化终止事务内再次确认仍过期，随后将会话置为 `FAILED`、撤销全部票据并进入房间清理。
+- 会话结束时优先删除房间；只有删除失败才降级移除在线参与者并重试删除。自托管 LiveKit 的 `removeParticipant` 只能断开当前连接，不能撤销客户端已经取得的刷新令牌；连接中的客户端可能获得有效期至少 10 分钟的刷新令牌。因此安全边界不能只依赖初始 Token 的短 TTL，而必须依赖“显式建房 + 禁止自动建房 + 终态删房”，使旧令牌无法重建已结束的房间。[LiveKit Tokens & grants](https://docs.livekit.io/frontends/reference/tokens-grants/)
+- 显式创建但无人入会的房间使用 `empty_timeout: 60`，与初始 Join Ticket 的 60 秒窗口对齐并自动失败关闭；它只负责回收未入会的孤儿房间，不能代替终态时优先执行的 `deleteRoom`。
 
 ## 9. Redis 媒体租约
 
@@ -147,6 +149,9 @@ renewal: authenticated heartbeat
 - 取得远程租约失败返回 `REMOTE_DEVICE_BUSY`。
 - Redis 租约用于快速互斥，MySQL 会话生命周期用于审计和恢复。
 - Worker 定期将失去租约但仍非终态的会话收敛为 `FAILED/ENDED`。
+- 远程会话进入终态后，MySQL 的 `room_cleanup_status=PENDING` 是跨 Redis/LiveKit 的持久清理屏障。只有 LiveKit 确认房间已删除（不存在也视为成功）且 MySQL 原子写入 `COMPLETED` 后才能释放远程媒体租约；删除或数据库检查点失败时继续持有/续租隔离租约，启动时及每 15 秒重试，并拒绝同一 Binding 的新 AI 或远程媒体。
+- 外部建房结果不确定时设置 `room_cleanup_not_before`，在窗口内重复删房并保持隔离；但核心安全不依赖上游在固定时间内完成。`room_provisioned_at` 保证“可能迟到的首次建房”之前没有任何已交付票据，而一旦票据可交付，所有后续签票都不会再次调用 CreateRoom。
+- 陪伴心跳只续租客户端明确声明且服务端仍为 `ACTIVE` 的同一 AI 会话；进程重启后未声明本地运行时会使幽灵会话以 `CLIENT_SESSION_MISSING` 结束。撤销相机、麦克风、模型处理或记忆注入授权会在同一数据库事务中终止陪伴/模型会话，设备下一次心跳收到 `STOP` 并立即卸载本地采集与 Provider 连接。
 
 ## 10. 默认不录制
 

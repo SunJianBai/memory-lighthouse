@@ -1,6 +1,7 @@
 sequenceDiagram
   actor Family as 家属端
   participant API as NestJS
+  participant MySQL
   participant Redis
   participant Device as 陪伴设备
   participant LiveKit
@@ -14,8 +15,12 @@ sequenceDiagram
   Device->>API: accept / decline
   API-->>Family: remote-session.accepted
   Family->>API: 请求短时 Join Ticket
-  Device->>API: 请求短时 Join Ticket
+  API->>MySQL: 锁会话并提交唯一 PROVISIONING owner
+  API->>LiveKit: owner 在事务外显式 CreateRoom
+  API->>MySQL: 新事务提交 room_provisioned_at + ROOM_READY
   API-->>Family: 家属 LiveKit Token
+  Device->>API: 请求短时 Join Ticket
+  API->>MySQL: 读取已提交的 room_provisioned_at
   API-->>Device: 设备 LiveKit Token
   Family->>LiveKit: 加入房间
   Device->>Device: MediaSessionCoordinator 释放 MiniCPM-o
@@ -27,4 +32,3 @@ sequenceDiagram
   API->>Redis: 释放媒体租约
   API-->>Device: remote-session.ended
   Device->>Device: 释放媒体；提示是否恢复 AI 陪伴
-

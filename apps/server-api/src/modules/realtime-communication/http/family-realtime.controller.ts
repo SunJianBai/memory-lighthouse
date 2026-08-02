@@ -11,6 +11,10 @@ import {
 } from '@nestjs/common';
 
 import type { RequestWithContext } from '../../../common/http/request-context';
+import {
+  RateLimited,
+  RateLimitPolicy,
+} from '../../../infrastructure/rate-limit';
 import { CurrentUser } from '../../identity/http/current-user.decorator';
 import { UserAccessGuard } from '../../identity/http/user-access.guard';
 import type { UserPrincipal } from '../../identity/identity.types';
@@ -51,6 +55,7 @@ export class FamilyRealtimeController {
   }
 
   @Put('companion-bindings/:bindingId/remote-access-policy')
+  @RateLimited(RateLimitPolicy.REMOTE_POLICY_UPDATE)
   updatePolicy(
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
@@ -66,6 +71,7 @@ export class FamilyRealtimeController {
   }
 
   @Post('remote-sessions')
+  @RateLimited(RateLimitPolicy.REMOTE_SESSION_REQUEST)
   requestSession(
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,

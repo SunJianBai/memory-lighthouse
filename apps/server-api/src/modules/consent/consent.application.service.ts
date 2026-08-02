@@ -30,6 +30,7 @@ import type {
   ListConsentEventsQuery,
 } from './consent.types';
 import type { ConsentAccessPort } from './ports/consent-access.port';
+import { RemoteMediaSecurityCoordinator } from '../realtime-communication/remote-media-security.coordinator';
 
 interface ConsentDocumentRecord {
   id: string;
@@ -68,6 +69,7 @@ export class ConsentApplicationService {
     private readonly prisma: PrismaService,
     @Inject(CONSENT_ACCESS_PORT)
     private readonly access: ConsentAccessPort,
+    private readonly mediaSecurity: RemoteMediaSecurityCoordinator,
   ) {}
 
   async listConsents(
@@ -180,7 +182,7 @@ export class ConsentApplicationService {
 
     for (let attempt = 1; attempt <= SERIALIZABLE_RETRY_LIMIT; attempt += 1) {
       try {
-        return await this.prisma.$transaction(
+        const result = await this.prisma.$transaction(
           async (transaction) => {
             const actor = await this.access.requireCanManageConsent(
               transaction,
@@ -207,6 +209,10 @@ export class ConsentApplicationService {
                 scope,
                 now,
               );
+              // Replaying an old revoke must not terminate sessions created
+              // after a later grant. The original transaction already
+              // persisted the terminal session state atomically; the
+              // post-commit cleanup below remains safe to retry.
               return this.toEventView(replay);
             }
 
@@ -278,10 +284,42 @@ export class ConsentApplicationService {
               },
             });
 
+            if (this.revokesRemoteMedia(scope, decision)) {
+              await this.mediaSecurity.markRecipientRevoked(
+                transaction,
+                command.householdId,
+                command.recipientId,
+                'REMOTE_CONSENT_REVOKED',
+                now,
+              );
+            }
+            if (this.revokesCompanionMedia(scope, decision)) {
+              await this.mediaSecurity.markCompanionConsentRevoked(
+                transaction,
+                command.householdId,
+                command.recipientId,
+                scope,
+                now,
+              );
+            }
+
             return this.toEventView(event);
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
         );
+        if (this.revokesRemoteMedia(scope, decision)) {
+          await this.mediaSecurity.cleanupPendingForRecipient(
+            command.householdId,
+            command.recipientId,
+          );
+        }
+        if (this.revokesCompanionMedia(scope, decision)) {
+          await this.mediaSecurity.cleanupCompanionLeasesForRecipient(
+            command.householdId,
+            command.recipientId,
+          );
+        }
+        return result;
       } catch (error) {
         if (
           this.isRetryableWriteConflict(error) &&
@@ -304,6 +342,34 @@ export class ConsentApplicationService {
       throw new InvalidConsentScopeException();
     }
     return candidate as ConsentScope;
+  }
+
+  private revokesRemoteMedia(
+    scope: ConsentScope,
+    decision: PersistedConsentDecision,
+  ): boolean {
+    return (
+      decision === CONSENT_DECISIONS.revoked &&
+      (scope === 'REMOTE_ASSISTANCE_AUDIO' ||
+        scope === 'REMOTE_ASSISTANCE_VIDEO')
+    );
+  }
+
+  private revokesCompanionMedia(
+    scope: ConsentScope,
+    decision: PersistedConsentDecision,
+  ): scope is
+    | 'CAMERA_CAPTURE'
+    | 'MICROPHONE_CAPTURE'
+    | 'MODEL_PROCESSING'
+    | 'MEMORY_STORAGE' {
+    return (
+      decision === CONSENT_DECISIONS.revoked &&
+      (scope === 'CAMERA_CAPTURE' ||
+        scope === 'MICROPHONE_CAPTURE' ||
+        scope === 'MODEL_PROCESSING' ||
+        scope === 'MEMORY_STORAGE')
+    );
   }
 
   private requireDocumentVersionForScope(

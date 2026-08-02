@@ -33,6 +33,7 @@ import {
   MEDIA_LEASE_PORT,
   REMOTE_MEDIA_LEASE_TTL_SECONDS,
 } from '../realtime-communication/realtime.constants';
+import { RemoteMediaSecurityCoordinator } from '../realtime-communication/remote-media-security.coordinator';
 import {
   COMPANION_SESSION_STATUS,
   DEFAULT_PROMPT_CODE,
@@ -64,6 +65,7 @@ import type {
   CompanionSessionView,
   ConsentSnapshot,
   DeviceContextView,
+  DeviceHeartbeatView,
   ModelConnectionView,
   ModelSessionView,
   StartCompanionSessionCommand,
@@ -135,6 +137,7 @@ export class CompanionSessionApplicationService {
     private readonly leases: MediaLeasePort,
     @Inject(CARE_WORKFLOW_CONTENT_CIPHER)
     private readonly careCipher: CareWorkflowContentCipher,
+    private readonly mediaSecurity: RemoteMediaSecurityCoordinator,
   ) {}
 
   async getDeviceContext(
@@ -165,8 +168,12 @@ export class CompanionSessionApplicationService {
 
   async recordHeartbeat(
     principal: DevicePrincipal,
-    details: { appVersion?: string; osVersion?: string },
-  ): Promise<{ online: true; serverTime: string }> {
+    details: {
+      activeCompanionSessionId?: string;
+      appVersion?: string;
+      osVersion?: string;
+    },
+  ): Promise<DeviceHeartbeatView> {
     const binding = await this.requireBindingContext(principal);
     const now = new Date();
     const updated = await this.prisma.device.updateMany({
@@ -185,20 +192,89 @@ export class CompanionSessionApplicationService {
         bindingId: binding.id,
         status: COMPANION_SESSION_STATUS.active,
       },
-      select: { id: true },
+      select: { id: true, mode: true },
     });
-    if (
-      active &&
-      !(await this.leases.renew(
-        binding.id,
-        this.aiLeaseOwner(active.id),
-        REMOTE_MEDIA_LEASE_TTL_SECONDS,
-      ))
-    ) {
-      await this.endCompanionSession(principal, active.id, 'MEDIA_LEASE_LOST');
-      throw new CompanionSessionBusyException();
+
+    if (details.activeCompanionSessionId) {
+      const reported = await this.prisma.companionSession.findFirst({
+        where: {
+          id: details.activeCompanionSessionId,
+          bindingId: binding.id,
+        },
+        select: { id: true, status: true, endReason: true },
+      });
+      if (
+        !reported ||
+        reported.status !== COMPANION_SESSION_STATUS.active ||
+        reported.id !== active?.id
+      ) {
+        return this.stopHeartbeat(
+          now,
+          reported?.endReason ?? 'COMPANION_SESSION_NOT_ACTIVE',
+        );
+      }
     }
-    return { online: true, serverTime: now.toISOString() };
+
+    if (!active) {
+      return this.continueHeartbeat(now);
+    }
+
+    if (!details.activeCompanionSessionId) {
+      await this.endCompanionSession(
+        principal,
+        active.id,
+        'CLIENT_SESSION_MISSING',
+      );
+      return this.stopHeartbeat(now, 'CLIENT_SESSION_MISSING');
+    }
+
+    const consent = await this.captureConsent(
+      binding.householdId,
+      binding.recipientId,
+    );
+    const missingScope = this.missingRuntimeConsent(consent, active.mode);
+    if (missingScope) {
+      const reason = `CONSENT_REVOKED_${missingScope}`;
+      await this.endCompanionSession(principal, active.id, reason);
+      return this.stopHeartbeat(now, reason);
+    }
+
+    const activeOwner = this.aiLeaseOwner(active.id);
+    const leaseConfirmed =
+      (await this.leases.renew(
+        binding.id,
+        activeOwner,
+        REMOTE_MEDIA_LEASE_TTL_SECONDS,
+      )) ||
+      (await this.leases.acquire(
+        binding.id,
+        activeOwner,
+        REMOTE_MEDIA_LEASE_TTL_SECONDS,
+      ));
+    if (!leaseConfirmed) {
+      await this.endCompanionSession(principal, active.id, 'MEDIA_LEASE_LOST');
+      return this.stopHeartbeat(now, 'MEDIA_LEASE_LOST');
+    }
+    const confirmed = await this.prisma.companionSession.findFirst({
+      where: {
+        id: active.id,
+        bindingId: binding.id,
+        householdId: binding.householdId,
+        recipientId: binding.recipientId,
+      },
+      select: { status: true, endReason: true },
+    });
+    if (confirmed?.status !== COMPANION_SESSION_STATUS.active) {
+      // Acceptance/revocation can terminalize the session after the initial
+      // ACTIVE read but before a same-owner reacquire. Compare-delete the AI
+      // owner we just confirmed and instruct the local runtime to stop.
+      await this.safeReleaseLease(binding.id, activeOwner);
+      return this.stopHeartbeat(
+        now,
+        confirmed?.endReason ?? 'COMPANION_SESSION_NOT_ACTIVE',
+      );
+    }
+    return this.continueHeartbeat(now, active.id);
   }
 
   async startCompanionSession(
@@ -228,20 +304,19 @@ export class CompanionSessionApplicationService {
     });
     if (existing) {
       this.assertSessionReplay(existing, command, careSnapshotHash);
-      if (
-        !(await this.leases.acquire(
-          binding.id,
-          this.aiLeaseOwner(existing.id),
-          REMOTE_MEDIA_LEASE_TTL_SECONDS,
-        ))
-      ) {
-        throw new CompanionSessionBusyException();
-      }
+    }
+    if (existing && existing.status !== COMPANION_SESSION_STATUS.active) {
       return {
         session: this.toCompanionSessionView(existing),
         consent: this.parseConsentSnapshot(existing.consentSnapshotJson),
         careSnapshot,
       };
+    }
+    if (
+      !existing &&
+      (await this.mediaSecurity.hasRemoteMediaBarrier(this.prisma, binding.id))
+    ) {
+      throw new CompanionSessionBusyException();
     }
 
     const leaseOwner = this.aiLeaseOwner(sessionId);
@@ -255,17 +330,16 @@ export class CompanionSessionApplicationService {
       throw new CompanionSessionBusyException();
     }
     const now = new Date();
-    let created: CompanionSession;
+    let outcome: { session: CompanionSession; consent: ConsentSnapshot };
     try {
-      created = await this.serializable(async (transaction) => {
+      outcome = await this.serializable(async (transaction) => {
+        // Fence the deterministic id before any authorization/snapshot check
+        // can throw. Under MySQL SERIALIZABLE this PK/gap read waits for (or
+        // conflicts with) an uncommitted same-id winner, preventing a loser
+        // from treating the shared Redis owner as orphaned.
         const replay = await transaction.companionSession.findUnique({
           where: { id: sessionId },
         });
-        if (replay) {
-          this.assertSessionReplay(replay, command, careSnapshotHash);
-          return replay;
-        }
-
         const currentBinding = await transaction.companionBinding.findFirst({
           where: {
             id: binding.id,
@@ -284,6 +358,25 @@ export class CompanionSessionApplicationService {
           throw new CompanionBindingUnavailableException();
         }
 
+        const currentConsent = await this.captureConsent(
+          binding.householdId,
+          binding.recipientId,
+          transaction,
+        );
+        this.requireConsent(currentConsent, 'MICROPHONE_CAPTURE');
+        this.requireConsent(currentConsent, 'MODEL_PROCESSING');
+        if (command.mode === 'AUDIO_VIDEO') {
+          this.requireConsent(currentConsent, 'CAMERA_CAPTURE');
+        }
+        if (!this.sameConsentDecisions(consent, currentConsent)) {
+          throw new CareSnapshotChangedException();
+        }
+
+        if (replay) {
+          this.assertSessionReplay(replay, command, careSnapshotHash);
+          return { session: replay, consent: currentConsent };
+        }
+
         const busy = await transaction.companionSession.findFirst({
           where: {
             bindingId: binding.id,
@@ -292,6 +385,14 @@ export class CompanionSessionApplicationService {
           select: { id: true },
         });
         if (busy) {
+          throw new CompanionSessionBusyException();
+        }
+        if (
+          await this.mediaSecurity.hasRemoteMediaBarrier(
+            transaction,
+            binding.id,
+          )
+        ) {
           throw new CompanionSessionBusyException();
         }
 
@@ -304,7 +405,8 @@ export class CompanionSessionApplicationService {
             mode: command.mode,
             status: COMPANION_SESSION_STATUS.active,
             careSnapshotHash: Uint8Array.from(careSnapshotHash),
-            consentSnapshotJson: consent as unknown as Prisma.InputJsonValue,
+            consentSnapshotJson:
+              currentConsent as unknown as Prisma.InputJsonValue,
             startedAt: now,
             traceId: command.traceId,
           },
@@ -325,16 +427,31 @@ export class CompanionSessionApplicationService {
             availableAt: now,
           },
         });
-        return session;
+        return { session, consent: currentConsent };
       });
     } catch (error) {
-      await this.safeReleaseLease(binding.id, leaseOwner);
+      await this.releaseProvisionalAiLeaseIfUnowned(
+        binding.id,
+        sessionId,
+        leaseOwner,
+      );
       throw error;
     }
 
+    if (outcome.session.status !== COMPANION_SESSION_STATUS.active) {
+      await this.safeReleaseLease(binding.id, leaseOwner);
+    } else {
+      outcome = {
+        ...outcome,
+        session: (
+          await this.finalizeActiveStart(command.principal, outcome.session.id)
+        ).companion,
+      };
+    }
+
     return {
-      session: this.toCompanionSessionView(created),
-      consent,
+      session: this.toCompanionSessionView(outcome.session),
+      consent: outcome.consent,
       careSnapshot,
     };
   }
@@ -365,10 +482,14 @@ export class CompanionSessionApplicationService {
       companion.householdId,
       companion.recipientId,
     );
-    this.requireConsent(consent, 'MODEL_PROCESSING');
-    this.requireConsent(consent, 'MICROPHONE_CAPTURE');
-    if (companion.mode === 'AUDIO_VIDEO') {
-      this.requireConsent(consent, 'CAMERA_CAPTURE');
+    const missingScope = this.missingRuntimeConsent(consent, companion.mode);
+    if (missingScope) {
+      await this.endCompanionSession(
+        command.principal,
+        companion.id,
+        `CONSENT_REVOKED_${missingScope}`,
+      );
+      throw new CompanionConsentRequiredException(missingScope);
     }
     const binding = await this.requireBindingContext(command.principal);
     const careSnapshot = await this.buildCareSnapshot(binding, consent);
@@ -380,8 +501,6 @@ export class CompanionSessionApplicationService {
       throw new CareSnapshotChangedException();
     }
 
-    const prompt = await this.ensureCurrentPrompt();
-    const promptContent = this.openPrompt(prompt);
     const modelSessionId = deterministicUlid(
       'model-session',
       command.companionSessionId,
@@ -391,27 +510,41 @@ export class CompanionSessionApplicationService {
       where: { id: modelSessionId },
     });
     if (existing) {
-      if (
-        existing.companionSessionId !== command.companionSessionId ||
-        existing.promptVersionId !== prompt.id
-      ) {
+      if (existing.companionSessionId !== command.companionSessionId) {
         throw new ModelSessionBusyException();
       }
+      if (existing.status !== MODEL_SESSION_STATUS.active) {
+        throw new CompanionSessionTerminalException();
+      }
+      const persistedPrompt = await this.requireModelSessionPrompt(existing);
+      const promptContent = this.openPrompt(persistedPrompt);
+      const finalized = await this.finalizeActiveStart(
+        command.principal,
+        companion.id,
+        existing.id,
+      );
       return this.modelConnection(
-        existing,
-        prompt,
+        finalized.model,
+        persistedPrompt,
         promptContent,
         careSnapshot,
         consent,
       );
     }
 
+    const prompt = await this.ensureCurrentPrompt();
     const now = new Date();
     const created = await this.serializable(async (transaction) => {
       const replay = await transaction.modelSession.findUnique({
         where: { id: modelSessionId },
       });
       if (replay) {
+        if (replay.companionSessionId !== command.companionSessionId) {
+          throw new ModelSessionBusyException();
+        }
+        if (replay.status !== MODEL_SESSION_STATUS.active) {
+          throw new CompanionSessionTerminalException();
+        }
         return replay;
       }
       const currentCompanion = await transaction.companionSession.findFirst({
@@ -457,9 +590,24 @@ export class CompanionSessionApplicationService {
       return modelSession;
     });
 
+    if (created.status !== MODEL_SESSION_STATUS.active) {
+      throw new CompanionSessionTerminalException();
+    }
+
+    // A same-key winner may have committed between the outer read and this
+    // serializable transaction while the current prompt changed. Idempotent
+    // recovery must return the immutable prompt pinned by the persisted model
+    // row, not whichever prompt happened to be current for this delivery.
+    const persistedPrompt = await this.requireModelSessionPrompt(created);
+    const promptContent = this.openPrompt(persistedPrompt);
+    const finalized = await this.finalizeActiveStart(
+      command.principal,
+      companion.id,
+      created.id,
+    );
     return this.modelConnection(
-      created,
-      prompt,
+      finalized.model,
+      persistedPrompt,
       promptContent,
       careSnapshot,
       consent,
@@ -484,7 +632,18 @@ export class CompanionSessionApplicationService {
       modelSession.companionSession.householdId,
       modelSession.companionSession.recipientId,
     );
-    this.requireConsent(consent, 'MODEL_PROCESSING');
+    const missingScope = this.missingRuntimeConsent(
+      consent,
+      modelSession.companionSession.mode,
+    );
+    if (missingScope) {
+      await this.endCompanionSession(
+        command.principal,
+        modelSession.companionSession.id,
+        `CONSENT_REVOKED_${missingScope}`,
+      );
+      throw new CompanionConsentRequiredException(missingScope);
+    }
     if (command.speaker === 'USER') {
       this.requireConsent(consent, 'MODEL_INPUT_TRANSCRIPTION');
     }
@@ -531,49 +690,58 @@ export class CompanionSessionApplicationService {
       : null;
 
     try {
-      const created = await this.prisma.$transaction(async (transaction) => {
-        const utterance = await transaction.conversationUtterance.create({
-          data: {
-            id: utteranceId,
-            modelSessionId: command.modelSessionId,
-            sequenceNo: command.sequenceNo,
-            speaker: command.speaker,
-            bindingId: command.principal.bindingId,
-            providerEventId: command.providerEventId,
-            startOffsetMs: command.startOffsetMs,
-            endOffsetMs: command.endOffsetMs,
-            isFinal: command.isFinal,
-            language: command.language,
-            confidence: command.confidence,
-            ...(sealed
-              ? {
-                  content: {
-                    create: {
-                      rawTextCiphertext: Uint8Array.from(
-                        sealed.ciphertexts.rawText!,
-                      ),
-                      nonce: Uint8Array.from(sealed.nonceSeed),
-                      encryptionKeyId: sealed.keyId,
-                      contentHash: Uint8Array.from(
-                        sealed.contentHashes.rawText!,
-                      ),
-                      charCount: Array.from(normalizedText!).length,
-                      retentionUntil,
+      const created = await this.prisma.$transaction(
+        async (transaction) => {
+          await this.requireTransactionalRuntimeAuthorization(
+            transaction,
+            command.principal,
+            command.modelSessionId,
+            command.speaker === 'USER',
+          );
+          const utterance = await transaction.conversationUtterance.create({
+            data: {
+              id: utteranceId,
+              modelSessionId: command.modelSessionId,
+              sequenceNo: command.sequenceNo,
+              speaker: command.speaker,
+              bindingId: command.principal.bindingId,
+              providerEventId: command.providerEventId,
+              startOffsetMs: command.startOffsetMs,
+              endOffsetMs: command.endOffsetMs,
+              isFinal: command.isFinal,
+              language: command.language,
+              confidence: command.confidence,
+              ...(sealed
+                ? {
+                    content: {
+                      create: {
+                        rawTextCiphertext: Uint8Array.from(
+                          sealed.ciphertexts.rawText!,
+                        ),
+                        nonce: Uint8Array.from(sealed.nonceSeed),
+                        encryptionKeyId: sealed.keyId,
+                        contentHash: Uint8Array.from(
+                          sealed.contentHashes.rawText!,
+                        ),
+                        charCount: Array.from(normalizedText!).length,
+                        retentionUntil,
+                      },
                     },
-                  },
-                }
-              : {}),
-          },
-          include: { content: true },
-        });
-        if (command.speaker === 'ASSISTANT' && command.isFinal) {
-          await transaction.modelSession.updateMany({
-            where: { id: command.modelSessionId, firstResponseAt: null },
-            data: { firstResponseAt: new Date() },
+                  }
+                : {}),
+            },
+            include: { content: true },
           });
-        }
-        return utterance;
-      });
+          if (command.speaker === 'ASSISTANT' && command.isFinal) {
+            await transaction.modelSession.updateMany({
+              where: { id: command.modelSessionId, firstResponseAt: null },
+              data: { firstResponseAt: new Date() },
+            });
+          }
+          return utterance;
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
       return this.toUtteranceView(created);
     } catch (error) {
       if (isPrismaConflict(error)) {
@@ -607,44 +775,70 @@ export class CompanionSessionApplicationService {
       command.modelSessionId,
     );
     if (
+      modelSession.status !== MODEL_SESSION_STATUS.active ||
       modelSession.companionSession.status !== COMPANION_SESSION_STATUS.active
     ) {
       throw new CompanionSessionTerminalException();
     }
+    const consent = await this.captureConsent(
+      modelSession.companionSession.householdId,
+      modelSession.companionSession.recipientId,
+    );
+    const missingScope = this.missingRuntimeConsent(
+      consent,
+      modelSession.companionSession.mode,
+    );
+    if (missingScope) {
+      await this.endCompanionSession(
+        command.principal,
+        modelSession.companionSession.id,
+        `CONSENT_REVOKED_${missingScope}`,
+      );
+      throw new CompanionConsentRequiredException(missingScope);
+    }
     const metrics = this.sanitizeMetrics(command.metrics);
     const now = new Date();
-    const event = await this.prisma.$transaction(async (transaction) => {
-      const created = await transaction.modelSessionEvent.create({
-        data: {
-          id: newRandomUlid(),
-          modelSessionId: command.modelSessionId,
-          eventType: command.eventType,
-          metricsJson: metrics,
-          errorCode: command.errorCode?.trim() || null,
-          occurredAt: now,
-        },
-      });
-      if (command.eventType === 'FIRST_RESPONSE') {
-        await transaction.modelSession.updateMany({
-          where: { id: command.modelSessionId, firstResponseAt: null },
-          data: { firstResponseAt: now },
-        });
-      }
-      if (command.eventType === 'DISCONNECTED') {
-        await transaction.modelSession.updateMany({
-          where: {
-            id: command.modelSessionId,
-            status: MODEL_SESSION_STATUS.active,
-          },
+    const event = await this.prisma.$transaction(
+      async (transaction) => {
+        await this.requireTransactionalRuntimeAuthorization(
+          transaction,
+          command.principal,
+          command.modelSessionId,
+          false,
+        );
+        const created = await transaction.modelSessionEvent.create({
           data: {
-            status: MODEL_SESSION_STATUS.ended,
-            endedAt: now,
-            endReason: 'PROVIDER_DISCONNECTED',
+            id: newRandomUlid(),
+            modelSessionId: command.modelSessionId,
+            eventType: command.eventType,
+            metricsJson: metrics,
+            errorCode: command.errorCode?.trim() || null,
+            occurredAt: now,
           },
         });
-      }
-      return created;
-    });
+        if (command.eventType === 'FIRST_RESPONSE') {
+          await transaction.modelSession.updateMany({
+            where: { id: command.modelSessionId, firstResponseAt: null },
+            data: { firstResponseAt: now },
+          });
+        }
+        if (command.eventType === 'DISCONNECTED') {
+          await transaction.modelSession.updateMany({
+            where: {
+              id: command.modelSessionId,
+              status: MODEL_SESSION_STATUS.active,
+            },
+            data: {
+              status: MODEL_SESSION_STATUS.ended,
+              endedAt: now,
+              endReason: 'PROVIDER_DISCONNECTED',
+            },
+          });
+        }
+        return created;
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
     return {
       id: event.id,
       eventType: event.eventType,
@@ -669,7 +863,37 @@ export class CompanionSessionApplicationService {
       return this.toCompanionSessionView(existing);
     }
     const now = new Date();
-    await this.prisma.$transaction(async (transaction) => {
+    const ended = await this.serializable(async (transaction) => {
+      // All media handoff paths acquire model-session locks before the
+      // companion row. Preserve that global order, then use the companion CAS
+      // to select the sole command allowed to end models and emit the outbox.
+      await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        SELECT \`id\`
+        FROM \`model_sessions\`
+        WHERE \`companion_session_id\` = ${sessionId}
+          AND \`status\` = ${MODEL_SESSION_STATUS.active}
+        FOR UPDATE
+      `);
+      const current = await transaction.companionSession.findUnique({
+        where: { id: sessionId },
+      });
+      if (!current || current.status !== COMPANION_SESSION_STATUS.active) {
+        return current;
+      }
+      const changed = await transaction.companionSession.updateMany({
+        where: { id: sessionId, status: COMPANION_SESSION_STATUS.active },
+        data: {
+          status: COMPANION_SESSION_STATUS.ended,
+          endedAt: now,
+          endReason: reason.trim().slice(0, 64),
+          version: { increment: 1 },
+        },
+      });
+      if (changed.count !== 1) {
+        return transaction.companionSession.findUnique({
+          where: { id: sessionId },
+        });
+      }
       await transaction.modelSession.updateMany({
         where: {
           companionSessionId: sessionId,
@@ -679,15 +903,6 @@ export class CompanionSessionApplicationService {
           status: MODEL_SESSION_STATUS.ended,
           endedAt: now,
           endReason: 'COMPANION_SESSION_ENDED',
-        },
-      });
-      await transaction.companionSession.updateMany({
-        where: { id: sessionId, status: COMPANION_SESSION_STATUS.active },
-        data: {
-          status: COMPANION_SESSION_STATUS.ended,
-          endedAt: now,
-          endReason: reason.trim().slice(0, 64),
-          version: { increment: 1 },
         },
       });
       await transaction.outboxEvent.create({
@@ -706,9 +921,9 @@ export class CompanionSessionApplicationService {
           availableAt: now,
         },
       });
-    });
-    const ended = await this.prisma.companionSession.findUnique({
-      where: { id: sessionId },
+      return transaction.companionSession.findUnique({
+        where: { id: sessionId },
+      });
     });
     if (!ended) {
       throw new CompanionSessionNotFoundException();
@@ -725,6 +940,27 @@ export class CompanionSessionApplicationService {
     };
   }
 
+  private continueHeartbeat(
+    now: Date,
+    activeCompanionSessionId?: string,
+  ): DeviceHeartbeatView {
+    return {
+      online: true,
+      serverTime: now.toISOString(),
+      mediaDirective: 'CONTINUE',
+      ...(activeCompanionSessionId ? { activeCompanionSessionId } : {}),
+    };
+  }
+
+  private stopHeartbeat(now: Date, reason: string): DeviceHeartbeatView {
+    return {
+      online: true,
+      serverTime: now.toISOString(),
+      mediaDirective: 'STOP',
+      reason,
+    };
+  }
+
   private async safeReleaseLease(
     bindingId: string,
     owner: MediaLeaseOwner,
@@ -736,6 +972,41 @@ export class CompanionSessionApplicationService {
         `AI media lease release deferred (${error instanceof Error ? error.name : 'unknown'})`,
       );
     }
+  }
+
+  private async releaseProvisionalAiLeaseIfUnowned(
+    bindingId: string,
+    sessionId: string,
+    owner: MediaLeaseOwner,
+  ): Promise<void> {
+    try {
+      const persisted = await this.prisma.companionSession.findFirst({
+        where: {
+          id: sessionId,
+          bindingId,
+        },
+        select: { id: true, status: true },
+      });
+      if (persisted?.status === COMPANION_SESSION_STATUS.active) {
+        return;
+      }
+      if (!persisted) {
+        // The deterministic owner is shared by idempotent deliveries. A
+        // same-id winner may still be uncommitted and therefore invisible to
+        // this autocommit read. Preserve the bounded lease; a later start can
+        // renew it and idle recovery is capped by Redis TTL.
+        return;
+      }
+    } catch (error) {
+      // On an uncertain database read, preserve the short lease. Releasing it
+      // could steal ownership from a concurrent successful idempotent request;
+      // TTL and authenticated heartbeat provide bounded recovery.
+      this.logger.warn(
+        `AI provisional lease ownership check deferred (${error instanceof Error ? error.name : 'unknown'})`,
+      );
+      return;
+    }
+    await this.safeReleaseLease(bindingId, owner);
   }
 
   private async requireBindingContext(
@@ -774,8 +1045,10 @@ export class CompanionSessionApplicationService {
   private async captureConsent(
     householdId: string,
     recipientId: string,
+    client: Pick<Prisma.TransactionClient, 'recipientConsentState'> = this
+      .prisma,
   ): Promise<ConsentSnapshot> {
-    const rows = await this.prisma.recipientConsentState.findMany({
+    const rows = await client.recipientConsentState.findMany({
       where: { householdId, recipientId },
       select: { scope: true, decision: true },
     });
@@ -795,6 +1068,26 @@ export class CompanionSessionApplicationService {
     if (snapshot.decisions[scope] !== true) {
       throw new CompanionConsentRequiredException(scope);
     }
+  }
+
+  private sameConsentDecisions(
+    left: ConsentSnapshot,
+    right: ConsentSnapshot,
+  ): boolean {
+    return CONSENT_SCOPES.every(
+      (scope) => left.decisions[scope] === right.decisions[scope],
+    );
+  }
+
+  private missingRuntimeConsent(
+    snapshot: ConsentSnapshot,
+    mode: string,
+  ): string | undefined {
+    return [
+      'MICROPHONE_CAPTURE',
+      'MODEL_PROCESSING',
+      ...(mode === 'AUDIO_VIDEO' ? ['CAMERA_CAPTURE'] : []),
+    ].find((scope) => snapshot.decisions[scope] !== true);
   }
 
   private async buildCareSnapshot(
@@ -1017,6 +1310,22 @@ export class CompanionSessionApplicationService {
     }
   }
 
+  private async requireModelSessionPrompt(
+    session: ModelSession,
+  ): Promise<PromptVersion> {
+    const prompt = await this.prisma.promptVersion.findUnique({
+      where: { id: session.promptVersionId },
+    });
+    if (
+      !prompt ||
+      prompt.provider !== session.provider ||
+      prompt.model !== session.model
+    ) {
+      throw new ModelPromptUnavailableException();
+    }
+    return prompt;
+  }
+
   private openPrompt(prompt: PromptVersion): string {
     const opened = this.encryption.openFields(
       {
@@ -1070,6 +1379,108 @@ export class CompanionSessionApplicationService {
       throw new ModelSessionNotFoundException();
     }
     return session;
+  }
+
+  private async finalizeActiveStart(
+    principal: DevicePrincipal,
+    companionSessionId: string,
+  ): Promise<{ companion: CompanionSession; model: null }>;
+  private async finalizeActiveStart(
+    principal: DevicePrincipal,
+    companionSessionId: string,
+    modelSessionId: string,
+  ): Promise<{ companion: CompanionSession; model: ModelSession }>;
+  private async finalizeActiveStart(
+    principal: DevicePrincipal,
+    companionSessionId: string,
+    modelSessionId?: string,
+  ): Promise<{
+    companion: CompanionSession;
+    model: ModelSession | null;
+  }> {
+    return this.serializable(async (transaction) => {
+      // Remote acceptance ends model rows before the companion row. Lock in
+      // that same order to avoid a lock-order inversion, then renew Redis while
+      // the durable ACTIVE rows remain fenced. If the remote lease transfer
+      // already won, renewal fails and no stale ACTIVE response is returned.
+      let model: ModelSession | null = null;
+      if (modelSessionId) {
+        model = await transaction.modelSession.findUnique({
+          where: { id: modelSessionId },
+        });
+        if (
+          !model ||
+          model.companionSessionId !== companionSessionId ||
+          model.status !== MODEL_SESSION_STATUS.active
+        ) {
+          throw new CompanionSessionTerminalException();
+        }
+      }
+
+      const companion = await transaction.companionSession.findUnique({
+        where: { id: companionSessionId },
+      });
+      if (
+        !companion ||
+        companion.bindingId !== principal.bindingId ||
+        companion.householdId !== principal.householdId ||
+        companion.recipientId !== principal.recipientId ||
+        companion.status !== COMPANION_SESSION_STATUS.active
+      ) {
+        throw new CompanionSessionTerminalException();
+      }
+
+      if (
+        !(await this.leases.renew(
+          companion.bindingId,
+          this.aiLeaseOwner(companion.id),
+          REMOTE_MEDIA_LEASE_TTL_SECONDS,
+        ))
+      ) {
+        throw new CompanionSessionBusyException();
+      }
+
+      return { companion, model };
+    });
+  }
+
+  private async requireTransactionalRuntimeAuthorization(
+    transaction: Prisma.TransactionClient,
+    principal: DevicePrincipal,
+    modelSessionId: string,
+    requireTranscription: boolean,
+  ): Promise<void> {
+    const current = await transaction.modelSession.findFirst({
+      where: {
+        id: modelSessionId,
+        status: MODEL_SESSION_STATUS.active,
+        companionSession: {
+          bindingId: principal.bindingId,
+          householdId: principal.householdId,
+          recipientId: principal.recipientId,
+          status: COMPANION_SESSION_STATUS.active,
+        },
+      },
+      include: { companionSession: true },
+    });
+    if (!current) {
+      throw new CompanionSessionTerminalException();
+    }
+    const consent = await this.captureConsent(
+      current.companionSession.householdId,
+      current.companionSession.recipientId,
+      transaction,
+    );
+    const missingScope = this.missingRuntimeConsent(
+      consent,
+      current.companionSession.mode,
+    );
+    if (missingScope) {
+      throw new CompanionConsentRequiredException(missingScope);
+    }
+    if (requireTranscription) {
+      this.requireConsent(consent, 'MODEL_INPUT_TRANSCRIPTION');
+    }
   }
 
   private modelConfiguration(): {

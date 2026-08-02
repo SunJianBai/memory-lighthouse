@@ -2,6 +2,7 @@ import {
   IsEnum,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Length,
@@ -12,9 +13,25 @@ import {
 
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 
+class PasswordReauthenticationDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  currentPassword!: string;
+}
+
 export enum DevicePlatformDto {
   ANDROID = 'ANDROID',
   WEB = 'WEB',
+}
+
+export enum DeviceKeyProtectionDto {
+  NON_EXPORTABLE_V1 = 'NON_EXPORTABLE_V1',
+}
+
+export enum InstallationKeyAlgorithmDto {
+  ED25519 = 'ED25519',
+  ECDSA_P256_SHA256 = 'ECDSA_P256_SHA256',
 }
 
 export enum ActivationProofTypeDto {
@@ -27,6 +44,12 @@ export class RegisterDeviceInstallationDto {
   @Length(40, 684)
   @Matches(BASE64URL_PATTERN)
   installationPublicKeySpki!: string;
+
+  @IsEnum(InstallationKeyAlgorithmDto)
+  installationKeyAlgorithm!: InstallationKeyAlgorithmDto;
+
+  @IsEnum(DeviceKeyProtectionDto)
+  keyProtection!: DeviceKeyProtectionDto;
 
   @IsEnum(DevicePlatformDto)
   platform!: DevicePlatformDto;
@@ -70,7 +93,7 @@ export class ClaimActivationChallengeDto {
   proof!: string;
 
   @IsString()
-  @Length(86, 86)
+  @Length(8, 108)
   @Matches(BASE64URL_PATTERN)
   signature!: string;
 }
@@ -85,9 +108,15 @@ export class ExchangeDeviceCredentialDto {
   installationId!: string;
 
   @IsString()
-  @Length(86, 86)
+  @Length(8, 108)
   @Matches(BASE64URL_PATTERN)
   signature!: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(32, 160)
+  @Matches(/^[A-Za-z0-9_.-]+$/)
+  recoveryToken?: string;
 }
 
 export class RefreshDeviceCredentialDto {
@@ -97,7 +126,7 @@ export class RefreshDeviceCredentialDto {
   credential!: string;
 
   @IsString()
-  @Length(86, 86)
+  @Length(8, 108)
   @Matches(BASE64URL_PATTERN)
   signature!: string;
 }
@@ -109,7 +138,14 @@ export class CancelActivationDto {
   reasonCode?: string;
 }
 
-export class UpdateCompanionBindingDto {
+export class ApproveActivationDto {
+  @IsString()
+  @Length(43, 43)
+  @Matches(BASE64URL_PATTERN)
+  claimSnapshotToken!: string;
+}
+
+export class UpdateCompanionBindingDto extends PasswordReauthenticationDto {
   @IsInt()
   @Min(0)
   version!: number;
@@ -124,7 +160,7 @@ export class UpdateCompanionBindingDto {
   status?: 'ACTIVE' | 'SUSPENDED';
 }
 
-export class RevokeCompanionBindingDto {
+export class RevokeCompanionBindingDto extends PasswordReauthenticationDto {
   @IsOptional()
   @IsString()
   @MaxLength(64)

@@ -22,6 +22,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
+import { flushSync } from "react-dom";
 import { readableError } from "../../api/api-client";
 import type {
   CompanionSessionStartView,
@@ -31,18 +32,38 @@ import type {
 import { navigate } from "../../app/navigation";
 import { useAuth } from "../../auth/auth-context";
 import { BrandMark } from "../../components/BrandMark";
-import { CareExperience } from "../../components/CareExperience";
+import {
+  CareExperience,
+  type CareExperienceHandle,
+} from "../../components/CareExperience";
 import {
   deviceSession,
   parseQrActivation,
   type ActivationClaim,
 } from "../../device/device-session";
+import { ActivationExchangeGate } from "../../device/activation-exchange-gate";
+import {
+  ACTIVATION_TERMINAL_STATUSES,
+  ActivationPollingRetryBudget,
+  activationPollingRetryDelayMillis,
+  activationTerminalMessage,
+  isActivationRecoveryConflict,
+  shouldPreserveActivationChallenge,
+} from "../../device/activation-polling-policy";
 import type { AppState, MemoryKind } from "../../domain/types";
 import {
   BrowserRemoteSignalAdapter,
   LiveMediaConnection,
   type LiveMediaStatus,
 } from "../../realtime/live-media";
+import {
+  acceptRemoteWithAuthoritativeHandoff,
+  guardActiveCompanionHeartbeat,
+  guardCompanionWrite,
+  shouldKeepCompanionActive,
+  shouldStopForMediaDirective,
+} from "../../realtime/remote-answer-handoff";
+import { presentDeviceCall } from "../../realtime/device-call-presentation";
 import { useAppState } from "../../state/app-state";
 
 type BarcodeResult = { rawValue?: string };
@@ -52,6 +73,49 @@ type BarcodeDetectorLike = {
 type BarcodeDetectorConstructor = new (options: {
   formats: string[];
 }) => BarcodeDetectorLike;
+
+const PENDING_ACTIVATION_CHALLENGE_KEY =
+  "memory-lighthouse.pending-activation-challenge.v1";
+const ACTIVATION_RECOVERY_REQUIRED_KEY =
+  "memory-lighthouse.activation-recovery-required.v1";
+const readPendingActivationChallenge = (): string => {
+  try {
+    return globalThis.sessionStorage?.getItem(PENDING_ACTIVATION_CHALLENGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+};
+const readActivationRecoveryRequired = (): boolean => {
+  try {
+    return globalThis.sessionStorage?.getItem(ACTIVATION_RECOVERY_REQUIRED_KEY) === "true";
+  } catch {
+    return false;
+  }
+};
+const persistActivationRecoveryRequired = (required: boolean): void => {
+  try {
+    if (required) {
+      globalThis.sessionStorage?.setItem(ACTIVATION_RECOVERY_REQUIRED_KEY, "true");
+    } else {
+      globalThis.sessionStorage?.removeItem(ACTIVATION_RECOVERY_REQUIRED_KEY);
+    }
+  } catch {
+    // The challenge itself remains in session storage. This marker only blocks
+    // accidental replacement after an ambiguous IndexedDB commit failure.
+  }
+};
+const persistPendingActivationChallenge = (challengeId: string): void => {
+  try {
+    if (challengeId) {
+      globalThis.sessionStorage?.setItem(PENDING_ACTIVATION_CHALLENGE_KEY, challengeId);
+    } else {
+      globalThis.sessionStorage?.removeItem(PENDING_ACTIVATION_CHALLENGE_KEY);
+    }
+  } catch {
+    // Session storage is an availability aid only. The signed challenge and
+    // non-exportable installation key remain the activation authorities.
+  }
+};
 
 const knownMemoryKinds = new Set<MemoryKind>([
   "person",
@@ -159,7 +223,7 @@ const runtimeStateFromContext = (
 };
 
 export const CompanionPage = () => {
-  const { user } = useAuth();
+  const { user, lockToDeviceMode } = useAuth();
   const { state: demoState } = useAppState();
   const [initializing, setInitializing] = useState(true);
   const [activated, setActivated] = useState(false);
@@ -172,19 +236,95 @@ export const CompanionPage = () => {
   const [publicId, setPublicId] = useState("");
   const [dynamicCode, setDynamicCode] = useState("");
   const [qrPayload, setQrPayload] = useState("");
-  const [challengeId, setChallengeId] = useState("");
+  const [challengeId, setChallengeId] = useState(readPendingActivationChallenge);
   const [challengeStatus, setChallengeStatus] = useState("");
   const [scanning, setScanning] = useState(false);
   const scannerVideo = useRef<HTMLVideoElement | null>(null);
   const scannerStream = useRef<MediaStream | null>(null);
+  const careExperience = useRef<CareExperienceHandle | null>(null);
   const activeCompanionId = useRef("");
-  const exchangeStarted = useRef(false);
+  const heartbeatRequestSequence = useRef(0);
+  const heartbeatAppliedSequence = useRef(0);
+  const activationExchange = useRef(new ActivationExchangeGate());
+  const activationRetryBudget = useRef(new ActivationPollingRetryBudget());
+  const activationPollingEpoch = useRef(0);
+  const activationRecoveryRequired = useRef(readActivationRecoveryRequired());
   const [incoming, setIncoming] = useState<RemoteSessionView | null>(null);
   const [callStatus, setCallStatus] = useState<LiveMediaStatus>("idle");
   const [callDetail, setCallDetail] = useState("");
+  const [serverMediaStopped, setServerMediaStopped] = useState(false);
   const localVideo = useRef<HTMLVideoElement | null>(null);
   const remoteAudio = useRef<HTMLAudioElement | null>(null);
   const liveMedia = useRef(new LiveMediaConnection());
+
+  const stopLocalCompanionRuntime = useCallback(
+    (commitStopped: () => void, reason: string) => {
+      try {
+        careExperience.current?.stopLocalRuntime(reason);
+      } finally {
+        activeCompanionId.current = "";
+        flushSync(commitStopped);
+      }
+    },
+    [],
+  );
+
+  const applyHeartbeat = useCallback(
+    (heartbeat: Awaited<ReturnType<typeof deviceSession.heartbeat>>) => {
+      setOnline(true);
+      if (!shouldStopForMediaDirective(heartbeat.mediaDirective)) {
+        setServerMediaStopped(false);
+        return;
+      }
+      stopLocalCompanionRuntime(
+        () => {
+          setServerMediaStopped(true);
+          setNotice(
+            heartbeat.reason
+              ? `陪伴媒体已由服务端停止：${heartbeat.reason}`
+              : "陪伴媒体授权或会话已失效，摄像头、麦克风和模型连接已停止。",
+          );
+        },
+        "server_media_stop",
+      );
+    },
+    [stopLocalCompanionRuntime],
+  );
+
+  const sendHeartbeat = useCallback(async () => {
+    const requestSequence = ++heartbeatRequestSequence.current;
+    const reportedSessionId = activeCompanionId.current || undefined;
+    const heartbeat = await guardActiveCompanionHeartbeat(
+      deviceSession.heartbeat(reportedSessionId),
+      reportedSessionId,
+      (heartbeatError) => {
+        stopLocalCompanionRuntime(
+          () => {
+            setServerMediaStopped(true);
+            setError(readableError(heartbeatError));
+          },
+          "device_heartbeat_failed",
+        );
+      },
+    );
+    if (requestSequence < heartbeatAppliedSequence.current) return;
+    heartbeatAppliedSequence.current = requestSequence;
+    applyHeartbeat(heartbeat);
+  }, [applyHeartbeat, stopLocalCompanionRuntime]);
+
+  const failClosedCompanionWrite = useCallback(
+    (writeError: unknown) => {
+      const message = readableError(writeError);
+      stopLocalCompanionRuntime(
+        () => {
+          setServerMediaStopped(true);
+          setError(message);
+        },
+        "companion_write_rejected",
+      );
+    },
+    [stopLocalCompanionRuntime],
+  );
 
   const loadContext = useCallback(async () => {
     const next = await deviceSession.context();
@@ -193,9 +333,8 @@ export const CompanionPage = () => {
       runtimeStateFromContext(demoState, next, next.careSnapshot),
     );
     setActivated(true);
-    await deviceSession.heartbeat();
-    setOnline(true);
-  }, [demoState]);
+    await sendHeartbeat();
+  }, [demoState, sendHeartbeat]);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,6 +343,7 @@ export const CompanionPage = () => {
       .then(async () => {
         if (!deviceSession.hasCredential()) return;
         try {
+          await lockToDeviceMode();
           await loadContext();
         } catch (loadError) {
           if (!cancelled) setError(readableError(loadError));
@@ -215,18 +355,16 @@ export const CompanionPage = () => {
     return () => {
       cancelled = true;
     };
-  }, [loadContext]);
+  }, [loadContext, lockToDeviceMode]);
 
   useEffect(() => {
     if (!activated) return;
     const timer = window.setInterval(() => {
-      void deviceSession
-        .heartbeat()
-        .then(() => setOnline(true))
+      void sendHeartbeat()
         .catch(() => setOnline(false));
-    }, 30_000);
+    }, 5_000);
     return () => window.clearInterval(timer);
-  }, [activated]);
+  }, [activated, sendHeartbeat]);
 
   useEffect(() => {
     if (!activated) return;
@@ -276,14 +414,6 @@ export const CompanionPage = () => {
     if (sessionId) await deviceSession.endCompanion(sessionId, reason);
   }, []);
 
-  useEffect(() => {
-    if (incoming) {
-      void stopCompanionServerSession("REMOTE_RINGING").catch((stopError) => {
-        setError(readableError(stopError));
-      });
-    }
-  }, [incoming?.id, stopCompanionServerSession]);
-
   useEffect(
     () => () => {
       scannerStream.current?.getTracks().forEach((track) => track.stop());
@@ -322,9 +452,14 @@ export const CompanionPage = () => {
               : eventType;
             if (statusEvents.has(dedupeKey)) return;
             statusEvents.add(dedupeKey);
-            void deviceSession
-              .appendModelEvent(model.session.id, eventType, errorCode)
-              .catch((eventError) => setError(readableError(eventError)));
+            void guardCompanionWrite(
+              deviceSession.appendModelEvent(
+                model.session.id,
+                eventType,
+                errorCode,
+              ),
+              failClosedCompanionWrite,
+            );
           };
           return {
             prompt: model.prompt.content,
@@ -344,21 +479,27 @@ export const CompanionPage = () => {
                 recordEvent("FIRST_RESPONSE");
               }
               sequenceNo += 1;
-              void deviceSession
-                .appendAssistantUtterance(model.session.id, sequenceNo, text)
-                .catch((utteranceError) =>
-                  setError(readableError(utteranceError)),
-                );
+              void guardCompanionWrite(
+                deviceSession.appendAssistantUtterance(
+                  model.session.id,
+                  sequenceNo,
+                  text,
+                ),
+                failClosedCompanionWrite,
+              );
             },
             onUserTranscriptFinal: context?.consent.decisions
               .MODEL_INPUT_TRANSCRIPTION
               ? (text: string) => {
                   sequenceNo += 1;
-                  void deviceSession
-                    .appendUserTranscript(model.session.id, sequenceNo, text)
-                    .catch((utteranceError) =>
-                      setError(readableError(utteranceError)),
-                    );
+                  void guardCompanionWrite(
+                    deviceSession.appendUserTranscript(
+                      model.session.id,
+                      sequenceNo,
+                      text,
+                    ),
+                    failClosedCompanionWrite,
+                  );
                 }
               : undefined,
             onRuntimeError: (message: string) => {
@@ -392,25 +533,51 @@ export const CompanionPage = () => {
           source,
         );
       },
+      requestFamily: async (
+        source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE" | "COMPANION_TIMEOUT",
+        occurrenceId?: string,
+      ) => {
+        await deviceSession.requestFamilyContact(source, occurrenceId);
+      },
     }),
-    [context, demoState, stopCompanionServerSession],
+    [
+      context,
+      demoState,
+      failClosedCompanionWrite,
+      stopCompanionServerSession,
+    ],
   );
 
   const claim = async (input: ActivationClaim) => {
+    if (activationRecoveryRequired.current) {
+      setError("设备凭据仍在恢复中，请刷新本页继续恢复，不要用新的激活覆盖当前恢复句柄");
+      return;
+    }
     setBusy(true);
     setError("");
     setNotice("");
-    exchangeStarted.current = false;
+    if (!activationExchange.current.reset()) {
+      setBusy(false);
+      setError("设备凭据正在安全落盘，请等待本次激活完成后再发起新的激活");
+      return;
+    }
+    activationPollingEpoch.current += 1;
+    const claimEpoch = activationPollingEpoch.current;
+    activationRetryBudget.current.reset();
     try {
       const nextChallengeId = await deviceSession.claim(input);
+      if (activationPollingEpoch.current !== claimEpoch) return;
       setChallengeId(nextChallengeId);
+      persistPendingActivationChallenge(nextChallengeId);
       setChallengeStatus("CLAIMED");
       setNotice("设备已完成 Claim。请回到家属端核对并批准此设备。 ");
       stopScanner();
     } catch (claimError) {
-      setError(readableError(claimError));
+      if (activationPollingEpoch.current === claimEpoch) {
+        setError(readableError(claimError));
+      }
     } finally {
-      setBusy(false);
+      if (activationPollingEpoch.current === claimEpoch) setBusy(false);
     }
   };
 
@@ -434,29 +601,107 @@ export const CompanionPage = () => {
 
   useEffect(() => {
     if (!challengeId || activated) return;
+    const epoch = activationPollingEpoch.current;
+    let checking = false;
+    let retryAfter = 0;
+    let stopped = false;
+    const isStale = () => stopped || activationPollingEpoch.current !== epoch;
     const check = async () => {
+      if (isStale() || checking || Date.now() < retryAfter) return;
+      checking = true;
       try {
-        const status = await deviceSession.status(challengeId);
-        setChallengeStatus(status.status);
-        if (
-          status.status === "APPROVED" &&
-          status.approvedAt &&
-          !exchangeStarted.current
-        ) {
-          exchangeStarted.current = true;
-          setNotice("家属已批准，正在兑换短时访问令牌与轮换设备凭据…");
-          await deviceSession.exchange(challengeId, status.approvedAt);
+        if (deviceSession.hasCredential()) {
+          await lockToDeviceMode();
           await loadContext();
-          setNotice("设备激活完成，已开始发送在线心跳。 ");
+          if (activationPollingEpoch.current !== epoch) return;
+          stopped = true;
+          persistPendingActivationChallenge("");
+          activationRecoveryRequired.current = false;
+          persistActivationRecoveryRequired(false);
+          setChallengeId("");
+          return;
+        }
+        const status = await deviceSession.status(challengeId);
+        if (isStale()) return;
+        setChallengeStatus(status.status);
+        if (ACTIVATION_TERMINAL_STATUSES.has(status.status)) {
+          stopped = true;
+          persistPendingActivationChallenge("");
+          activationRecoveryRequired.current = false;
+          persistActivationRecoveryRequired(false);
+          activationExchange.current.reset();
+          activationRetryBudget.current.reset();
+          setChallengeId("");
+          setNotice("");
+          setError(activationTerminalMessage(status.status));
+          return;
+        }
+        if (
+          ["APPROVED", "CONSUMED"].includes(status.status) &&
+          status.approvedAt
+        ) {
+          await activationExchange.current.run(async () => {
+            setNotice("家属已批准，正在兑换短时访问令牌与轮换设备凭据…");
+            await lockToDeviceMode();
+            if (!deviceSession.hasCredential()) {
+              if (status.status === "CONSUMED" && !status.recoveryToken) {
+                throw new Error("服务端未签发设备凭据恢复证明，请稍后重试");
+              }
+              await deviceSession.exchange(
+                challengeId,
+                status.approvedAt!,
+                status.recoveryToken ?? undefined,
+              );
+            }
+            await loadContext();
+            if (activationPollingEpoch.current !== epoch) return;
+            stopped = true;
+            persistPendingActivationChallenge("");
+            activationRecoveryRequired.current = false;
+            persistActivationRecoveryRequired(false);
+            activationRetryBudget.current.reset();
+            setChallengeId("");
+            setNotice("设备激活完成，已开始发送在线心跳。 ");
+          });
         }
       } catch (statusError) {
+        if (isStale()) return;
+        if (shouldPreserveActivationChallenge(statusError)) {
+          stopped = true;
+          activationRecoveryRequired.current = true;
+          persistActivationRecoveryRequired(true);
+          setNotice("恢复句柄已保留；刷新本页后会使用服务端的新恢复令牌继续落盘。 ");
+          setError(readableError(statusError));
+          return;
+        }
+        if (!activationRetryBudget.current.shouldRetry(statusError)) {
+          stopped = true;
+          persistPendingActivationChallenge("");
+          activationRecoveryRequired.current = false;
+          persistActivationRecoveryRequired(false);
+          activationExchange.current.reset();
+          setChallengeId("");
+          setNotice("");
+          setError(
+            isActivationRecoveryConflict(statusError)
+              ? "设备凭据恢复多次冲突，请重新扫描二维码或输入新的动态激活码"
+              : readableError(statusError),
+          );
+          return;
+        }
+        retryAfter = Date.now() + activationPollingRetryDelayMillis(statusError);
         setError(readableError(statusError));
+      } finally {
+        checking = false;
       }
     };
     void check();
     const timer = window.setInterval(() => void check(), 2_000);
-    return () => window.clearInterval(timer);
-  }, [activated, challengeId, loadContext]);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [activated, challengeId, loadContext, lockToDeviceMode]);
 
   const stopScanner = () => {
     scannerStream.current?.getTracks().forEach((track) => track.stop());
@@ -510,24 +755,45 @@ export const CompanionPage = () => {
     if (!incoming) return;
     setBusy(true);
     setError("");
+    let onsiteAccepted = false;
     try {
-      await stopCompanionServerSession("REMOTE_TAKEOVER");
-      if (incoming.status === "RINGING") {
-        const accepted = await deviceSession.acceptRemote(incoming.id);
-        setIncoming(accepted);
-      }
-      const ticket = await deviceSession.remoteTicket(incoming.id);
-      await liveMedia.current.connect(
-        ticket,
-        "DEVICE",
-        { localVideo: localVideo.current, remoteAudio: remoteAudio.current },
-        (status, detail) => {
-          setCallStatus(status);
-          setCallDetail(detail ?? "");
+      await acceptRemoteWithAuthoritativeHandoff({
+        session: incoming,
+        accept: (sessionId) => deviceSession.acceptRemote(sessionId),
+        stopLocalCompanion: async (authoritative) => {
+          onsiteAccepted = true;
+          // Commit the authoritative state synchronously so CareExperience is
+          // unmounted and releases camera/microphone before LiveKit starts.
+          // The finally-path also commits it if local teardown itself throws,
+          // so the UI can never fall back to a false “still ringing” claim.
+          stopLocalCompanionRuntime(
+            () => setIncoming(authoritative),
+            "remote_assistance_accepted",
+          );
         },
-      );
+        joinMedia: async (authoritative) => {
+          const ticket = await deviceSession.remoteTicket(authoritative.id);
+          await liveMedia.current.connect(
+            ticket,
+            "DEVICE",
+            {
+              localVideo: localVideo.current,
+              remoteAudio: remoteAudio.current,
+            },
+            (status, detail) => {
+              setCallStatus(status);
+              setCallDetail(detail ?? "");
+            },
+          );
+        },
+      });
     } catch (acceptError) {
-      setError(readableError(acceptError));
+      const message = readableError(acceptError);
+      if (onsiteAccepted) {
+        setCallStatus("error");
+        setCallDetail(message);
+      }
+      setError(message);
     } finally {
       setBusy(false);
     }
@@ -574,6 +840,41 @@ export const CompanionPage = () => {
     }
   };
 
+  const companionRuntimePanel = (
+    <section className="companion-runtime-shell">
+      <div className="companion-runtime-status">
+        <div>
+          <span className="status-pill success">
+            <Wifi aria-hidden="true" size={16} /> 设备已激活
+          </span>
+          <strong>{context?.recipient.preferredName}的陪伴设备</strong>
+          <p>绑定编号末 6 位：{context?.bindingId.slice(-6)}</p>
+        </div>
+        <div className="inline-boundary">
+          <PhoneCall aria-hidden="true" size={18} /> 来电状态由服务端设备会话接口持续同步；
+          现场接听前，陪伴模型继续运行，远程通话不会占用摄像头或麦克风。
+        </div>
+      </div>
+      {error && (
+        <div className="inline-alert danger" role="alert">
+          <span>{error}</span>
+        </div>
+      )}
+      {runtimeState && (
+        <CareExperience
+          ref={careExperience}
+          runtimeState={runtimeState}
+          sessionCoordinator={coordinator}
+          serverBackedMode
+        />
+      )}
+    </section>
+  );
+
+  const callPresentation = incoming
+    ? presentDeviceCall(incoming.status, callStatus)
+    : null;
+
   if (initializing) {
     return (
       <main id="main-content" className="companion-loading" tabIndex={-1}>
@@ -600,7 +901,7 @@ export const CompanionPage = () => {
         </button>
         <div className="workspace-switcher horizontal" aria-label="切换工作区">
           <button type="button" onClick={() => navigate("workspace-overview")}>
-            <ArrowLeft aria-hidden="true" size={18} /> 家属工作区
+            <ArrowLeft aria-hidden="true" size={18} /> {activated ? "退出设备模式并重新登录" : "家属工作区"}
           </button>
           <button className="is-active" type="button" aria-current="page">
             <MonitorSmartphone aria-hidden="true" size={18} /> 陪伴设备模式
@@ -615,7 +916,7 @@ export const CompanionPage = () => {
             )}
             {online ? "在线" : "离线"}
           </span>
-          <strong>{user?.displayName}</strong>
+          <strong>{activated ? "设备身份" : user?.displayName || "等待激活"}</strong>
         </div>
       </header>
 
@@ -739,18 +1040,41 @@ export const CompanionPage = () => {
             </div>
           )}
         </section>
-      ) : incoming ? (
-        <section className="incoming-call-screen">
+      ) : (
+        <>
+          {!serverMediaStopped &&
+            shouldKeepCompanionActive(incoming?.status ?? null) &&
+            companionRuntimePanel}
+          {serverMediaStopped && !incoming && (
+            <section className="companion-runtime-shell">
+              <div className="inline-alert danger" role="alert">
+                <ShieldCheck aria-hidden="true" size={20} />
+                <span>{notice || "陪伴媒体已停止，请检查授权后刷新设备上下文。"}</span>
+              </div>
+            </section>
+          )}
+          {incoming && (
+        <section
+          className={`incoming-call-screen${
+            incoming.status === "RINGING" ? " is-overlay" : ""
+          }`}
+        >
           <div className="incoming-pulse">
             <PhoneCall aria-hidden="true" size={42} />
           </div>
           <p className="eyebrow">家庭成员来电</p>
           <h1>{context?.recipient.preferredName}，家人想和你说话</h1>
           <p>
-            只有点击接听后，摄像头和麦克风才会用于这次实时通话。通话不会录音，也不会转写。
+            现场接听前，当前陪伴对话继续运行；只有点击接听后，摄像头和麦克风才会切换给这次实时通话。通话不会录音，也不会转写。
           </p>
           <div
-            className={`device-call-media ${callStatus === "connected" ? "is-connected" : "is-pending"}`}
+            className={`device-call-media ${
+              callPresentation?.state === "connected"
+                ? "is-connected"
+                : callPresentation?.state === "media-failed"
+                  ? "is-error"
+                  : "is-pending"
+            }`}
           >
             <video
               ref={localVideo}
@@ -760,7 +1084,7 @@ export const CompanionPage = () => {
               aria-label="本机摄像头预览"
             />
             <audio ref={remoteAudio} autoPlay aria-label="家属实时音频" />
-            {callStatus === "connected" ? (
+            {callPresentation?.state === "connected" ? (
               <>
                 <span>
                   <Camera aria-hidden="true" size={18} /> 本机画面正在发送
@@ -772,12 +1096,15 @@ export const CompanionPage = () => {
             ) : (
               <span className="span-full">
                 <ShieldCheck aria-hidden="true" size={18} />{" "}
-                尚未接听，摄像头和麦克风保持关闭
+                {callPresentation?.message}
               </span>
             )}
           </div>
           {callDetail && (
-            <div className="form-message success" role="status">
+            <div
+              className={`form-message ${callPresentation?.callDetailTone ?? "success"}`}
+              role={callPresentation?.callDetailTone === "error" ? "alert" : "status"}
+            >
               {callDetail}
             </div>
           )}
@@ -787,7 +1114,7 @@ export const CompanionPage = () => {
             </div>
           )}
           <div className="incoming-actions">
-            {callStatus !== "connected" ? (
+            {callPresentation?.state !== "connected" ? (
               <>
                 <button
                   className="decline-call-button"
@@ -806,19 +1133,21 @@ export const CompanionPage = () => {
                   )}{" "}
                   {incoming.status === "RINGING" ? "拒绝" : "结束通话"}
                 </button>
-                <button
-                  className="accept-call-button"
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void acceptCall()}
-                >
-                  <PhoneCall aria-hidden="true" size={25} />{" "}
-                  {busy
-                    ? "正在连接…"
-                    : incoming.status === "RINGING"
-                      ? "接听"
-                      : "加入通话"}
-                </button>
+                {callPresentation?.canJoin && (
+                  <button
+                    className="accept-call-button"
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void acceptCall()}
+                  >
+                    <PhoneCall aria-hidden="true" size={25} />{" "}
+                    {busy
+                      ? "正在连接…"
+                      : incoming.status === "RINGING"
+                        ? "接听"
+                        : "加入通话"}
+                  </button>
+                )}
               </>
             ) : (
               <button
@@ -832,34 +1161,8 @@ export const CompanionPage = () => {
             )}
           </div>
         </section>
-      ) : (
-        <section className="companion-runtime-shell">
-          <div className="companion-runtime-status">
-            <div>
-              <span className="status-pill success">
-                <Wifi aria-hidden="true" size={16} /> 设备已激活
-              </span>
-              <strong>{context?.recipient.preferredName}的陪伴设备</strong>
-              <p>绑定编号末 6 位：{context?.bindingId.slice(-6)}</p>
-            </div>
-            <div className="inline-boundary">
-              <PhoneCall aria-hidden="true" size={18} />{" "}
-              来电状态由服务端设备会话接口持续同步，现场接听前不会打开摄像头或麦克风。
-            </div>
-          </div>
-          {error && (
-            <div className="inline-alert danger" role="alert">
-              <span>{error}</span>
-            </div>
           )}
-          {runtimeState && (
-            <CareExperience
-              runtimeState={runtimeState}
-              sessionCoordinator={coordinator}
-              serverBackedMode
-            />
-          )}
-        </section>
+        </>
       )}
     </main>
   );

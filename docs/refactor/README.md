@@ -5,7 +5,7 @@
 ## 已确认的架构基线
 
 - 服务器采用 NestJS + Prisma + MySQL。
-- Redis 保存短时状态、限流数据和任务队列；MinIO 保存图片、音频等对象，MySQL 保存元数据。
+- Redis 保存短时状态、限流数据和可重建的调度提示；MinIO 保存图片、音频等对象。MySQL 除业务元数据外，还保存与业务事务同生共死的 Outbox，以及资产扫描/删除等隐私关键任务的持久租约与重试状态，Redis 丢失不能让这些任务消失。
 - 用户侧采用一个 Web 和一个原生 Android App，登录后按家庭权限及设备模式显示家属或陪伴页面。
 - 管理员 Web 独立部署，基于 Art Design Clean 改造。
 - 家属使用邮箱或用户名加密码登录。
@@ -27,8 +27,8 @@
 10. [开发计划与验收](./10-development-roadmap.md)
 11. [决策确认记录与外部依赖](./11-open-questions.md)
 12. [数据字典](./database/data-dictionary.md)
-13. [Prisma 目标模型草案](./database/schema.prisma)
-14. [Prisma 7 配置草案](./database/prisma.config.ts)
+13. [Prisma 物理模型对照](./database/schema.prisma)（CI 与服务端可执行 schema 做等价 diff）
+14. [Prisma 7 文档模型校验配置](./database/prisma.config.ts)（迁移历史唯一引用服务端目录）
 15. [实施状态](./IMPLEMENTATION_STATUS.md)
 
 ## 图表

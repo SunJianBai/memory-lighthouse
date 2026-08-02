@@ -43,6 +43,16 @@ jobs:
       - name: Validate Prisma schema
         run: npm run prisma:validate
 
+      - name: Validate documented database model stays equivalent
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx prisma validate --config docs/refactor/database/prisma.config.ts
+          npx prisma migrate diff \
+            --from-schema apps/server-api/prisma/schema.prisma \
+            --to-schema docs/refactor/database/schema.prisma \
+            --exit-code
+
       - name: Check API and event contracts
         run: npm run check:contracts
 
@@ -109,11 +119,13 @@ jobs:
           redis_livekit_password="$(random_hex)"
           minio_root_password="$(random_hex)"
           minio_app_secret="$(random_hex)"
+          minio_kms_secret="ci-sse:$(openssl rand -base64 32 | tr -d '\n')"
           livekit_secret="$(random_hex)"
           rate_limit_secret="$(random_base64url)"
           data_encryption_key="$(openssl rand -base64 32 | tr -d '\n')"
           care_encryption_key="$(random_base64url)"
           auth_access_secret="$(random_hex)"
+          auth_admin_access_secret="$(random_hex)"
           auth_refresh_pepper="$(random_hex)"
           auth_one_time_pepper="$(random_hex)"
           household_invitation_pepper="$(random_hex)"
@@ -128,11 +140,13 @@ jobs:
             "$redis_livekit_password" \
             "$minio_root_password" \
             "$minio_app_secret" \
+            "$minio_kms_secret" \
             "$livekit_secret" \
             "$rate_limit_secret" \
             "$data_encryption_key" \
             "$care_encryption_key" \
             "$auth_access_secret" \
+            "$auth_admin_access_secret" \
             "$auth_refresh_pepper" \
             "$auth_one_time_pepper" \
             "$household_invitation_pepper" \
@@ -157,6 +171,7 @@ jobs:
           REDIS_HOST_PORT=16379
           MINIO_ROOT_USER=openbmb-ci-root
           MINIO_ROOT_PASSWORD=$minio_root_password
+          MINIO_KMS_SECRET_KEY=$minio_kms_secret
           MINIO_APP_ACCESS_KEY=openbmb-api
           MINIO_APP_SECRET_KEY=$minio_app_secret
           MINIO_BUCKET=openbmb-assets
@@ -184,6 +199,7 @@ jobs:
             echo "DATA_ENCRYPTION_KEY_BASE64=$data_encryption_key"
             echo "CARE_WORKFLOW_ENCRYPTION_KEY=$care_encryption_key"
             echo "AUTH_ACCESS_TOKEN_SECRET=$auth_access_secret"
+            echo "AUTH_ADMIN_ACCESS_TOKEN_SECRET=$auth_admin_access_secret"
             echo "AUTH_REFRESH_TOKEN_PEPPER=$auth_refresh_pepper"
             echo "AUTH_ONE_TIME_TOKEN_PEPPER=$auth_one_time_pepper"
             echo "HOUSEHOLD_INVITATION_TOKEN_PEPPER=$household_invitation_pepper"
@@ -205,9 +221,86 @@ jobs:
             -f infra/compose/compose.yml \
             run --rm --no-deps minio-init
 
+      - name: Verify deployment realtime drain
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_lease_key='openbmb:media-owner:01K1K000000000000000000001'
+          app_unrelated_key='openbmb:ci:unrelated'
+          docker exec openbmb-redis sh -ec '
+            redis-cli --no-auth-warning --user openbmb-api \
+              --pass "$REDIS_APP_PASSWORD" SET "$1" test-owner >/dev/null
+            redis-cli --no-auth-warning --user openbmb-api \
+              --pass "$REDIS_APP_PASSWORD" SET "$2" keep-me >/dev/null
+          ' sh "$app_lease_key" "$app_unrelated_key"
+          docker exec openbmb-redis-livekit sh -ec '
+            redis-cli --no-auth-warning --user livekit \
+              --pass "$REDIS_LIVEKIT_PASSWORD" -n 1 \
+              SET openbmb-ci-livekit-state present >/dev/null
+            redis-cli --no-auth-warning --user livekit \
+              --pass "$REDIS_LIVEKIT_PASSWORD" -n 0 \
+              SET openbmb-ci-db-zero-sentinel keep-me >/dev/null
+          '
+
+          docker stop --time 30 openbmb-livekit >/dev/null
+          bash infra/production/scripts/drain-realtime.sh
+
+          app_lease_exists="$(
+            docker exec openbmb-redis sh -ec '
+              redis-cli --raw --no-auth-warning --user openbmb-api \
+                --pass "$REDIS_APP_PASSWORD" EXISTS "$1"
+            ' sh "$app_lease_key" | tr -d '\r\n'
+          )"
+          app_unrelated_exists="$(
+            docker exec openbmb-redis sh -ec '
+              redis-cli --raw --no-auth-warning --user openbmb-api \
+                --pass "$REDIS_APP_PASSWORD" EXISTS "$1"
+            ' sh "$app_unrelated_key" | tr -d '\r\n'
+          )"
+          livekit_key_count="$(
+            docker exec openbmb-redis-livekit sh -ec '
+              redis-cli --raw --no-auth-warning --user livekit \
+                --pass "$REDIS_LIVEKIT_PASSWORD" -n 1 DBSIZE
+            ' | tr -d '\r\n'
+          )"
+          livekit_db_zero_sentinel_exists="$(
+            docker exec openbmb-redis-livekit sh -ec '
+              redis-cli --raw --no-auth-warning --user livekit \
+                --pass "$REDIS_LIVEKIT_PASSWORD" -n 0 \
+                EXISTS openbmb-ci-db-zero-sentinel
+            ' | tr -d '\r\n'
+          )"
+          [[ "$app_lease_exists" == 0 ]]
+          [[ "$app_unrelated_exists" == 1 ]]
+          [[ "$livekit_key_count" == 0 ]]
+          [[ "$livekit_db_zero_sentinel_exists" == 1 ]]
+
+          docker start openbmb-livekit >/dev/null
+          for _attempt in $(seq 1 30); do
+            livekit_health="$(
+              docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+                openbmb-livekit 2>/dev/null || true
+            )"
+            [[ "$livekit_health" == healthy ]] && break
+            sleep 2
+          done
+          [[ "$livekit_health" == healthy ]]
+
       - name: Apply database migrations
         working-directory: apps/server-api
         run: npx prisma migrate deploy
+
+      - name: Verify migrated database matches Prisma schema
+        working-directory: apps/server-api
+        run: >-
+          npx prisma migrate diff
+          --from-config-datasource
+          --to-schema prisma/schema.prisma
+          --exit-code
+
+      - name: Verify legacy device-key upgrade migration
+        shell: bash
+        run: bash apps/server-api/scripts/test-legacy-device-key-migration.sh
 
       - name: Run server E2E tests
         env:

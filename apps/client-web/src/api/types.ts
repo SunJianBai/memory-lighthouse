@@ -57,6 +57,28 @@ export type HouseholdMemberView = {
   version: number;
 };
 
+export type CareAuthorityView = {
+  id: string;
+  householdId: string;
+  recipientId: string;
+  memberId: string;
+  userId: string;
+  displayName: string;
+  relationshipLabel: string | null;
+  accessLevel: string;
+  canManageProfile: boolean;
+  canManageConsent: boolean;
+  canManageRoutine: boolean;
+  canViewEvents: boolean;
+  canViewConversation: boolean;
+  canActivateDevice: boolean;
+  canRemoteCall: boolean;
+  receiveNotifications: boolean;
+  contactPriority: number | null;
+  status: "ACTIVE" | "REVOKED";
+  version: number;
+};
+
 export type HouseholdInvitationView = {
   id: string;
   householdId: string;
@@ -153,6 +175,14 @@ export type OccurrenceView = {
   version: number;
 };
 
+export type FamilyContactRequestView = {
+  accepted: true;
+  careEventId: string;
+  familyTaskId: string;
+  occurrenceId: string | null;
+  taskStatus: string;
+};
+
 export type CareSnapshotOccurrence = {
   id: string;
   routineId: string;
@@ -221,6 +251,29 @@ export type ActivationPresentation = {
   expiresAt: string;
 };
 
+export type ActivationApprovalDetails = {
+  challengeId: string;
+  status: "CLAIMED";
+  expiresAt: string;
+  claimedAt: string;
+  claimNetworkSource:
+    | "LOCAL_NETWORK"
+    | "LOOPBACK"
+    | "PUBLIC_IPV4"
+    | "PUBLIC_IPV6"
+    | "UNKNOWN";
+  claimSnapshotToken: string;
+  device: {
+    platform: string;
+    installationKeyAlgorithm: "ED25519" | "ECDSA_P256_SHA256";
+    manufacturer: string | null;
+    model: string | null;
+    osVersion: string | null;
+    appVersion: string | null;
+    keyFingerprintSuffix: string;
+  };
+};
+
 export type ConsentScope =
   | "CAMERA_CAPTURE"
   | "MICROPHONE_CAPTURE"
@@ -282,12 +335,14 @@ export type RemoteAvailabilityView = {
   bindingId: string;
   online: boolean;
   busy: boolean;
+  companionActive: boolean;
   answerMode: "ONSITE_ANSWER";
   lastSeenAt: string | null;
 };
 
 export type RemoteJoinTicketView = {
   sessionId: string;
+  ticketId: string;
   participantId: string;
   participantIdentity: string;
   url: string;
@@ -333,6 +388,14 @@ export type DeviceContextView = {
   consent: DeviceConsentView;
   careSnapshot: CareSnapshotView;
   model: { provider: string; model: string; realtimeUrl: string };
+};
+
+export type DeviceHeartbeatView = {
+  online: true;
+  serverTime: string;
+  mediaDirective: "CONTINUE" | "STOP";
+  activeCompanionSessionId?: string;
+  reason?: string;
 };
 
 export type CompanionSessionStartView = {

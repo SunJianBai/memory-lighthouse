@@ -3,8 +3,10 @@ import {
   IsBoolean,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsString,
   Length,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -34,6 +36,11 @@ export class CreateRemoteSessionDto {
 }
 
 export class UpdateRemotePolicyDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  currentPassword!: string;
+
   @IsBoolean()
   cameraAllowed!: boolean;
 

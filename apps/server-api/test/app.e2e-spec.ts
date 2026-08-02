@@ -1,24 +1,44 @@
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { configureHttpApplication } from '../src/bootstrap/configure-http-application';
+import { DatabaseReadinessIndicator } from '../src/health/database-readiness.indicator';
+import { RedisMediaLeaseAdapter } from '../src/modules/realtime-communication/adapters/redis-media-lease.adapter';
+import { MEDIA_LEASE_PORT } from '../src/modules/realtime-communication/realtime.constants';
 import { AppModule } from './../src/app.module';
 
 describe('server-api foundation (e2e)', () => {
   let app: INestApplication<App>;
 
-  beforeEach(async () => {
+  beforeAll(async () => {
+    const mediaLease = {
+      acquire: async () => true,
+      renew: async () => true,
+      transfer: async () => true,
+      release: async () => undefined,
+      current: async () => null,
+    };
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(RedisMediaLeaseAdapter)
+      .useValue(mediaLease)
+      .overrideProvider(MEDIA_LEASE_PORT)
+      .useValue(mediaLease)
+      .overrideProvider(DatabaseReadinessIndicator)
+      .useValue({
+        name: 'database',
+        check: async () => ({ name: 'database', status: 'up' as const }),
+      })
+      .compile();
 
     app = moduleFixture.createNestApplication({ rawBody: true });
     configureHttpApplication(app, moduleFixture.get(ConfigService));
     await app.init();
-  });
+  }, 30_000);
 
   it('serves liveness under the versioned global prefix', () => {
     return request(app.getHttpServer())
@@ -88,9 +108,9 @@ describe('server-api foundation (e2e)', () => {
       });
   });
 
-  afterEach(async () => {
+  afterAll(async () => {
     if (app) {
       await app.close();
     }
-  });
+  }, 30_000);
 });

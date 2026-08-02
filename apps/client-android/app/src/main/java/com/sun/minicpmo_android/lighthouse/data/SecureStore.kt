@@ -13,8 +13,9 @@ import java.util.Base64
 
 /**
  * Small secret store backed by a non-exportable Android Keystore AES key.
- * Refresh tokens, device credentials and the encrypted Ed25519 private key never
- * appear in plain SharedPreferences or logs.
+ * Refresh tokens and device credentials never appear in plain SharedPreferences
+ * or logs. Device signing keys are held separately by Android Keystore and are
+ * never exportable into this store.
  */
 class SecureStore(context: Context) {
     private val preferences = context.applicationContext.getSharedPreferences(
@@ -63,6 +64,8 @@ class SecureStore(context: Context) {
     }
 
     fun remove(key: String) = put(key, null)
+
+    fun contains(key: String): Boolean = preferences.contains(key)
 
     private fun secretKey(): SecretKey {
         val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }

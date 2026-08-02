@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../../infrastructure/database/prisma.module';
 import { RateLimitModule } from '../../infrastructure/rate-limit';
 import { IdentityModule } from '../identity';
+import { RealtimeMediaSecurityModule } from '../realtime-communication/realtime-media-security.module';
 import { DeviceActivationApplicationService } from './device-activation.application.service';
 import { DeviceAccessTokenService } from './device-access-token.service';
 import { createDeviceActivationSecurityConfig } from './device-activation.config';
@@ -18,7 +19,12 @@ import { PublicDeviceActivationController } from './http/public-device-activatio
 import { SystemClock } from './system-clock';
 
 @Module({
-  imports: [PrismaModule, IdentityModule, RateLimitModule],
+  imports: [
+    PrismaModule,
+    IdentityModule,
+    RateLimitModule,
+    RealtimeMediaSecurityModule,
+  ],
   controllers: [
     PublicDeviceActivationController,
     FamilyDeviceActivationController,

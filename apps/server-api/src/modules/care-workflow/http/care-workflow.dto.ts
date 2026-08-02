@@ -7,8 +7,10 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  Length,
   Max,
   MaxLength,
+  Matches,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -188,6 +190,21 @@ export class DeviceConfirmOccurrenceDto {
   @IsString()
   @MaxLength(26)
   utteranceId?: string | null;
+}
+
+export class DeviceFamilyContactRequestDto {
+  @IsString()
+  @Length(1, 100)
+  idempotencyKey!: string;
+
+  @IsString()
+  @Matches(/^(RECIPIENT_BUTTON|RECIPIENT_VOICE|COMPANION_TIMEOUT)$/)
+  source!: 'RECIPIENT_BUTTON' | 'RECIPIENT_VOICE' | 'COMPANION_TIMEOUT';
+
+  @IsOptional()
+  @IsString()
+  @Length(26, 26)
+  occurrenceId?: string;
 }
 
 export class FamilyVerifyOccurrenceDto {

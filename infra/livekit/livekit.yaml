@@ -14,7 +14,12 @@ rtc:
   packet_buffer_size_audio: 120
 
 room:
+  # NestJS creates each accepted session room explicitly. Keeping this false
+  # prevents a previously refreshed client token from recreating a deleted,
+  # terminal room on self-hosted LiveKit.
   auto_create: false
+  # An explicitly created room with no admitted participant fails closed on
+  # the same horizon as the initial 60-second join ticket.
   empty_timeout: 60
   departure_timeout: 20
   max_participants: 2

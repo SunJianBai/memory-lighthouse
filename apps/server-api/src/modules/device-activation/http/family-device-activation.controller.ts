@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -17,12 +18,18 @@ import {
   UserAccessGuard,
   type UserPrincipal,
 } from '../../identity';
+import {
+  RateLimited,
+  RateLimitPolicy,
+} from '../../../infrastructure/rate-limit';
 import { DeviceActivationApplicationService } from '../device-activation.application.service';
 import type {
+  ActivationApprovalDetails,
   ActivationPresentation,
   CompanionBindingView,
 } from '../device-activation.types';
 import {
+  ApproveActivationDto,
   CancelActivationDto,
   RevokeCompanionBindingDto,
   UpdateCompanionBindingDto,
@@ -38,6 +45,7 @@ export class FamilyDeviceActivationController {
   @Post(
     'households/:householdId/care-recipients/:recipientId/activation-challenges',
   )
+  @RateLimited(RateLimitPolicy.DEVICE_ACTIVATION_CREATE)
   async createChallenge(
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
@@ -51,12 +59,28 @@ export class FamilyDeviceActivationController {
   }
 
   @Post('activation-challenges/:challengeId/approve')
+  @RateLimited(RateLimitPolicy.DEVICE_ACTIVATION_APPROVE)
   @HttpCode(HttpStatus.OK)
   async approve(
     @CurrentUser() principal: UserPrincipal,
     @Param('challengeId') challengeId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Body() input: ApproveActivationDto,
   ): Promise<{ approved: true; approvedAt: string }> {
     return this.deviceActivation.approveActivation({
+      userId: principal.userId,
+      challengeId,
+      idempotencyKey: idempotencyKey ?? '',
+      claimSnapshotToken: input.claimSnapshotToken,
+    });
+  }
+
+  @Get('activation-challenges/:challengeId/approval-details')
+  approvalDetails(
+    @CurrentUser() principal: UserPrincipal,
+    @Param('challengeId') challengeId: string,
+  ): Promise<ActivationApprovalDetails> {
+    return this.deviceActivation.getActivationApprovalDetails({
       userId: principal.userId,
       challengeId,
     });
@@ -88,6 +112,7 @@ export class FamilyDeviceActivationController {
   }
 
   @Patch('households/:householdId/companion-bindings/:bindingId')
+  @RateLimited(RateLimitPolicy.SENSITIVE_WRITE_REAUTHENTICATION)
   async updateBinding(
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
@@ -109,6 +134,7 @@ export class FamilyDeviceActivationController {
   }
 
   @Delete('households/:householdId/companion-bindings/:bindingId')
+  @RateLimited(RateLimitPolicy.SENSITIVE_WRITE_REAUTHENTICATION)
   @HttpCode(HttpStatus.OK)
   async revokeBinding(
     @CurrentUser() principal: UserPrincipal,
@@ -120,6 +146,7 @@ export class FamilyDeviceActivationController {
       userId: principal.userId,
       householdId,
       bindingId,
+      currentPassword: input.currentPassword,
       reasonCode: input.reasonCode,
     });
   }

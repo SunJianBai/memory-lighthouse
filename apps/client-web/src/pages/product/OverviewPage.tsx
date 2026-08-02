@@ -16,6 +16,7 @@ import type { HouseholdMemberView } from "../../api/types";
 import { navigate } from "../../app/navigation";
 import { useAuth } from "../../auth/auth-context";
 import { useWorkspace } from "../../workspace/workspace-context";
+import { CareAuthorityPanel } from "./CareAuthorityPanel";
 
 const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
 
@@ -212,6 +213,29 @@ export const OverviewPage = () => {
           </form>
         </div>
       </section>
+
+      {workspace.recipient && auth.user && (
+        <CareAuthorityPanel
+          householdId={workspace.householdId}
+          recipientId={workspace.recipient.id}
+          recipientName={workspace.recipient.preferredName}
+          currentUserId={auth.user.id}
+          members={members}
+          canManage={Boolean(workspace.household?.roleCodes.includes("OWNER"))}
+          onMemberUpdated={(updated) =>
+            setMembers((current) =>
+              current.map((member) =>
+                member.id === updated.id ? updated : member,
+              ),
+            )
+          }
+          onMemberRemoved={(memberId) =>
+            setMembers((current) =>
+              current.filter((member) => member.id !== memberId),
+            )
+          }
+        />
+      )}
     </div>
   );
 };

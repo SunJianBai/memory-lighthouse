@@ -17,7 +17,9 @@
      "$(sha256sum "$openbmb_backup_dir/SHA256SUMS" | awk '{ print $1 }')"
    (cd "$openbmb_backup_dir" && sha256sum --check SHA256SUMS)
    ```
-2. 记录当前 `/opt/openbmb/current`、镜像 ID 和卷名，并再做一次现状备份。
+2. 记录当前 `/opt/openbmb/current`、`current-app`、security floor、pending、镜像 ID 和卷名。
+   只有不存在 pending 时才可再做一次普通现状备份；pending 存在时备份脚本会按设计拒绝，
+   应保留状态文件并先完成迁移恢复判断。
 3. 停止 API，避免恢复过程中产生新写入：
 
    ```bash
@@ -26,6 +28,28 @@
 
 4. 以单独 Compose project/新卷做演练；验证数据库行数、登录、资源下载后，
    才能考虑覆盖正式卷。
+
+## Security floor 恢复
+
+新格式备份必须有纳入 `SHA256SUMS` 的 `minimum-security-epoch`。正式恢复数据后、启动任何
+应用前，用“当前主机 floor、当前 pending 要求、备份 floor、获准启动的 release epoch”四者
+最大值重建 floor：
+
+```bash
+openbmb_backup_dir=/var/backups/openbmb/<stamp>
+authorized_release=/opt/openbmb/releases/<reviewed-release-id>
+test -s "$openbmb_backup_dir/minimum-security-epoch"
+sudo bash /opt/openbmb/current/infra/production/scripts/security-epoch.sh \
+  recover-minimum "$openbmb_backup_dir/minimum-security-epoch" \
+  "$authorized_release"
+```
+
+`recover-minimum` 只会保持或提升 floor，且绝不清除 pending。其输出值必须记录到恢复工单；
+`current-app` 只能指向 epoch 不低于该值且已经过审阅的 release。若旧备份确实产生于
+`minimum-security-epoch` 进入备份格式之前，默认停止恢复；只有在核对备份时间、旧 release
+清单和完整 SHA-256 后，才可把该备份 floor 书面认定为 legacy `0`，制作一个单行 `0` 的
+root-only 临时文件交给同一命令。不能因为文件缺失而采用当前 release 的较低值，也不能删除
+现有 pending 或 floor。
 
 ## MySQL 演练恢复
 

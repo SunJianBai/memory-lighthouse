@@ -1,12 +1,19 @@
 import { ApiClient, ApiError } from "../api/api-client";
+import {
+  clearPersistentIdempotencyNamespace,
+  IdempotentCommandRegistry,
+} from "../api/idempotent-command";
 import type {
   CompanionSessionStartView,
   DeviceContextView,
+  DeviceHeartbeatView,
+  FamilyContactRequestView,
   ModelConnectionView,
   OccurrenceView,
   RemoteJoinTicketView,
   RemoteSessionView,
 } from "../api/types";
+import { DeviceCredentialPersistenceError } from "./device-storage-error";
 
 type DeviceCredential = {
   credential: string;
@@ -23,6 +30,7 @@ type DeviceCredential = {
 
 type InstallationRecord = {
   id: "current";
+  protocolVersion: "NON_EXPORTABLE_V1_ED25519";
   publicKey: CryptoKey;
   privateKey: CryptoKey;
   installationId: string;
@@ -36,6 +44,8 @@ type ActivationStatus = {
   expiresAt: string;
   claimedAt: string | null;
   approvedAt: string | null;
+  recoveryToken: string | null;
+  recoveryTokenExpiresAt: string | null;
 };
 
 export type ActivationClaim = {
@@ -47,6 +57,11 @@ export type ActivationClaim = {
 const publicClient = new ApiClient();
 const deviceClient = new ApiClient();
 const encoder = new TextEncoder();
+const CURRENT_INSTALLATION_PROTOCOL = "NON_EXPORTABLE_V1_ED25519" as const;
+const browserUserAgent = (maxLength: number): string => {
+  if (typeof navigator === "undefined") return "Browser";
+  return navigator.userAgent.slice(0, maxLength) || "Browser";
+};
 
 const base64Url = (input: ArrayBuffer | Uint8Array): string => {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
@@ -61,6 +76,41 @@ const base64Url = (input: ArrayBuffer | Uint8Array): string => {
 const sha256 = async (value: string): Promise<string> =>
   base64Url(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
 
+export const isNonExportableDeviceSigningKey = (key: CryptoKey): boolean =>
+  key.type === "private" &&
+  key.algorithm.name === "Ed25519" &&
+  !key.extractable &&
+  key.usages.includes("sign");
+
+export const generateDeviceKeyPair = async (): Promise<CryptoKeyPair> => {
+  const pair = (await crypto.subtle.generateKey("Ed25519", false, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
+  if (
+    !isNonExportableDeviceSigningKey(pair.privateKey) ||
+    !pair.publicKey.extractable
+  ) {
+    throw new Error("浏览器未能创建不可导出的设备签名私钥");
+  }
+  return pair;
+};
+
+export const buildDeviceInstallationRegistration = (input: {
+  installationPublicKeySpki: string;
+  manufacturer: string;
+  model: string;
+  appVersion: string;
+}) => ({
+  installationPublicKeySpki: input.installationPublicKeySpki,
+  installationKeyAlgorithm: "ED25519" as const,
+  keyProtection: "NON_EXPORTABLE_V1" as const,
+  platform: "WEB" as const,
+  manufacturer: input.manufacturer,
+  model: input.model,
+  appVersion: input.appVersion,
+});
+
 const canonicalProof = (
   action: string,
   fields: Array<[string, string]>,
@@ -74,6 +124,24 @@ const canonicalProof = (
   return encoder.encode(`${lines.join("\n")}\n`);
 };
 
+export const buildDeviceExchangeProof = (input: {
+  challengeId: string;
+  installationId: string;
+  approvedAt: string;
+  recoveryToken?: string;
+}): Uint8Array =>
+  input.recoveryToken
+    ? canonicalProof("exchange-recovery", [
+        ["challenge-id", input.challengeId],
+        ["installation-id", input.installationId],
+        ["recovery-token", input.recoveryToken],
+      ])
+    : canonicalProof("exchange", [
+        ["challenge-id", input.challengeId],
+        ["installation-id", input.installationId],
+        ["approved-at", input.approvedAt],
+      ]);
+
 const sign = async (key: CryptoKey, message: Uint8Array): Promise<string> =>
   base64Url(
     await crypto.subtle.sign(
@@ -86,7 +154,7 @@ const sign = async (key: CryptoKey, message: Uint8Array): Promise<string> =>
     ),
   );
 
-class DeviceVault {
+export class DeviceVault {
   private database: Promise<IDBDatabase> | null = null;
 
   get(): Promise<InstallationRecord | null> {
@@ -103,6 +171,10 @@ class DeviceVault {
   async clearCredential(): Promise<void> {
     const record = await this.get();
     if (record) await this.put({ ...record, credential: undefined });
+  }
+
+  async clear(): Promise<void> {
+    await this.transaction("readwrite", (store) => store.delete("current"));
   }
 
   private open(): Promise<IDBDatabase> {
@@ -129,10 +201,40 @@ class DeviceVault {
     const database = await this.open();
     return new Promise<T>((resolve, reject) => {
       const transaction = database.transaction("installation", mode);
-      const request = operation(transaction.objectStore("installation"));
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () =>
-        reject(request.error ?? new Error("设备安全存储操作失败"));
+      let request: IDBRequest<T>;
+      try {
+        request = operation(transaction.objectStore("installation"));
+      } catch (error) {
+        transaction.abort();
+        reject(error);
+        return;
+      }
+      let requestSucceeded = false;
+      let requestResult!: T;
+      let operationError: DOMException | null = null;
+      request.onsuccess = () => {
+        requestSucceeded = true;
+        requestResult = request.result;
+      };
+      request.onerror = () => {
+        operationError = request.error;
+      };
+      transaction.onerror = () => {
+        operationError ??= transaction.error;
+      };
+      transaction.onabort = () =>
+        reject(
+          transaction.error ??
+            operationError ??
+            new Error("设备安全存储事务已中止"),
+        );
+      transaction.oncomplete = () => {
+        if (!requestSucceeded) {
+          reject(operationError ?? new Error("设备安全存储操作未完成"));
+          return;
+        }
+        resolve(requestResult);
+      };
     });
   }
 }
@@ -153,9 +255,13 @@ export const parseQrActivation = (value: string): ActivationClaim => {
 export class DeviceSessionManager {
   private record: InstallationRecord | null = null;
   private refreshInFlight: Promise<boolean> | null = null;
+  private careCommands:
+    | { namespace: string; registry: IdempotentCommandRegistry }
+    | undefined;
 
   async initialize(): Promise<InstallationRecord | null> {
-    this.record = await vault.get();
+    this.record = await this.loadSecureInstallation();
+    this.careCommands = undefined;
     deviceClient.setAccessToken(this.record?.credential?.accessToken ?? null);
     deviceClient.setRefreshHandler(() => this.refreshAccessToken());
     return this.record;
@@ -211,15 +317,20 @@ export class DeviceSessionManager {
     );
   }
 
-  async exchange(challengeId: string, approvedAt: string): Promise<void> {
+  async exchange(
+    challengeId: string,
+    approvedAt: string,
+    recoveryToken?: string,
+  ): Promise<void> {
     const installation = await this.ensureInstallation();
     const signature = await sign(
       installation.privateKey,
-      canonicalProof("exchange", [
-        ["challenge-id", challengeId],
-        ["installation-id", installation.installationId],
-        ["approved-at", approvedAt],
-      ]),
+      buildDeviceExchangeProof({
+        challengeId,
+        installationId: installation.installationId,
+        approvedAt,
+        recoveryToken,
+      }),
     );
     const credential = await publicClient.request<DeviceCredential>(
       "/device-credentials/exchange",
@@ -229,13 +340,19 @@ export class DeviceSessionManager {
           challengeId,
           installationId: installation.installationId,
           signature,
+          ...(recoveryToken ? { recoveryToken } : {}),
         },
         authenticated: false,
         retryAuthentication: false,
       },
     );
-    this.record = { ...installation, credential };
-    await vault.put(this.record);
+    const persisted = { ...installation, credential };
+    try {
+      await vault.put(persisted);
+    } catch (storageError) {
+      throw new DeviceCredentialPersistenceError(storageError);
+    }
+    this.record = persisted;
     deviceClient.setAccessToken(credential.accessToken);
   }
 
@@ -243,12 +360,15 @@ export class DeviceSessionManager {
     return this.request<DeviceContextView>("/device/context");
   }
 
-  heartbeat(): Promise<{ online: true; serverTime: string }> {
+  heartbeat(
+    activeCompanionSessionId?: string,
+  ): Promise<DeviceHeartbeatView> {
     return this.request("/device/heartbeats", {
       method: "POST",
       body: {
         appVersion: "client-web/0.2.0",
-        osVersion: navigator.userAgent.slice(0, 64),
+        osVersion: browserUserAgent(64),
+        ...(activeCompanionSessionId ? { activeCompanionSessionId } : {}),
       },
     });
   }
@@ -343,14 +463,45 @@ export class DeviceSessionManager {
     version: number,
     source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE",
   ): Promise<unknown> {
-    return this.request(`/device/occurrences/${occurrenceId}/confirm`, {
-      method: "POST",
-      body: {
+    return this.deviceCareCommands().execute(
+      JSON.stringify([
+        "confirm-occurrence",
+        this.bindingId,
+        occurrenceId,
         version,
-        idempotencyKey: crypto.randomUUID(),
         source,
-      },
-    });
+      ]),
+      (idempotencyKey) =>
+        this.request(`/device/occurrences/${occurrenceId}/confirm`, {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: {
+            version,
+            idempotencyKey,
+            source,
+          },
+        }),
+    );
+  }
+
+  requestFamilyContact(
+    source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE" | "COMPANION_TIMEOUT",
+    occurrenceId?: string,
+  ): Promise<FamilyContactRequestView> {
+    return this.deviceCareCommands().execute(
+      JSON.stringify([
+        "family-contact",
+        this.bindingId,
+        source,
+        occurrenceId ?? null,
+      ]),
+      (idempotencyKey) =>
+        this.request("/device/family-contact-requests", {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: { idempotencyKey, source, occurrenceId },
+        }),
+    );
   }
 
   endCompanion(companionSessionId: string, reason: string): Promise<unknown> {
@@ -455,8 +606,9 @@ export class DeviceSessionManager {
           retryAuthentication: false,
         },
       );
-      this.record = { ...installation, credential: rotated };
-      await vault.put(this.record);
+      const persisted = { ...installation, credential: rotated };
+      await vault.put(persisted);
+      this.record = persisted;
       deviceClient.setAccessToken(rotated.accessToken);
       return true;
     } catch (error) {
@@ -478,8 +630,23 @@ export class DeviceSessionManager {
   }
 
   private async ensureInstallation(): Promise<InstallationRecord> {
-    if (this.record) return this.record;
-    const existing = await vault.get();
+    if (
+      this.record &&
+      this.record.protocolVersion === CURRENT_INSTALLATION_PROTOCOL &&
+      isNonExportableDeviceSigningKey(this.record.privateKey)
+    ) {
+      return this.record;
+    }
+    if (this.record) {
+      clearPersistentIdempotencyNamespace(
+        this.deviceCommandNamespace(this.record.installationId),
+      );
+      await vault.clear();
+      this.record = null;
+      this.careCommands = undefined;
+      deviceClient.setAccessToken(null);
+    }
+    const existing = await this.loadSecureInstallation();
     if (existing) {
       this.record = existing;
       return existing;
@@ -488,10 +655,7 @@ export class DeviceSessionManager {
       throw new Error(
         "当前浏览器不支持设备密钥，请使用最新版 Chrome 或 Android App",
       );
-    const pair = (await crypto.subtle.generateKey("Ed25519", true, [
-      "sign",
-      "verify",
-    ])) as CryptoKeyPair;
+    const pair = await generateDeviceKeyPair();
     const spki = await crypto.subtle.exportKey("spki", pair.publicKey);
     const registered = await publicClient.request<{
       installationId: string;
@@ -499,24 +663,70 @@ export class DeviceSessionManager {
       serverNonce: string;
     }>("/device-installations", {
       method: "POST",
-      body: {
+      body: buildDeviceInstallationRegistration({
         installationPublicKeySpki: base64Url(spki),
-        platform: "WEB",
-        manufacturer: navigator.vendor || "Browser",
-        model: navigator.userAgent.slice(0, 100),
+        manufacturer:
+          typeof navigator === "undefined" ? "Browser" : navigator.vendor || "Browser",
+        model: browserUserAgent(100),
         appVersion: "0.2.0",
-      },
+      }),
       authenticated: false,
       retryAuthentication: false,
     });
-    this.record = {
+    const persisted: InstallationRecord = {
       id: "current",
+      protocolVersion: CURRENT_INSTALLATION_PROTOCOL,
       publicKey: pair.publicKey,
       privateKey: pair.privateKey,
       ...registered,
     };
-    await vault.put(this.record);
-    return this.record;
+    await vault.put(persisted);
+    this.record = persisted;
+    return persisted;
+  }
+
+  private async loadSecureInstallation(): Promise<InstallationRecord | null> {
+    const existing = await vault.get();
+    if (!existing) return null;
+    if (
+      existing.protocolVersion === CURRENT_INSTALLATION_PROTOCOL &&
+      isNonExportableDeviceSigningKey(existing.privateKey)
+    ) {
+      return existing;
+    }
+
+    // Versions before 0.2.0 created exportable private keys. They cannot be
+    // made non-exportable in place, so discard the local installation and
+    // require a fresh family-approved activation with a protected key.
+    if (typeof existing.installationId === "string") {
+      clearPersistentIdempotencyNamespace(
+        this.deviceCommandNamespace(existing.installationId),
+      );
+    }
+    await vault.clear();
+    return null;
+  }
+
+  private deviceCareCommands(): IdempotentCommandRegistry {
+    const installationId = this.record?.installationId;
+    if (!installationId || !this.record?.credential) {
+      throw new Error("此浏览器尚未激活为陪伴设备");
+    }
+    const namespace = this.deviceCommandNamespace(installationId);
+    if (this.careCommands?.namespace === namespace) {
+      return this.careCommands.registry;
+    }
+    const registry = new IdempotentCommandRegistry(undefined, {
+      namespace,
+      persist: true,
+      scope: "device-care",
+    });
+    this.careCommands = { namespace, registry };
+    return registry;
+  }
+
+  private deviceCommandNamespace(installationId: string): string {
+    return `device:${installationId}`;
   }
 }
 

@@ -50,6 +50,17 @@ data class HouseholdView(
     val version: Int,
 )
 
+data class HouseholdMemberView(
+    val id: String,
+    val householdId: String,
+    val userId: String,
+    val displayName: String,
+    val status: String,
+    val roleCodes: List<String>,
+    val joinedAt: String?,
+    val version: Int,
+)
+
 data class CareRecipientView(
     val id: String,
     val householdId: String,
@@ -68,6 +79,44 @@ data class CareRecipientInput(
     val birthDate: String?,
     val timezone: String,
     val homeLabel: String?,
+)
+
+data class CareAuthorityView(
+    val id: String,
+    val householdId: String,
+    val recipientId: String,
+    val memberId: String,
+    val userId: String,
+    val displayName: String,
+    val relationshipLabel: String?,
+    val accessLevel: String,
+    val canManageProfile: Boolean,
+    val canManageConsent: Boolean,
+    val canManageRoutine: Boolean,
+    val canViewEvents: Boolean,
+    val canViewConversation: Boolean,
+    val canActivateDevice: Boolean,
+    val canRemoteCall: Boolean,
+    val receiveNotifications: Boolean,
+    val contactPriority: Int?,
+    val status: String,
+    val version: Int,
+)
+
+data class CareAuthorityInput(
+    val relationshipLabel: String?,
+    val accessLevel: String,
+    val canManageProfile: Boolean,
+    val canManageConsent: Boolean,
+    val canManageRoutine: Boolean,
+    val canViewEvents: Boolean,
+    val canViewConversation: Boolean,
+    val canActivateDevice: Boolean,
+    val canRemoteCall: Boolean,
+    val receiveNotifications: Boolean,
+    val contactPriority: Int?,
+    val status: String,
+    val version: Int?,
 )
 
 data class MemoryRevisionView(
@@ -252,21 +301,45 @@ data class ActivationPresentation(
     val expiresAt: String,
 )
 
+data class ActivationApprovalDevice(
+    val platform: String,
+    val installationKeyAlgorithm: String,
+    val manufacturer: String?,
+    val model: String?,
+    val osVersion: String?,
+    val appVersion: String?,
+    val keyFingerprintSuffix: String,
+)
+
+data class ActivationApprovalDetails(
+    val challengeId: String,
+    val claimedAt: String,
+    val claimNetworkSource: String,
+    val claimSnapshotToken: String,
+    val device: ActivationApprovalDevice,
+)
+
 data class DeviceInstallation(
     val installationId: String,
     val serverNonce: String,
     val keyFingerprint: String,
+    val installationKeyAlgorithm: String,
+    val protocolVersion: String,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("installationId", installationId)
         .put("serverNonce", serverNonce)
         .put("keyFingerprint", keyFingerprint)
+        .put("installationKeyAlgorithm", installationKeyAlgorithm)
+        .put("protocolVersion", protocolVersion)
 
     companion object {
         fun fromJson(json: JSONObject) = DeviceInstallation(
             installationId = json.getString("installationId"),
             serverNonce = json.getString("serverNonce"),
             keyFingerprint = json.getString("keyFingerprint"),
+            installationKeyAlgorithm = json.getString("installationKeyAlgorithm"),
+            protocolVersion = json.getString("protocolVersion"),
         )
     }
 }
@@ -343,6 +416,16 @@ data class DeviceContextView(
     val consentDecisions: Map<String, Boolean>,
 )
 
+enum class DeviceMediaDirective { CONTINUE, STOP }
+
+data class DeviceHeartbeatView(
+    val online: Boolean,
+    val serverTime: String,
+    val mediaDirective: DeviceMediaDirective,
+    val activeCompanionSessionId: String?,
+    val reason: String?,
+)
+
 data class CompanionModelConnection(
     val companionSessionId: String,
     val modelSessionId: String,
@@ -382,6 +465,7 @@ data class RemoteSessionView(
 
 data class RemoteJoinTicket(
     val sessionId: String,
+    val ticketId: String,
     val url: String,
     val token: String,
     val expiresAt: String,
@@ -395,12 +479,16 @@ data class LighthouseUiState(
     val busy: Boolean = false,
     val role: AppRole = AppRole.FAMILY,
     val signedIn: Boolean = false,
+    val companionDeviceLocked: Boolean = false,
     val user: UserView? = null,
     val households: List<HouseholdView> = emptyList(),
+    val householdMembers: List<HouseholdMemberView> = emptyList(),
     val selectedHouseholdId: String? = null,
     val recipients: List<CareRecipientView> = emptyList(),
     val selectedRecipientId: String? = null,
     val bindings: List<CompanionBindingView> = emptyList(),
+    val careAuthorities: List<CareAuthorityView> = emptyList(),
+    val authoritiesLoadedRecipientId: String? = null,
     val memories: List<MemoryView> = emptyList(),
     val routines: List<RoutineView> = emptyList(),
     val occurrences: List<OccurrenceView> = emptyList(),
@@ -408,11 +496,16 @@ data class LighthouseUiState(
     val familyTasks: List<FamilyTaskView> = emptyList(),
     val consents: List<ConsentStateView> = emptyList(),
     val activation: ActivationPresentation? = null,
+    val activationApprovalDetails: ActivationApprovalDetails? = null,
     val pendingDeviceActivation: PendingDeviceActivation? = null,
     val deviceActivated: Boolean = false,
     val companionContext: DeviceContextView? = null,
     val incomingRemoteSession: RemoteSessionView? = null,
     val activeRemoteSession: RemoteSessionView? = null,
+    val remoteCallFailureSessionId: String? = null,
+    val remoteCallFailureTitle: String? = null,
+    val remoteCallFailure: String? = null,
+    val pendingSystemAnswerSessionId: String? = null,
     val aiScreenVisible: Boolean = false,
     val qrScannerVisible: Boolean = false,
     val apiBaseUrl: String = "",

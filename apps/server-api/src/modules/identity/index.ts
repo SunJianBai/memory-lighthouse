@@ -3,6 +3,7 @@ export { IdentityApplicationService } from './identity.application.service';
 export { VerifiedEmailPolicy } from './domain/verified-email.policy';
 export { CurrentUser } from './http/current-user.decorator';
 export { UserAccessGuard } from './http/user-access.guard';
+export { AdminAccessGuard } from './http/admin-access.guard';
 export type { UserPrincipal } from './identity.types';
 export {
   IDENTITY_SECURITY_CONFIG,

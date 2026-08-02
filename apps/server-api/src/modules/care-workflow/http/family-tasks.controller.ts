@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
   Query,
@@ -18,6 +19,7 @@ import {
   FamilyTaskQueryDto,
   FinishFamilyTaskDto,
 } from './care-workflow.dto';
+import { requireMatchingIdempotencyKey } from './idempotency-key';
 
 @Controller('households/:householdId/family-tasks')
 @UseGuards(UserAccessGuard)
@@ -38,9 +40,13 @@ export class FamilyTasksController {
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
     @Param('taskId') taskId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body() body: ClaimFamilyTaskDto,
   ): Promise<FamilyTaskView> {
-    return this.workflow.claimFamilyTask(principal, householdId, taskId, body);
+    return this.workflow.claimFamilyTask(principal, householdId, taskId, {
+      ...body,
+      idempotencyKey: requireMatchingIdempotencyKey(idempotencyKey),
+    });
   }
 
   @Post(':taskId/resolve')
@@ -48,14 +54,13 @@ export class FamilyTasksController {
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
     @Param('taskId') taskId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body() body: FinishFamilyTaskDto,
   ): Promise<FamilyTaskView> {
-    return this.workflow.resolveFamilyTask(
-      principal,
-      householdId,
-      taskId,
-      body,
-    );
+    return this.workflow.resolveFamilyTask(principal, householdId, taskId, {
+      ...body,
+      idempotencyKey: requireMatchingIdempotencyKey(idempotencyKey),
+    });
   }
 
   @Post(':taskId/dismiss')
@@ -63,13 +68,12 @@ export class FamilyTasksController {
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
     @Param('taskId') taskId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Body() body: FinishFamilyTaskDto,
   ): Promise<FamilyTaskView> {
-    return this.workflow.dismissFamilyTask(
-      principal,
-      householdId,
-      taskId,
-      body,
-    );
+    return this.workflow.dismissFamilyTask(principal, householdId, taskId, {
+      ...body,
+      idempotencyKey: requireMatchingIdempotencyKey(idempotencyKey),
+    });
   }
 }

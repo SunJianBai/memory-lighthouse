@@ -17,7 +17,15 @@ import {
   Sparkles,
   Volume2,
 } from "lucide-react";
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import {
   createInitialAgentState,
   transitionAgent,
@@ -60,19 +68,34 @@ type CareExperienceProps = {
       occurrenceId: string,
       source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE",
     ) => Promise<void>;
+    requestFamily?: (
+      source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE" | "COMPANION_TIMEOUT",
+      occurrenceId?: string,
+    ) => Promise<void>;
   };
   serverBackedMode?: boolean;
 };
 
-export const CareExperience = ({
-  presenterMode = false,
-  runtimeState,
-  sessionCoordinator,
-  serverBackedMode = false,
-}: CareExperienceProps) => {
+export type CareExperienceHandle = {
+  stopLocalRuntime: (reason: string) => void;
+};
+
+export const CareExperience = forwardRef<
+  CareExperienceHandle,
+  CareExperienceProps
+>(function CareExperience(
+  {
+    presenterMode = false,
+    runtimeState,
+    sessionCoordinator,
+    serverBackedMode = false,
+  },
+  ref,
+) {
   const { state: demoState, updateState, addEvent } = useAppState();
   const state = runtimeState ?? demoState;
   const [coordinatorError, setCoordinatorError] = useState("");
+  const [familyRequestPending, setFamilyRequestPending] = useState(false);
   const [agent, dispatch] = useReducer(transitionAgent, undefined, () =>
     createInitialAgentState(),
   );
@@ -92,6 +115,14 @@ export const CareExperience = ({
   );
   const { session, start, stop, speakReplay, requestModelAction } =
     useOmniSession(state, activeRoutine);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      stopLocalRuntime: (reason: string) => stop(reason),
+    }),
+    [stop],
+  );
 
   useEffect(() => {
     const timer = window.setInterval(() => setClock(new Date()), 1000);
@@ -345,14 +376,31 @@ export const CareExperience = ({
     setPresenterCue("已按长者需求缩短并重复指令。");
   };
 
-  const requestFamily = (source: "user" | "agent" | "demo" = "user") => {
-    if (serverBackedMode) {
-      setCoordinatorError(
-        "服务端家庭联系请求接口尚未开放，请使用家属端远程通话；本次未生成虚假待办",
-      );
-      return;
-    }
+  const requestFamily = async (
+    source: "user" | "agent" | "demo" = "user",
+  ) => {
     if (agent.phase === "idle" || agent.phase === "completed") return;
+    if (serverBackedMode) {
+      if (!sessionCoordinator?.requestFamily) {
+        setCoordinatorError("设备端家庭联系接口尚未就绪，请刷新后重试。");
+        return;
+      }
+      setCoordinatorError("");
+      setFamilyRequestPending(true);
+      try {
+        await sessionCoordinator.requestFamily(
+          source === "agent" ? "COMPANION_TIMEOUT" : "RECIPIENT_BUTTON",
+          currentRoutine?.occurrenceId,
+        );
+      } catch (error) {
+        setCoordinatorError(
+          error instanceof Error ? error.message : "联系家人请求失败，请重试。",
+        );
+        return;
+      } finally {
+        setFamilyRequestPending(false);
+      }
+    }
     dispatch({
       type:
         agent.phase === "awaiting_confirmation"
@@ -382,7 +430,7 @@ export const CareExperience = ({
       session.status === "live" &&
       shouldNotifyFamily(agent, enabledRoutines, clock)
     ) {
-      requestFamily("agent");
+      void requestFamily("agent");
     }
   }, [agent, clock, enabledRoutines, session.status]);
 
@@ -472,7 +520,7 @@ export const CareExperience = ({
     } else if (intent === "repeat") {
       repeatReminder();
     } else if (intent === "family") {
-      requestFamily("user");
+      void requestFamily("user");
     }
   }, [session.status, session.userTranscript, session.userTranscriptFinal]);
 
@@ -637,22 +685,17 @@ export const CareExperience = ({
           <button
             className="care-action-button"
             type="button"
-            disabled={session.status !== "live" || serverBackedMode}
-            onClick={() => requestFamily("user")}
-            title={
-              serverBackedMode
-                ? "服务端家庭联系请求接口尚未开放；请使用上方远程来电功能"
-                : undefined
-            }
+            disabled={session.status !== "live" || familyRequestPending}
+            onClick={() => void requestFamily("user")}
           >
             <HeartHandshake aria-hidden="true" size={23} />
-            {serverBackedMode ? "联系家人（待接入）" : "联系家人"}
+            {familyRequestPending ? "正在联系…" : "联系家人"}
           </button>
         </div>
 
         <p className="care-boundary">
           {serverBackedMode
-            ? "真实会话使用服务器 Prompt 与 Consent Snapshot；尚未开放的家庭联系动作会保持禁用，不会伪造成功。"
+            ? "真实会话使用服务器 Prompt 与 Consent Snapshot；联系家人会生成可追踪的家属待办，不会直接开启摄像头或麦克风。"
             : state.provider.provider === "cloud"
               ? "守忆灯塔不识别药片、剂量或诊断健康状况。ModelBest 官方双工协议不返回用户转写，完成与联系家人请点击按钮留痕。"
               : "守忆灯塔只复述家属录入的信息，不识别药片、剂量或诊断健康状况。"}
@@ -731,7 +774,7 @@ export const CareExperience = ({
             <button
               type="button"
               disabled={session.status !== "live"}
-              onClick={() => requestFamily("demo")}
+              onClick={() => void requestFamily("demo")}
             >
               <span>05</span>
               <div>
@@ -795,4 +838,4 @@ export const CareExperience = ({
       )}
     </div>
   );
-};
+});

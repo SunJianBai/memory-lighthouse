@@ -14,10 +14,12 @@ rtc:
   packet_buffer_size_audio: 120
 
 room:
-  # Rooms have unguessable server-generated names and participant tokens are
-  # scoped to one room. The application issues the first join token rather
-  # than calling createRoom explicitly, so auto-creation must remain enabled.
-  auto_create: true
+  # NestJS explicitly creates a max-two-participant room after onsite answer
+  # and before token minting. Self-hosted participant removal does not revoke
+  # refreshed tokens, so terminal rooms must never be auto-created again.
+  auto_create: false
+  # Do not leave an accepted-but-never-joined room open beyond its initial
+  # 60-second admission window. This complements, not replaces, deleteRoom.
   empty_timeout: 60
   departure_timeout: 20
   max_participants: 2

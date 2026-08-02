@@ -3,13 +3,19 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../infrastructure/database/prisma.module';
 import { HouseholdModule } from '../household/household.module';
 import { IdentityModule } from '../identity';
+import { RealtimeMediaSecurityModule } from '../realtime-communication/realtime-media-security.module';
 import { HouseholdConsentAccessAdapter } from './adapters/household-consent-access.adapter';
 import { ConsentApplicationService } from './consent.application.service';
 import { CONSENT_ACCESS_PORT } from './consent.constants';
 import { ConsentController } from './http/consent.controller';
 
 @Module({
-  imports: [PrismaModule, IdentityModule, HouseholdModule],
+  imports: [
+    PrismaModule,
+    IdentityModule,
+    HouseholdModule,
+    RealtimeMediaSecurityModule,
+  ],
   controllers: [ConsentController],
   providers: [
     HouseholdConsentAccessAdapter,

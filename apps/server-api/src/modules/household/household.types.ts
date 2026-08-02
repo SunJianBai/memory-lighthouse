@@ -106,6 +106,12 @@ export interface UpdateHouseholdCommand {
 export interface UpdateHouseholdMemberCommand {
   roleCodes: HouseholdRoleCode[];
   version: number;
+  currentPassword: string;
+}
+
+export interface RemoveHouseholdMemberCommand {
+  version: number;
+  currentPassword: string;
 }
 
 export interface CreateInvitationCommand {
@@ -132,6 +138,7 @@ export interface UpdateCareRecipientCommand {
 }
 
 export interface PutCareAuthorityCommand {
+  currentPassword: string;
   relationshipLabel?: string | null;
   accessLevel: string;
   canManageProfile: boolean;

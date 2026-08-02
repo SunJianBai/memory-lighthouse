@@ -11,7 +11,9 @@ import {
 } from '../../infrastructure/database/generated/prisma/client';
 import { PrismaService } from '../../infrastructure/database/prisma.service';
 import type { DevicePrincipal } from '../device-activation/device-activation.types';
+import { CompanionMediaControlService } from '../companion-session/companion-media-control.service';
 import { HouseholdAccessPolicy } from '../household/domain/household-access.policy';
+import { IdentityApplicationService } from '../identity/identity.application.service';
 import type { UserPrincipal } from '../identity/identity.types';
 import {
   assertRemoteTransition,
@@ -27,7 +29,12 @@ import {
   REMOTE_MEDIA_LEASE_TTL_SECONDS,
   REMOTE_POLICY_MODE,
   REMOTE_RING_TIMEOUT_SECONDS,
+  REMOTE_ROOM_PROVISIONING_FENCE_SECONDS,
+  REMOTE_ROOM_PROVISIONING_STALE_SECONDS,
+  REMOTE_ROOM_PROVISIONING_TRANSACTION_TIMEOUT_MS,
   REMOTE_SESSION_STATUS,
+  REMOTE_TERMINATION_TRANSACTION_TIMEOUT_MS,
+  TERMINAL_REMOTE_STATUSES,
 } from './realtime.constants';
 import {
   RemoteCallNotAllowedException,
@@ -36,6 +43,7 @@ import {
   RemoteDeviceOfflineException,
   RemoteIdempotencyConflictException,
   RemoteIdempotencyKeyException,
+  RemoteJoinTicketAlreadyIssuedException,
   RemoteMediaInvalidException,
   RemoteSessionNotFoundException,
   RemoteSessionStateException,
@@ -50,8 +58,16 @@ import type {
 } from './realtime.types';
 import type { LiveKitPort } from './ports/livekit.port';
 import type { MediaLeaseOwner, MediaLeasePort } from './ports/media-lease.port';
+import { RemoteMediaSecurityCoordinator } from './remote-media-security.coordinator';
 
 const SERIALIZABLE_RETRIES = 3;
+
+class RoomProvisioningUncertainError extends Error {
+  constructor(readonly originalError: unknown) {
+    super('LiveKit room provisioning outcome is uncertain');
+    this.name = 'RoomProvisioningUncertainError';
+  }
+}
 
 type SessionWithParticipants = Prisma.RemoteAssistanceSessionGetPayload<{
   include: { participants: true };
@@ -100,6 +116,7 @@ export interface UpdateRemotePolicyCommand {
   microphoneAllowed: boolean;
   sendFamilyAudioAllowed: boolean;
   version: number;
+  currentPassword: string;
 }
 
 @Injectable()
@@ -111,9 +128,12 @@ export class RealtimeCommunicationApplicationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly householdAccess: HouseholdAccessPolicy,
+    private readonly identity: IdentityApplicationService,
+    private readonly companionMedia: CompanionMediaControlService,
     private readonly config: ConfigService,
     @Inject(MEDIA_LEASE_PORT) private readonly leases: MediaLeasePort,
     @Inject(LIVEKIT_PORT) private readonly livekit: LiveKitPort,
+    private readonly mediaSecurity: RemoteMediaSecurityCoordinator,
   ) {}
 
   async getCurrentDeviceSession(
@@ -172,7 +192,7 @@ export class RealtimeCommunicationApplicationService {
       householdId,
       bindingId,
     );
-    const [currentLease, openSession] = await Promise.all([
+    const [currentLease, openSession, cleanupPending] = await Promise.all([
       this.leases.current(bindingId),
       this.prisma.remoteAssistanceSession.findFirst({
         where: {
@@ -181,6 +201,7 @@ export class RealtimeCommunicationApplicationService {
         },
         select: { id: true },
       }),
+      this.mediaSecurity.hasPendingCleanup(this.prisma, bindingId),
     ]);
     return {
       bindingId,
@@ -188,7 +209,13 @@ export class RealtimeCommunicationApplicationService {
       // MySQL is the durable source of lifecycle state. Redis is the fast
       // mutual-exclusion path. Reporting either as busy avoids advertising an
       // immediately unusable device while a lost-lease session is reconciled.
-      busy: currentLease !== null || openSession !== null,
+      // An AI lease is intentionally callable: RINGING leaves companionship
+      // running and onsite acceptance performs the authoritative handoff.
+      busy:
+        (currentLease !== null && currentLease.ownerType !== 'AI_COMPANION') ||
+        openSession !== null ||
+        cleanupPending,
+      companionActive: currentLease?.ownerType === 'AI_COMPANION',
       answerMode: REMOTE_ANSWER_MODE.onsite,
       lastSeenAt: binding.device.lastSeenAt?.toISOString() ?? null,
     };
@@ -212,6 +239,10 @@ export class RealtimeCommunicationApplicationService {
   async updateRemoteAccessPolicy(
     command: UpdateRemotePolicyCommand,
   ): Promise<RemoteAccessPolicyView> {
+    await this.identity.reauthenticateUser(
+      command.principal.userId,
+      command.currentPassword,
+    );
     const binding = await this.requireFamilyBinding(
       command.principal,
       command.householdId,
@@ -228,35 +259,55 @@ export class RealtimeCommunicationApplicationService {
     );
     const policy =
       binding.remoteAccessPolicy ?? (await this.createDefaultPolicy(binding));
-    const result = await this.prisma.remoteAccessPolicy.updateMany({
-      where: {
-        id: policy.id,
-        householdId: command.householdId,
-        bindingId: command.bindingId,
-        version: command.version,
-        status: 'ACTIVE',
-      },
-      data: {
-        // This release deliberately exposes only onsite answer. There is no
-        // silent/administrator mode and no family-controlled localConfirmedAt.
-        mode: REMOTE_POLICY_MODE.onsite,
-        cameraAllowed: command.cameraAllowed,
-        microphoneAllowed: command.microphoneAllowed,
-        sendFamilyAudioAllowed: command.sendFamilyAudioAllowed,
-        countdownSeconds: 10,
-        version: { increment: 1 },
-      },
+    const now = new Date();
+    const updated = await this.serializable(async (transaction) => {
+      await this.householdAccess.requireRecipientAction(
+        transaction,
+        command.principal.userId,
+        command.householdId,
+        binding.recipientId,
+        'MANAGE_RECIPIENT',
+      );
+      const result = await transaction.remoteAccessPolicy.updateMany({
+        where: {
+          id: policy.id,
+          householdId: command.householdId,
+          bindingId: command.bindingId,
+          version: command.version,
+          status: 'ACTIVE',
+        },
+        data: {
+          // This release deliberately exposes only onsite answer. There is no
+          // silent/admin mode and no family-controlled localConfirmedAt.
+          mode: REMOTE_POLICY_MODE.onsite,
+          cameraAllowed: command.cameraAllowed,
+          microphoneAllowed: command.microphoneAllowed,
+          sendFamilyAudioAllowed: command.sendFamilyAudioAllowed,
+          countdownSeconds: 10,
+          version: { increment: 1 },
+        },
+      });
+      if (result.count !== 1) {
+        throw new RemoteSessionStateException(['CURRENT_POLICY_VERSION']);
+      }
+      const current = await transaction.remoteAccessPolicy.findUnique({
+        where: { id: policy.id },
+      });
+      if (!current) {
+        throw new RemoteCallNotAllowedException();
+      }
+      // Any policy edit invalidates the authorization snapshot for existing
+      // rooms. Mark those sessions terminal in the same commit so a crash
+      // cannot leave admitted media under the previous policy.
+      await this.mediaSecurity.markBindingRevoked(
+        transaction,
+        binding.id,
+        'REMOTE_POLICY_CHANGED',
+        now,
+      );
+      return current;
     });
-    if (result.count !== 1) {
-      throw new RemoteSessionStateException(['CURRENT_POLICY_VERSION']);
-    }
-    const updated = await this.prisma.remoteAccessPolicy.findUnique({
-      where: { id: policy.id },
-    });
-    if (!updated) {
-      throw new RemoteCallNotAllowedException();
-    }
-    await this.revokeSessionsDisallowedByPolicy(updated);
+    await this.mediaSecurity.cleanupPendingForBinding(binding.id);
     return this.toPolicyView(updated);
   }
 
@@ -300,8 +351,11 @@ export class RealtimeCommunicationApplicationService {
     });
     if (replay) {
       this.assertRemoteReplay(replay, member.id, binding.id, command.media);
-      await this.ensureReplayLease(replay);
-      return this.toSessionView(replay);
+      return this.toSessionView(await this.ensureReplayLease(replay));
+    }
+
+    if (await this.mediaSecurity.hasPendingCleanup(this.prisma, binding.id)) {
+      throw new RemoteDeviceBusyException();
     }
 
     const leaseOwner = this.leaseOwner(sessionId);
@@ -311,7 +365,12 @@ export class RealtimeCommunicationApplicationService {
     );
     const now = new Date();
     try {
-      await this.reconcileDisplacedSessions(binding.id, sessionId);
+      if (reservation === 'REMOTE_RESERVED') {
+        // Only a caller that actually owns the Redis lease may reconcile a
+        // stale durable session. AI_HANDOFF_PENDING deliberately leaves the
+        // companion owner in place while the first onsite call rings.
+        await this.reconcileDisplacedSessions(binding.id, sessionId);
+      }
       const created = await this.serializable(async (transaction) => {
         const existing = await transaction.remoteAssistanceSession.findUnique({
           where: { id: sessionId },
@@ -389,6 +448,11 @@ export class RealtimeCommunicationApplicationService {
         if (busy) {
           throw new RemoteDeviceBusyException();
         }
+        if (
+          await this.mediaSecurity.hasPendingCleanup(transaction, binding.id)
+        ) {
+          throw new RemoteDeviceBusyException();
+        }
         const session = await transaction.remoteAssistanceSession.create({
           data: {
             id: sessionId,
@@ -421,10 +485,20 @@ export class RealtimeCommunicationApplicationService {
         );
         return session;
       });
+      if (
+        reservation === 'REMOTE_RESERVED' &&
+        isRemoteTerminal(created.status)
+      ) {
+        await this.safeRelease(binding.id, leaseOwner);
+        await this.cleanupFinishedSession(created);
+      }
       return this.toSessionView(created);
     } catch (error) {
       if (reservation === 'REMOTE_RESERVED') {
-        await this.safeRelease(binding.id, leaseOwner);
+        await this.releaseProvisionalRemoteLeaseIfUnowned(
+          binding.id,
+          sessionId,
+        );
       }
       throw error;
     }
@@ -456,7 +530,14 @@ export class RealtimeCommunicationApplicationService {
     sessionId: string,
   ): Promise<RemoteSessionView> {
     const session = await this.requireDeviceSession(principal, sessionId);
-    assertRemoteTransition(session.status, REMOTE_SESSION_STATUS.accepted);
+    const isAcceptedReplay = [
+      REMOTE_SESSION_STATUS.accepted,
+      REMOTE_SESSION_STATUS.connecting,
+      REMOTE_SESSION_STATUS.active,
+    ].includes(session.status as never);
+    if (!isAcceptedReplay) {
+      assertRemoteTransition(session.status, REMOTE_SESSION_STATUS.accepted);
+    }
     const { binding } =
       await this.requireCurrentSessionEligibilityOrRevoke(session);
     if (binding.bindingVersion !== principal.bindingVersion) {
@@ -468,21 +549,62 @@ export class RealtimeCommunicationApplicationService {
       });
       throw new RemoteCallNotAllowedException();
     }
+    if (isAcceptedReplay) {
+      const owner = this.leaseOwner(session.id);
+      if (
+        !(await this.leases.renew(
+          session.bindingId,
+          owner,
+          REMOTE_MEDIA_LEASE_TTL_SECONDS,
+        ))
+      ) {
+        await this.finishSession(session, {
+          targetStatus: REMOTE_SESSION_STATUS.failed,
+          actorType: 'SYSTEM',
+          actorId: null,
+          reason: 'MEDIA_LEASE_LOST',
+        });
+        throw new RemoteDeviceBusyException();
+      }
+      const confirmed = await this.prisma.remoteAssistanceSession.findUnique({
+        where: { id: session.id },
+      });
+      if (!confirmed) {
+        await this.safeRelease(session.bindingId, owner);
+        throw new RemoteSessionNotFoundException();
+      }
+      if (
+        [
+          REMOTE_SESSION_STATUS.accepted,
+          REMOTE_SESSION_STATUS.connecting,
+          REMOTE_SESSION_STATUS.active,
+        ].includes(confirmed.status as never)
+      ) {
+        return this.toSessionView(confirmed);
+      }
+      if (isRemoteTerminal(confirmed.status)) {
+        await this.cleanupFinishedSession(confirmed);
+      }
+      throw new RemoteSessionStateException([
+        REMOTE_SESSION_STATUS.accepted,
+        REMOTE_SESSION_STATUS.connecting,
+        REMOTE_SESSION_STATUS.active,
+      ]);
+    }
     const owner = this.leaseOwner(session.id);
     const handoff = await this.claimRemoteLeaseForAcceptance(session, owner);
     if (!handoff.claimed) {
-      await this.finishSession(session, {
-        targetStatus: REMOTE_SESSION_STATUS.failed,
-        actorType: 'SYSTEM',
-        actorId: null,
-        reason: 'MEDIA_LEASE_LOST',
-      });
+      // An AI start may have acquired its provisional lease but not committed
+      // the durable CompanionSession yet. Preserve the ringing call and let a
+      // short client retry observe either the committed AI owner (transfer) or
+      // the rolled-back lease (acquire); never terminalize a valid call from
+      // this transient cross-store window.
       throw new RemoteDeviceBusyException();
     }
     const now = new Date();
     let updated: RemoteAssistanceSession | null;
     try {
-      updated = await this.prisma.$transaction(async (transaction) => {
+      updated = await this.serializable(async (transaction) => {
         const currentBinding = await transaction.companionBinding.findFirst({
           where: {
             id: session.bindingId,
@@ -534,29 +656,11 @@ export class RealtimeCommunicationApplicationService {
         // Family media takes exclusive ownership. Persisting the interruption
         // before issuing any LiveKit token prevents the AI session from being
         // treated as active after a device reconnect.
-        await transaction.modelSession.updateMany({
-          where: {
-            companionSession: {
-              bindingId: session.bindingId,
-              status: 'ACTIVE',
-            },
-            status: 'ACTIVE',
-          },
-          data: {
-            status: 'ENDED',
-            endedAt: now,
-            endReason: 'REMOTE_ASSISTANCE_ACCEPTED',
-          },
-        });
-        await transaction.companionSession.updateMany({
-          where: { bindingId: session.bindingId, status: 'ACTIVE' },
-          data: {
-            status: 'ENDED',
-            endedAt: now,
-            endReason: 'REMOTE_ASSISTANCE_ACCEPTED',
-            version: { increment: 1 },
-          },
-        });
+        await this.companionMedia.interruptForRemoteAssistance(
+          transaction,
+          session.bindingId,
+          now,
+        );
         await this.appendSessionEvent(transaction, session.id, {
           eventType: 'ACCEPTED_ON_DEVICE',
           actorType: 'DEVICE',
@@ -574,19 +678,39 @@ export class RealtimeCommunicationApplicationService {
         });
       });
     } catch (error) {
-      await this.safeRelease(session.bindingId, owner);
-      if (handoff.previousAiOwner) {
+      if (error instanceof RemoteSessionStateException) {
         try {
-          await this.leases.acquire(
-            session.bindingId,
-            handoff.previousAiOwner,
-            REMOTE_MEDIA_LEASE_TTL_SECONDS,
-          );
-        } catch (restoreError) {
+          const acceptedReplay =
+            await this.prisma.remoteAssistanceSession.findUnique({
+              where: { id: session.id },
+            });
+          if (
+            acceptedReplay &&
+            [
+              REMOTE_SESSION_STATUS.accepted,
+              REMOTE_SESSION_STATUS.connecting,
+              REMOTE_SESSION_STATUS.active,
+            ].includes(acceptedReplay.status as never)
+          ) {
+            // The same device can deliver an answer through both the page and
+            // native call surface. A concurrent database-CAS winner owns the
+            // deterministic remote lease, so this delivery is an idempotent
+            // replay rather than a failed answer.
+            return this.toSessionView(acceptedReplay);
+          }
+        } catch (lookupError) {
           this.logger.warn(
-            `AI media lease restore deferred (${restoreError instanceof Error ? restoreError.name : 'unknown'})`,
+            `Concurrent acceptance replay lookup deferred (${lookupError instanceof Error ? lookupError.name : 'unknown'})`,
           );
         }
+      }
+      const acceptanceLeaseReleased =
+        await this.releaseAcceptanceLeaseIfUnowned(session, owner);
+      if (acceptanceLeaseReleased && handoff.previousAiOwner) {
+        await this.restoreAiLeaseIfStillActive(
+          session.bindingId,
+          handoff.previousAiOwner,
+        );
       }
       if (
         error instanceof RemoteCallNotAllowedException ||
@@ -770,12 +894,50 @@ export class RealtimeCommunicationApplicationService {
       throw new TypeError('expireStaleSessions requires a valid Date');
     }
     const sessions = await this.prisma.remoteAssistanceSession.findMany({
-      where: { status: { in: [...OPEN_REMOTE_STATUSES] } },
+      where: {
+        OR: [
+          { status: { in: [...OPEN_REMOTE_STATUSES] } },
+          {
+            status: { in: [...TERMINAL_REMOTE_STATUSES] },
+            roomCleanupStatus: 'PENDING',
+          },
+        ],
+      },
       orderBy: { requestedAt: 'asc' },
     });
     let expired = 0;
     let failed = 0;
     for (const session of sessions) {
+      if (isRemoteTerminal(session.status)) {
+        await this.cleanupFinishedSession(session);
+        continue;
+      }
+      const staleProvisioningBefore = new Date(
+        now.getTime() - REMOTE_ROOM_PROVISIONING_STALE_SECONDS * 1_000,
+      );
+      await this.releaseStaleUnmintedJoinTicketReservations(
+        session.id,
+        staleProvisioningBefore,
+      );
+      const provisioningRecovery = await this.finishSession(session, {
+        targetStatus: REMOTE_SESSION_STATUS.failed,
+        actorType: 'SYSTEM',
+        actorId: null,
+        reason: 'ROOM_PROVISIONING_STALLED',
+        roomCleanupNotBefore: new Date(
+          now.getTime() + REMOTE_ROOM_PROVISIONING_FENCE_SECONDS * 1_000,
+        ),
+        onlyIfStaleProvisioningBefore: staleProvisioningBefore,
+      });
+      if (isRemoteTerminal(provisioningRecovery.status)) {
+        if (
+          provisioningRecovery.status === REMOTE_SESSION_STATUS.failed &&
+          provisioningRecovery.endReason === 'ROOM_PROVISIONING_STALLED'
+        ) {
+          failed += 1;
+        }
+        continue;
+      }
       const result = await this.expireOrFailStaleSession(session, now);
       if (result === REMOTE_SESSION_STATUS.expired) {
         expired += 1;
@@ -937,9 +1099,98 @@ export class RealtimeCommunicationApplicationService {
       }
     }
 
+    const ticketId = ulid();
+    const ticketIssuedAt = new Date();
+    const reserved = await this.prisma.remoteSessionParticipant.updateMany({
+      where: { id: row.id, joinTicketStatus: null },
+      data: {
+        joinTicketId: ticketId,
+        joinTicketStatus: 'ISSUING',
+        joinTicketIssuedAt: ticketIssuedAt,
+      },
+    });
+    if (reserved.count !== 1) {
+      throw new RemoteJoinTicketAlreadyIssuedException();
+    }
+
     const family = participant.role === 'FAMILY';
     const identity = this.participantIdentity(session.id, row);
     let ticket: Awaited<ReturnType<LiveKitPort['issueJoinTicket']>>;
+    try {
+      await this.requirePersistedSessionMayMintJoinTicket(session.id);
+    } catch (error) {
+      await this.releaseUnmintedJoinTicketReservation(row.id, ticketId);
+      throw error;
+    }
+    try {
+      await this.ensureRoomWhileSessionOpen(session.id, row.id, ticketId);
+    } catch (error) {
+      if (error instanceof RoomProvisioningUncertainError) {
+        // FAILED + durable cleanup fence + revocation of every participant
+        // ticket are committed by finishSession as one locked transaction.
+        // A stale PROVISIONING row also lets the expiry runner recover a process
+        // crash that occurs before this compensation starts.
+        await this.finishSession(session, {
+          targetStatus: REMOTE_SESSION_STATUS.failed,
+          actorType: 'SYSTEM',
+          actorId: null,
+          reason: 'MEDIA_PROVIDER_UNAVAILABLE',
+          roomCleanupNotBefore: new Date(
+            Date.now() + REMOTE_ROOM_PROVISIONING_FENCE_SECONDS * 1_000,
+          ),
+        });
+        throw error.originalError;
+      }
+      if (error instanceof RemoteSessionStateException) {
+        await this.revokeReservedJoinTicket(row.id, ticketId);
+        await this.finishSession(session, {
+          targetStatus: REMOTE_SESSION_STATUS.failed,
+          actorType: 'SYSTEM',
+          actorId: null,
+          reason: 'JOIN_AUTHORITY_LOST',
+        });
+      } else {
+        await this.releaseUnmintedJoinTicketReservation(row.id, ticketId);
+      }
+      throw error;
+    }
+    try {
+      // Room creation is an external call and can race with hang-up or
+      // revocation. Re-read durable state before minting and remove a room
+      // that lost that race, so a terminal session cannot recreate media.
+      await this.requirePersistedSessionMayMintJoinTicket(session.id);
+    } catch (error) {
+      if (
+        error instanceof RemoteSessionStateException ||
+        error instanceof RemoteCallNotAllowedException
+      ) {
+        await this.revokeReservedJoinTicket(row.id, ticketId);
+        // The durable read conclusively says this session may no longer own a
+        // room. Drive it through the unified terminal cleanup instead of
+        // deleting a shared room from a transient database-error path.
+        try {
+          await this.finishSession(session, {
+            targetStatus: REMOTE_SESSION_STATUS.failed,
+            actorType: 'SYSTEM',
+            actorId: null,
+            reason: 'JOIN_AUTHORITY_LOST',
+          });
+        } catch (cleanupError) {
+          this.logger.warn(
+            `Invalid join provisioning cleanup deferred (${cleanupError instanceof Error ? cleanupError.name : 'unknown'})`,
+          );
+        }
+      } else if (error instanceof RemoteSessionNotFoundException) {
+        await this.revokeReservedJoinTicket(row.id, ticketId);
+        await this.safeDeleteRoom(session.livekitRoomName);
+      } else {
+        // No JWT has been minted yet. Roll back only this participant's
+        // reservation so a transient database read cannot strand the open
+        // two-party call or consume its one-time admission forever.
+        await this.releaseUnmintedJoinTicketReservation(row.id, ticketId);
+      }
+      throw error;
+    }
     try {
       ticket = await this.livekit.issueJoinTicket({
         roomName: session.livekitRoomName,
@@ -958,12 +1209,14 @@ export class RealtimeCommunicationApplicationService {
         metadata: {
           remoteSessionId: session.id,
           participantId: row.id,
+          ticketId,
           role: participant.role,
           recording: 'false',
           transcription: 'false',
         },
       });
     } catch (error) {
+      await this.revokeReservedJoinTicket(row.id, ticketId);
       await this.finishSession(session, {
         targetStatus: REMOTE_SESSION_STATUS.failed,
         actorType: 'SYSTEM',
@@ -971,6 +1224,30 @@ export class RealtimeCommunicationApplicationService {
         reason: 'MEDIA_PROVIDER_UNAVAILABLE',
       });
       throw error;
+    }
+    const issued = await this.prisma.remoteSessionParticipant.updateMany({
+      where: {
+        id: row.id,
+        joinTicketId: ticketId,
+        joinTicketStatus: 'ROOM_READY',
+      },
+      data: {
+        joinTicketStatus: 'ISSUED',
+        joinTicketIssuedAt: new Date(),
+        joinTicketExpiresAt: ticket.expiresAt,
+      },
+    });
+    if (issued.count !== 1) {
+      await this.revokeReservedJoinTicket(row.id, ticketId);
+      // The JWT is returned only after this durable transition succeeds, so a
+      // losing pre-delivery attempt cannot have admitted a client. Do not
+      // remove the deterministic participant identity here: a stale
+      // ROOM_READY reservation may already have been safely reset and reused
+      // by a newer attempt in the same still-open room.
+      throw new RemoteSessionStateException([
+        REMOTE_SESSION_STATUS.connecting,
+        REMOTE_SESSION_STATUS.active,
+      ]);
     }
     const current = await this.prisma.remoteAssistanceSession.findUnique({
       where: { id: session.id },
@@ -986,7 +1263,10 @@ export class RealtimeCommunicationApplicationService {
       // Never return a token minted concurrently with cancellation/revocation.
       // The participant id was persisted before minting, so the same identity
       // can also be revoked by normal terminal cleanup.
-      await this.safeRemoveParticipant(session.livekitRoomName, identity);
+      await this.revokeReservedJoinTicket(row.id, ticketId);
+      if (!(await this.safeDeleteRoom(session.livekitRoomName))) {
+        await this.safeRemoveParticipant(session.livekitRoomName, identity);
+      }
       throw new RemoteSessionStateException([
         REMOTE_SESSION_STATUS.connecting,
         REMOTE_SESSION_STATUS.active,
@@ -994,6 +1274,7 @@ export class RealtimeCommunicationApplicationService {
     }
     return {
       sessionId: session.id,
+      ticketId,
       participantId: row.id,
       participantIdentity: identity,
       url: ticket.url,
@@ -1005,6 +1286,253 @@ export class RealtimeCommunicationApplicationService {
     };
   }
 
+  private async revokeReservedJoinTicket(
+    participantId: string,
+    ticketId: string,
+  ): Promise<void> {
+    await this.prisma.remoteSessionParticipant.updateMany({
+      where: {
+        id: participantId,
+        joinTicketId: ticketId,
+        joinTicketStatus: {
+          in: ['ISSUING', 'PROVISIONING', 'ROOM_READY', 'ISSUED'],
+        },
+      },
+      data: {
+        joinTicketStatus: 'REVOKED',
+        joinTicketRevokedAt: new Date(),
+      },
+    });
+  }
+
+  private async releaseUnmintedJoinTicketReservation(
+    participantId: string,
+    ticketId: string,
+  ): Promise<void> {
+    await this.prisma.remoteSessionParticipant.updateMany({
+      where: {
+        id: participantId,
+        joinTicketId: ticketId,
+        joinTicketStatus: {
+          in: ['ISSUING', 'PROVISIONING', 'ROOM_READY'],
+        },
+      },
+      data: {
+        joinTicketId: null,
+        joinTicketStatus: null,
+        joinTicketIssuedAt: null,
+        joinTicketExpiresAt: null,
+      },
+    });
+  }
+
+  private async ensureRoomWhileSessionOpen(
+    sessionId: string,
+    participantId: string,
+    ticketId: string,
+  ): Promise<void> {
+    let provisioningStarted = false;
+    try {
+      const claim = await this.serializable(
+        async (transaction) => {
+          await this.lockRemoteSession(transaction, sessionId);
+          const current = await transaction.remoteAssistanceSession.findUnique({
+            where: { id: sessionId },
+          });
+          if (
+            !current ||
+            ![
+              REMOTE_SESSION_STATUS.accepted,
+              REMOTE_SESSION_STATUS.connecting,
+              REMOTE_SESSION_STATUS.active,
+            ].includes(current.status as never)
+          ) {
+            throw new RemoteSessionStateException([
+              REMOTE_SESSION_STATUS.accepted,
+              REMOTE_SESSION_STATUS.connecting,
+              REMOTE_SESSION_STATUS.active,
+            ]);
+          }
+
+          // Lock the session before choosing a room-provisioning owner. Only
+          // one participant may enter PROVISIONING; every other ticket stays
+          // ISSUING and fails transiently. This prevents two first-ticket
+          // requests from launching provider calls whose late completions
+          // could straddle terminal cleanup.
+          if (current.roomProvisionedAt) {
+            const ready = await transaction.remoteSessionParticipant.updateMany(
+              {
+                where: {
+                  id: participantId,
+                  sessionId,
+                  joinTicketId: ticketId,
+                  joinTicketStatus: 'ISSUING',
+                },
+                data: {
+                  joinTicketStatus: 'ROOM_READY',
+                  joinTicketIssuedAt: new Date(),
+                },
+              },
+            );
+            if (ready.count !== 1) {
+              throw new RemoteSessionStateException([
+                REMOTE_SESSION_STATUS.accepted,
+                REMOTE_SESSION_STATUS.connecting,
+                REMOTE_SESSION_STATUS.active,
+              ]);
+            }
+            return {
+              shouldProvision: false,
+              roomName: current.livekitRoomName,
+            };
+          }
+          const owner = await transaction.remoteSessionParticipant.findFirst({
+            where: { sessionId, joinTicketStatus: 'PROVISIONING' },
+            select: { id: true },
+          });
+          if (owner && owner.id !== participantId) {
+            throw new RemoteDeviceBusyException();
+          }
+          if (!owner) {
+            const reserved =
+              await transaction.remoteSessionParticipant.updateMany({
+                where: {
+                  id: participantId,
+                  sessionId,
+                  joinTicketId: ticketId,
+                  joinTicketStatus: 'ISSUING',
+                },
+                data: {
+                  joinTicketStatus: 'PROVISIONING',
+                  // This column is the durable age marker for every
+                  // pre-delivery saga state. Refresh it at each boundary.
+                  joinTicketIssuedAt: new Date(),
+                },
+              });
+            if (reserved.count !== 1) {
+              throw new RemoteSessionStateException([
+                REMOTE_SESSION_STATUS.accepted,
+                REMOTE_SESSION_STATUS.connecting,
+                REMOTE_SESSION_STATUS.active,
+              ]);
+            }
+          }
+          return { shouldProvision: true, roomName: current.livekitRoomName };
+        },
+        { timeout: REMOTE_ROOM_PROVISIONING_TRANSACTION_TIMEOUT_MS },
+      );
+      if (!claim.shouldProvision) {
+        return;
+      }
+
+      provisioningStarted = true;
+      await this.livekit.ensureRoom(claim.roomName);
+
+      await this.serializable(
+        async (transaction) => {
+          await this.lockRemoteSession(transaction, sessionId);
+          const current = await transaction.remoteAssistanceSession.findUnique({
+            where: { id: sessionId },
+          });
+          if (
+            !current ||
+            ![
+              REMOTE_SESSION_STATUS.accepted,
+              REMOTE_SESSION_STATUS.connecting,
+              REMOTE_SESSION_STATUS.active,
+            ].includes(current.status as never)
+          ) {
+            throw new RemoteSessionStateException([
+              REMOTE_SESSION_STATUS.accepted,
+              REMOTE_SESSION_STATUS.connecting,
+              REMOTE_SESSION_STATUS.active,
+            ]);
+          }
+          const ready = await transaction.remoteSessionParticipant.updateMany({
+            where: {
+              id: participantId,
+              sessionId,
+              joinTicketId: ticketId,
+              joinTicketStatus: 'PROVISIONING',
+            },
+            data: {
+              joinTicketStatus: 'ROOM_READY',
+              joinTicketIssuedAt: new Date(),
+            },
+          });
+          if (ready.count !== 1) {
+            throw new RemoteSessionStateException([
+              REMOTE_SESSION_STATUS.accepted,
+              REMOTE_SESSION_STATUS.connecting,
+              REMOTE_SESSION_STATUS.active,
+            ]);
+          }
+          const confirmed =
+            await transaction.remoteAssistanceSession.updateMany({
+              where: {
+                id: current.id,
+                status: current.status,
+                version: current.version,
+                roomProvisionedAt: null,
+              },
+              data: {
+                roomProvisionedAt: new Date(),
+                version: { increment: 1 },
+              },
+            });
+          if (confirmed.count !== 1) {
+            throw new RemoteSessionStateException([
+              REMOTE_SESSION_STATUS.accepted,
+              REMOTE_SESSION_STATUS.connecting,
+              REMOTE_SESSION_STATUS.active,
+            ]);
+          }
+        },
+        { timeout: REMOTE_ROOM_PROVISIONING_TRANSACTION_TIMEOUT_MS },
+      );
+    } catch (error) {
+      if (provisioningStarted) {
+        throw new RoomProvisioningUncertainError(error);
+      }
+      throw error;
+    }
+  }
+
+  private async requirePersistedSessionMayMintJoinTicket(
+    sessionId: string,
+  ): Promise<void> {
+    const current = await this.prisma.remoteAssistanceSession.findUnique({
+      where: { id: sessionId },
+      select: {
+        status: true,
+        answerMode: true,
+        acceptedAt: true,
+      },
+    });
+    if (!current) {
+      throw new RemoteSessionNotFoundException();
+    }
+    if (
+      ![
+        REMOTE_SESSION_STATUS.accepted,
+        REMOTE_SESSION_STATUS.connecting,
+        REMOTE_SESSION_STATUS.active,
+      ].includes(current.status as never)
+    ) {
+      throw new RemoteSessionStateException([
+        REMOTE_SESSION_STATUS.accepted,
+        REMOTE_SESSION_STATUS.connecting,
+        REMOTE_SESSION_STATUS.active,
+      ]);
+    }
+    if (
+      current.answerMode !== REMOTE_ANSWER_MODE.onsite ||
+      !current.acceptedAt
+    ) {
+      throw new RemoteCallNotAllowedException();
+    }
+  }
+
   private async applyLiveKitEvent(
     session: SessionWithParticipants,
     event: VerifiedLiveKitWebhook,
@@ -1012,12 +1540,78 @@ export class RealtimeCommunicationApplicationService {
     const participant = event.participantIdentity
       ? this.findParticipantByIdentity(session, event.participantIdentity)
       : null;
-    if (event.event === 'participant_joined' && participant) {
-      await this.prisma.remoteSessionParticipant.updateMany({
-        where: { id: participant.id, joinedAt: null, leftAt: null },
-        data: { joinedAt: event.occurredAt },
-      });
+    if (event.event === 'participant_joined') {
+      if (
+        !participant ||
+        !event.participantIdentity ||
+        !this.webhookMatchesIssuedTicket(participant, event)
+      ) {
+        if (event.participantIdentity) {
+          await this.safeRemoveParticipant(
+            session.livekitRoomName,
+            event.participantIdentity,
+          );
+        }
+        return;
+      }
+
+      let admitted = this.isOriginalConsumedJoin(participant, event);
+      if (!admitted && participant.joinTicketStatus === 'ISSUED') {
+        const consumed = await this.prisma.remoteSessionParticipant.updateMany({
+          where: {
+            id: participant.id,
+            joinedAt: null,
+            leftAt: null,
+            joinTicketId: event.participantTicketId!,
+            joinTicketStatus: 'ISSUED',
+            joinTicketExpiresAt: { gte: event.occurredAt },
+            OR: [
+              { livekitParticipantSid: null },
+              { livekitParticipantSid: event.participantSid },
+            ],
+          },
+          data: {
+            joinedAt: event.occurredAt,
+            joinTicketStatus: 'CONSUMED',
+            joinTicketConsumedAt: event.occurredAt,
+            joinTicketConsumedEventId: event.eventId,
+            livekitParticipantSid: event.participantSid,
+          },
+        });
+        admitted = consumed.count === 1;
+        if (!admitted) {
+          // Concurrent delivery of the same signed webhook can lose the
+          // ISSUED -> CONSUMED compare-and-swap. Re-read to distinguish that
+          // harmless retry from a second physical connection using the JWT.
+          const current = await this.prisma.remoteSessionParticipant.findUnique(
+            {
+              where: { id: participant.id },
+            },
+          );
+          admitted = Boolean(
+            current && this.isOriginalConsumedJoin(current, event),
+          );
+        }
+      }
+      if (!admitted) {
+        await this.safeRemoveParticipant(
+          session.livekitRoomName,
+          event.participantIdentity,
+        );
+        return;
+      }
     } else if (event.event === 'track_published' && participant) {
+      if (
+        !(await this.reserveOrMatchParticipantConnection(participant, event))
+      ) {
+        if (event.participantIdentity) {
+          await this.safeRemoveParticipant(
+            session.livekitRoomName,
+            event.participantIdentity,
+          );
+        }
+        return;
+      }
       await this.prisma.remoteSessionParticipant.updateMany({
         where: { id: participant.id, leftAt: null },
         data: {
@@ -1028,6 +1622,17 @@ export class RealtimeCommunicationApplicationService {
         },
       });
     } else if (event.event === 'track_unpublished' && participant) {
+      if (
+        !(await this.reserveOrMatchParticipantConnection(participant, event))
+      ) {
+        if (event.participantIdentity) {
+          await this.safeRemoveParticipant(
+            session.livekitRoomName,
+            event.participantIdentity,
+          );
+        }
+        return;
+      }
       await this.prisma.remoteSessionParticipant.updateMany({
         where: { id: participant.id, leftAt: null },
         data: {
@@ -1046,7 +1651,19 @@ export class RealtimeCommunicationApplicationService {
         });
       }
       return;
-    } else if (event.event === 'participant_left' && participant) {
+    } else if (
+      ['participant_left', 'participant_connection_aborted'].includes(
+        event.event,
+      ) &&
+      participant
+    ) {
+      // A rejected replay has the same identity but a different SID. Its
+      // subsequent leave webhook must not terminate the legitimate call.
+      if (
+        !(await this.reserveOrMatchParticipantConnection(participant, event))
+      ) {
+        return;
+      }
       await this.prisma.remoteSessionParticipant.updateMany({
         where: { id: participant.id, leftAt: null },
         data: { leftAt: event.occurredAt },
@@ -1122,6 +1739,111 @@ export class RealtimeCommunicationApplicationService {
         await this.activateSession(refreshed, event.occurredAt);
       }
     }
+  }
+
+  private webhookMatchesIssuedTicket(
+    participant: SessionParticipant,
+    event: VerifiedLiveKitWebhook,
+  ): boolean {
+    return Boolean(
+      event.eventId &&
+      event.participantSid &&
+      event.participantId === participant.id &&
+      event.participantTicketId &&
+      event.participantTicketId === participant.joinTicketId,
+    );
+  }
+
+  private isOriginalConsumedJoin(
+    participant: SessionParticipant,
+    event: VerifiedLiveKitWebhook,
+  ): boolean {
+    return Boolean(
+      this.webhookMatchesIssuedTicket(participant, event) &&
+      participant.joinTicketStatus === 'CONSUMED' &&
+      participant.joinedAt &&
+      !participant.leftAt &&
+      participant.joinTicketConsumedEventId === event.eventId &&
+      participant.livekitParticipantSid === event.participantSid,
+    );
+  }
+
+  private isEventFromAdmittedConnection(
+    participant: SessionParticipant,
+    event: VerifiedLiveKitWebhook,
+  ): boolean {
+    return Boolean(
+      this.webhookMatchesIssuedTicket(participant, event) &&
+      participant.joinTicketStatus === 'CONSUMED' &&
+      participant.joinedAt &&
+      !participant.leftAt &&
+      participant.livekitParticipantSid === event.participantSid,
+    );
+  }
+
+  private async reserveOrMatchParticipantConnection(
+    participant: SessionParticipant,
+    event: VerifiedLiveKitWebhook,
+  ): Promise<boolean> {
+    if (this.isEventFromAdmittedConnection(participant, event)) {
+      return true;
+    }
+    if (!this.webhookMatchesIssuedTicket(participant, event)) {
+      return false;
+    }
+    if (this.isEventFromReservedConnection(participant, event)) {
+      return true;
+    }
+    if (
+      participant.joinTicketStatus !== 'ISSUED' ||
+      participant.joinedAt ||
+      participant.leftAt ||
+      participant.livekitParticipantSid ||
+      !participant.joinTicketExpiresAt ||
+      participant.joinTicketExpiresAt < event.occurredAt
+    ) {
+      return false;
+    }
+
+    const reserved = await this.prisma.remoteSessionParticipant.updateMany({
+      where: {
+        id: participant.id,
+        joinedAt: null,
+        leftAt: null,
+        joinTicketId: event.participantTicketId!,
+        joinTicketStatus: 'ISSUED',
+        joinTicketExpiresAt: { gte: event.occurredAt },
+        livekitParticipantSid: null,
+      },
+      data: { livekitParticipantSid: event.participantSid },
+    });
+    if (reserved.count === 1) {
+      return true;
+    }
+
+    const current = await this.prisma.remoteSessionParticipant.findUnique({
+      where: { id: participant.id },
+    });
+    return Boolean(
+      current &&
+      (this.isEventFromReservedConnection(current, event) ||
+        this.isEventFromAdmittedConnection(current, event)),
+    );
+  }
+
+  private isEventFromReservedConnection(
+    participant: SessionParticipant,
+    event: VerifiedLiveKitWebhook,
+  ): boolean {
+    return Boolean(
+      this.webhookMatchesIssuedTicket(participant, event) &&
+      participant.joinTicketStatus === 'ISSUED' &&
+      !participant.joinedAt &&
+      !participant.leftAt &&
+      participant.joinTicketExpiresAt &&
+      participant.joinTicketExpiresAt >= event.occurredAt &&
+      participant.livekitParticipantSid === event.participantSid,
+    );
   }
 
   private findParticipantByIdentity(
@@ -1203,21 +1925,126 @@ export class RealtimeCommunicationApplicationService {
       actorType: 'USER' | 'DEVICE' | 'SYSTEM';
       actorId: string | null;
       reason: string;
+      roomCleanupNotBefore?: Date;
+      onlyIfStaleProvisioningBefore?: Date;
+      onlyIfCurrentStatusIn?: readonly string[];
+      onlyIfRequestedAtOrBefore?: Date;
+      onlyIfAcceptedOrRequestedAtOrBefore?: Date;
     },
   ): Promise<RemoteSessionView> {
-    let current = session;
-    for (let attempt = 1; attempt <= SERIALIZABLE_RETRIES; attempt += 1) {
-      if (isRemoteTerminal(current.status)) {
-        await this.cleanupFinishedSession(current);
-        return this.toSessionView(current);
-      }
-      const target = this.resolveTerminalTarget(
-        current.status,
-        command.targetStatus,
-      );
-      assertRemoteTransition(current.status, target);
-      const now = new Date();
-      const outcome = await this.prisma.$transaction(async (transaction) => {
+    const now = new Date();
+    const ended = await this.serializable(
+      async (transaction) => {
+        // Use an explicit exclusive lock: a plain MySQL SERIALIZABLE SELECT is
+        // only a shared next-key read and cannot linearize two lock-upgrading
+        // claim/termination transactions.
+        await this.lockRemoteSession(transaction, session.id);
+        const current = await transaction.remoteAssistanceSession.findUnique({
+          where: { id: session.id },
+        });
+        if (!current) {
+          throw new RemoteSessionNotFoundException();
+        }
+        if (
+          command.onlyIfCurrentStatusIn &&
+          !command.onlyIfCurrentStatusIn.includes(current.status)
+        ) {
+          return current;
+        }
+        if (
+          command.onlyIfRequestedAtOrBefore &&
+          current.requestedAt > command.onlyIfRequestedAtOrBefore
+        ) {
+          return current;
+        }
+        if (
+          command.onlyIfAcceptedOrRequestedAtOrBefore &&
+          (current.acceptedAt ?? current.requestedAt) >
+            command.onlyIfAcceptedOrRequestedAtOrBefore
+        ) {
+          return current;
+        }
+        const roomProvisioning =
+          await transaction.remoteSessionParticipant.findFirst({
+            where: {
+              sessionId: current.id,
+              joinTicketStatus: 'PROVISIONING',
+              ...(command.onlyIfStaleProvisioningBefore
+                ? {
+                    joinTicketIssuedAt: {
+                      lte: command.onlyIfStaleProvisioningBefore,
+                    },
+                  }
+                : {}),
+            },
+            select: { id: true },
+          });
+        // The stale observation and the terminal transition must share these
+        // locks. A normal provisioning request that reaches ROOM_READY first
+        // wins; the runner then performs a no-op instead of killing a healthy
+        // call based on an earlier, non-locking read.
+        if (command.onlyIfStaleProvisioningBefore && !roomProvisioning) {
+          return current;
+        }
+        const requestedCleanupNotBefore = roomProvisioning
+          ? new Date(
+              now.getTime() + REMOTE_ROOM_PROVISIONING_FENCE_SECONDS * 1_000,
+            )
+          : command.roomCleanupNotBefore;
+        const cleanupNotBefore = requestedCleanupNotBefore
+          ? current.roomCleanupNotBefore &&
+            current.roomCleanupNotBefore > requestedCleanupNotBefore
+            ? current.roomCleanupNotBefore
+            : requestedCleanupNotBefore
+          : current.roomCleanupNotBefore;
+        if (isRemoteTerminal(current.status)) {
+          if (!requestedCleanupNotBefore) {
+            return current;
+          }
+          const fenced = await transaction.remoteAssistanceSession.updateMany({
+            where: { id: current.id, version: current.version },
+            data: {
+              roomCleanupStatus: 'PENDING',
+              roomCleanupCompletedAt: null,
+              roomCleanupNotBefore: cleanupNotBefore,
+              version: { increment: 1 },
+            },
+          });
+          if (fenced.count !== 1) {
+            throw new RemoteSessionStateException([current.status]);
+          }
+          await transaction.remoteSessionParticipant.updateMany({
+            where: {
+              sessionId: current.id,
+              joinTicketStatus: {
+                in: [
+                  'ISSUING',
+                  'PROVISIONING',
+                  'ROOM_READY',
+                  'ISSUED',
+                  'CONSUMED',
+                ],
+              },
+            },
+            data: {
+              joinTicketStatus: 'REVOKED',
+              joinTicketRevokedAt: now,
+            },
+          });
+          const persisted =
+            await transaction.remoteAssistanceSession.findUnique({
+              where: { id: current.id },
+            });
+          if (!persisted) {
+            throw new RemoteSessionNotFoundException();
+          }
+          return persisted;
+        }
+        const target = this.resolveTerminalTarget(
+          current.status,
+          command.targetStatus,
+        );
+        assertRemoteTransition(current.status, target);
         const changed = await transaction.remoteAssistanceSession.updateMany({
           where: {
             id: current.id,
@@ -1230,16 +2057,20 @@ export class RealtimeCommunicationApplicationService {
             endedByType: command.actorType,
             endedById: command.actorId,
             endReason: command.reason,
+            ...(requestedCleanupNotBefore
+              ? {
+                  roomCleanupStatus: 'PENDING',
+                  roomCleanupCompletedAt: null,
+                  roomCleanupNotBefore: cleanupNotBefore,
+                }
+              : {}),
             version: { increment: 1 },
           },
         });
         if (changed.count !== 1) {
-          return {
-            changed: false,
-            session: await transaction.remoteAssistanceSession.findUnique({
-              where: { id: current.id },
-            }),
-          };
+          // A changed row while we hold its SERIALIZABLE lock indicates an
+          // invariant/storage violation; never guess at a terminal result.
+          throw new RemoteSessionStateException([current.status]);
         }
         await this.appendSessionEvent(transaction, current.id, {
           eventType: target,
@@ -1254,26 +2085,38 @@ export class RealtimeCommunicationApplicationService {
           'remote-session.ended',
           now,
         );
-        return {
-          changed: true,
-          session: await transaction.remoteAssistanceSession.findUnique({
-            where: { id: current.id },
-          }),
-        };
-      });
-      if (!outcome.session) {
-        throw new RemoteSessionNotFoundException();
-      }
-      if (outcome.changed || isRemoteTerminal(outcome.session.status)) {
-        await this.cleanupFinishedSession(outcome.session);
-        return this.toSessionView(outcome.session);
-      }
-      // A webhook and a user/device action may race while the session moves
-      // forward (for example CONNECTING -> ACTIVE vs. hang-up). Re-read and
-      // retry so the termination request wins without reviving terminal state.
-      current = outcome.session;
+        await transaction.remoteSessionParticipant.updateMany({
+          where: {
+            sessionId: current.id,
+            joinTicketStatus: {
+              in: [
+                'ISSUING',
+                'PROVISIONING',
+                'ROOM_READY',
+                'ISSUED',
+                'CONSUMED',
+              ],
+            },
+          },
+          data: {
+            joinTicketStatus: 'REVOKED',
+            joinTicketRevokedAt: now,
+          },
+        });
+        const persisted = await transaction.remoteAssistanceSession.findUnique({
+          where: { id: current.id },
+        });
+        if (!persisted) {
+          throw new RemoteSessionNotFoundException();
+        }
+        return persisted;
+      },
+      { timeout: REMOTE_TERMINATION_TRANSACTION_TIMEOUT_MS },
+    );
+    if (isRemoteTerminal(ended.status)) {
+      await this.cleanupFinishedSession(ended);
     }
-    throw new RemoteSessionStateException([current.status]);
+    return this.toSessionView(ended);
   }
 
   private resolveTerminalTarget(status: string, requested: string): string {
@@ -1561,29 +2404,6 @@ export class RealtimeCommunicationApplicationService {
     );
   }
 
-  private async revokeSessionsDisallowedByPolicy(
-    policy: RemoteAccessPolicy,
-  ): Promise<void> {
-    const sessions = await this.prisma.remoteAssistanceSession.findMany({
-      where: {
-        bindingId: policy.bindingId,
-        status: { in: [...OPEN_REMOTE_STATUSES] },
-      },
-    });
-    for (const session of sessions) {
-      const media = decodeMedia(session.requestedMedia);
-      if (this.policyAllows(policy, media)) {
-        continue;
-      }
-      await this.finishSession(session, {
-        targetStatus: REMOTE_SESSION_STATUS.revoked,
-        actorType: 'SYSTEM',
-        actorId: null,
-        reason: 'REMOTE_POLICY_RESTRICTED',
-      });
-    }
-  }
-
   private async reconcileDisplacedSessions(
     bindingId: string,
     currentSessionId: string,
@@ -1613,6 +2433,17 @@ export class RealtimeCommunicationApplicationService {
     session: RemoteAssistanceSession,
     now: Date,
   ): Promise<'EXPIRED' | 'FAILED' | null> {
+    try {
+      await this.requireCurrentSessionEligibilityOrRevoke(session);
+    } catch (error) {
+      if (
+        error instanceof ForbiddenException ||
+        error instanceof RemoteMediaInvalidException
+      ) {
+        return null;
+      }
+      throw error;
+    }
     const ringTimeoutSeconds = this.timeoutSeconds(
       'REMOTE_RING_TIMEOUT_SECONDS',
       REMOTE_RING_TIMEOUT_SECONDS,
@@ -1628,6 +2459,10 @@ export class RealtimeCommunicationApplicationService {
           actorType: 'SYSTEM',
           actorId: null,
           reason: 'RING_TIMEOUT',
+          onlyIfCurrentStatusIn: [REMOTE_SESSION_STATUS.ringing],
+          onlyIfRequestedAtOrBefore: new Date(
+            now.getTime() - ringTimeoutSeconds * 1_000,
+          ),
         });
         return result.status === REMOTE_SESSION_STATUS.expired
           ? REMOTE_SESSION_STATUS.expired
@@ -1658,6 +2493,13 @@ export class RealtimeCommunicationApplicationService {
         actorType: 'SYSTEM',
         actorId: null,
         reason: 'MEDIA_CONNECT_TIMEOUT',
+        onlyIfCurrentStatusIn: [
+          REMOTE_SESSION_STATUS.accepted,
+          REMOTE_SESSION_STATUS.connecting,
+        ],
+        onlyIfAcceptedOrRequestedAtOrBefore: new Date(
+          now.getTime() - connectTimeoutSeconds * 1_000,
+        ),
       });
       return result.status === REMOTE_SESSION_STATUS.failed
         ? REMOTE_SESSION_STATUS.failed
@@ -1665,23 +2507,30 @@ export class RealtimeCommunicationApplicationService {
     }
 
     const expected = this.leaseOwner(session.id);
-    const current = await this.leases.current(session.bindingId);
+    let current = await this.leases.current(session.bindingId);
     if (
       session.status === REMOTE_SESSION_STATUS.ringing &&
       current?.ownerType === 'AI_COMPANION'
     ) {
       return null;
     }
-    if (
-      session.status === REMOTE_SESSION_STATUS.ringing &&
-      current === null &&
-      (await this.leases.acquire(
-        session.bindingId,
-        expected,
-        REMOTE_MEDIA_LEASE_TTL_SECONDS,
-      ))
-    ) {
-      return null;
+    if (session.status === REMOTE_SESSION_STATUS.ringing && current === null) {
+      if (
+        await this.leases.acquire(
+          session.bindingId,
+          expected,
+          REMOTE_MEDIA_LEASE_TTL_SECONDS,
+        )
+      ) {
+        return null;
+      }
+      // The initial empty read and failed acquire are not one atomic
+      // observation. Another request may have restored the AI owner or the
+      // expected remote owner between them; re-read before terminalizing.
+      current = await this.leases.current(session.bindingId);
+      if (current?.ownerType === 'AI_COMPANION') {
+        return null;
+      }
     }
     if (
       !current ||
@@ -1700,6 +2549,28 @@ export class RealtimeCommunicationApplicationService {
         : null;
     }
     return null;
+  }
+
+  private async releaseStaleUnmintedJoinTicketReservations(
+    sessionId: string,
+    staleBefore: Date,
+  ): Promise<void> {
+    // Neither ISSUING nor ROOM_READY can have returned a JWT to a client. A
+    // compare-and-set reset therefore makes process-crash recovery retryable;
+    // a live request that advances first wins the same status predicate.
+    await this.prisma.remoteSessionParticipant.updateMany({
+      where: {
+        sessionId,
+        joinTicketStatus: { in: ['ISSUING', 'ROOM_READY'] },
+        joinTicketIssuedAt: { lte: staleBefore },
+      },
+      data: {
+        joinTicketId: null,
+        joinTicketStatus: null,
+        joinTicketIssuedAt: null,
+        joinTicketExpiresAt: null,
+      },
+    });
   }
 
   private timeoutSeconds(key: string, fallback: number): number {
@@ -1766,33 +2637,65 @@ export class RealtimeCommunicationApplicationService {
 
   private async ensureReplayLease(
     session: RemoteAssistanceSession,
-  ): Promise<void> {
-    if (isRemoteTerminal(session.status)) {
-      return;
+  ): Promise<RemoteAssistanceSession> {
+    const currentSession = await this.prisma.remoteAssistanceSession.findUnique(
+      {
+        where: { id: session.id },
+      },
+    );
+    if (!currentSession) {
+      throw new RemoteSessionNotFoundException();
     }
-    const owner = this.leaseOwner(session.id);
-    const current = await this.leases.current(session.bindingId);
+    if (isRemoteTerminal(currentSession.status)) {
+      await this.cleanupFinishedSession(currentSession);
+      return currentSession;
+    }
+    const owner = this.leaseOwner(currentSession.id);
+    const current = await this.leases.current(currentSession.bindingId);
     if (
-      session.status === REMOTE_SESSION_STATUS.ringing &&
+      currentSession.status === REMOTE_SESSION_STATUS.ringing &&
       current?.ownerType === 'AI_COMPANION'
     ) {
-      return;
+      return this.confirmReplayStillOpen(currentSession, owner, false);
     }
-    if (
+    const claimed =
       (await this.leases.renew(
-        session.bindingId,
+        currentSession.bindingId,
         owner,
         REMOTE_MEDIA_LEASE_TTL_SECONDS,
       )) ||
       (await this.leases.acquire(
-        session.bindingId,
+        currentSession.bindingId,
         owner,
         REMOTE_MEDIA_LEASE_TTL_SECONDS,
-      ))
-    ) {
-      return;
+      ));
+    if (!claimed) {
+      throw new RemoteDeviceBusyException();
     }
-    throw new RemoteDeviceBusyException();
+    return this.confirmReplayStillOpen(currentSession, owner, true);
+  }
+
+  private async confirmReplayStillOpen(
+    session: RemoteAssistanceSession,
+    owner: MediaLeaseOwner,
+    releaseIfTerminal: boolean,
+  ): Promise<RemoteAssistanceSession> {
+    const confirmed = await this.prisma.remoteAssistanceSession.findUnique({
+      where: { id: session.id },
+    });
+    if (!confirmed) {
+      if (releaseIfTerminal) {
+        await this.safeRelease(session.bindingId, owner);
+      }
+      throw new RemoteSessionNotFoundException();
+    }
+    if (isRemoteTerminal(confirmed.status)) {
+      if (releaseIfTerminal) {
+        await this.safeRelease(session.bindingId, owner);
+      }
+      await this.cleanupFinishedSession(confirmed);
+    }
+    return confirmed;
   }
 
   private async reserveRemoteLeaseForRequest(
@@ -1801,6 +2704,17 @@ export class RealtimeCommunicationApplicationService {
   ): Promise<'REMOTE_RESERVED' | 'AI_HANDOFF_PENDING'> {
     const current = await this.leases.current(bindingId);
     if (current?.ownerType === 'AI_COMPANION') {
+      if (
+        !(await this.companionMedia.isActiveLeaseOwner(
+          bindingId,
+          current.ownerId,
+        ))
+      ) {
+        // The AI lease is provisional (or stale) and cannot yet authorize a
+        // durable ringing call. A retry after its bounded transaction window
+        // will either see a committed AI session or an available lease.
+        throw new RemoteDeviceBusyException();
+      }
       return 'AI_HANDOFF_PENDING';
     }
     if (
@@ -1819,54 +2733,61 @@ export class RealtimeCommunicationApplicationService {
     session: RemoteAssistanceSession,
     owner: MediaLeaseOwner,
   ): Promise<{ claimed: boolean; previousAiOwner: MediaLeaseOwner | null }> {
-    const current = await this.leases.current(session.bindingId);
-    if (current === null) {
-      return {
-        claimed: await this.leases.acquire(
+    for (let attempt = 1; attempt <= SERIALIZABLE_RETRIES; attempt += 1) {
+      const current = await this.leases.current(session.bindingId);
+      if (current === null) {
+        if (
+          await this.leases.acquire(
+            session.bindingId,
+            owner,
+            REMOTE_MEDIA_LEASE_TTL_SECONDS,
+          )
+        ) {
+          return { claimed: true, previousAiOwner: null };
+        }
+        // Empty-read + failed-acquire is not atomic. Re-read on the next
+        // iteration so a concurrent AI or same-remote winner is classified.
+        continue;
+      }
+      if (
+        current.ownerType === owner.ownerType &&
+        current.ownerId === owner.ownerId &&
+        current.leaseId === owner.leaseId
+      ) {
+        if (
+          await this.leases.renew(
+            session.bindingId,
+            owner,
+            REMOTE_MEDIA_LEASE_TTL_SECONDS,
+          )
+        ) {
+          return { claimed: true, previousAiOwner: null };
+        }
+        continue;
+      }
+      if (current.ownerType !== 'AI_COMPANION') {
+        return { claimed: false, previousAiOwner: null };
+      }
+      if (
+        !(await this.companionMedia.isActiveLeaseOwner(
           session.bindingId,
+          current.ownerId,
+        ))
+      ) {
+        return { claimed: false, previousAiOwner: null };
+      }
+      if (
+        await this.leases.transfer(
+          session.bindingId,
+          current,
           owner,
           REMOTE_MEDIA_LEASE_TTL_SECONDS,
-        ),
-        previousAiOwner: null,
-      };
+        )
+      ) {
+        return { claimed: true, previousAiOwner: current };
+      }
     }
-    if (
-      current.ownerType === owner.ownerType &&
-      current.ownerId === owner.ownerId &&
-      current.leaseId === owner.leaseId
-    ) {
-      return {
-        claimed: await this.leases.renew(
-          session.bindingId,
-          owner,
-          REMOTE_MEDIA_LEASE_TTL_SECONDS,
-        ),
-        previousAiOwner: null,
-      };
-    }
-    if (current.ownerType !== 'AI_COMPANION') {
-      return { claimed: false, previousAiOwner: null };
-    }
-    const activeAi = await this.prisma.companionSession.findFirst({
-      where: {
-        id: current.ownerId,
-        bindingId: session.bindingId,
-        status: 'ACTIVE',
-      },
-      select: { id: true },
-    });
-    if (!activeAi) {
-      return { claimed: false, previousAiOwner: null };
-    }
-    return {
-      claimed: await this.leases.transfer(
-        session.bindingId,
-        current,
-        owner,
-        REMOTE_MEDIA_LEASE_TTL_SECONDS,
-      ),
-      previousAiOwner: current,
-    };
+    return { claimed: false, previousAiOwner: null };
   }
 
   private async safeRelease(
@@ -1882,28 +2803,120 @@ export class RealtimeCommunicationApplicationService {
     }
   }
 
+  private async releaseAcceptanceLeaseIfUnowned(
+    session: RemoteAssistanceSession,
+    owner: MediaLeaseOwner,
+  ): Promise<boolean> {
+    try {
+      const current = await this.prisma.remoteAssistanceSession.findUnique({
+        where: { id: session.id },
+      });
+      if (
+        current &&
+        [
+          REMOTE_SESSION_STATUS.accepted,
+          REMOTE_SESSION_STATUS.connecting,
+          REMOTE_SESSION_STATUS.active,
+          REMOTE_SESSION_STATUS.ending,
+        ].includes(current.status as never)
+      ) {
+        // A concurrent accept won the database CAS and now owns this same
+        // deterministic lease. The losing request must not release it.
+        return false;
+      }
+      if (current && isRemoteTerminal(current.status)) {
+        return this.mediaSecurity.cleanupSession(current);
+      }
+      if (current?.status === REMOTE_SESSION_STATUS.ringing) {
+        // Another acceptance transaction may already have claimed this same
+        // deterministic owner but not committed its database CAS yet. Keep
+        // the bounded lease; releasing it here can strand that winner.
+        return false;
+      }
+      await this.safeRelease(session.bindingId, owner);
+      return true;
+    } catch (error) {
+      // Preserve the bounded lease when durable ownership is uncertain. A
+      // blind release can disconnect a concurrently accepted call.
+      this.logger.warn(
+        `Acceptance lease ownership check deferred (${error instanceof Error ? error.name : 'unknown'})`,
+      );
+      return false;
+    }
+  }
+
+  private async restoreAiLeaseIfStillActive(
+    bindingId: string,
+    owner: MediaLeaseOwner,
+  ): Promise<void> {
+    try {
+      if (
+        !(await this.companionMedia.isActiveLeaseOwner(
+          bindingId,
+          owner.ownerId,
+        ))
+      ) {
+        return;
+      }
+      if (
+        !(await this.leases.acquire(
+          bindingId,
+          owner,
+          REMOTE_MEDIA_LEASE_TTL_SECONDS,
+        ))
+      ) {
+        return;
+      }
+      if (
+        !(await this.companionMedia.isActiveLeaseOwner(
+          bindingId,
+          owner.ownerId,
+        ))
+      ) {
+        // The AI session ended between the pre-check and Redis acquire.
+        // Compare-delete prevents this compensation from leaving a stale
+        // owner that blocks the next legitimate media session.
+        await this.safeRelease(bindingId, owner);
+      }
+    } catch (restoreError) {
+      this.logger.warn(
+        `AI media lease restore deferred (${restoreError instanceof Error ? restoreError.name : 'unknown'})`,
+      );
+    }
+  }
+
+  private async releaseProvisionalRemoteLeaseIfUnowned(
+    bindingId: string,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      const persisted = await this.prisma.remoteAssistanceSession.findFirst({
+        where: {
+          id: sessionId,
+          bindingId,
+          status: { in: [...OPEN_REMOTE_STATUSES] },
+        },
+        select: { id: true },
+      });
+      if (persisted) {
+        return;
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Remote provisional lease ownership check deferred (${error instanceof Error ? error.name : 'unknown'})`,
+      );
+      return;
+    }
+    // A same-id SERIALIZABLE winner can still be uncommitted and therefore
+    // invisible to this autocommit read. Both requests share the deterministic
+    // Redis owner, so releasing on "no row" could strand the winner after it
+    // commits. Preserve the bounded 90-second lease fail-closed.
+  }
+
   private async cleanupFinishedSession(
     session: RemoteAssistanceSession,
   ): Promise<void> {
-    await this.safeRelease(session.bindingId, this.leaseOwner(session.id));
-    let participants: Array<Pick<SessionParticipant, 'id' | 'role'>> = [];
-    try {
-      participants = await this.prisma.remoteSessionParticipant.findMany({
-        where: { sessionId: session.id },
-        select: { id: true, role: true },
-      });
-    } catch (error) {
-      this.logger.warn(
-        `LiveKit participant cleanup lookup deferred (${error instanceof Error ? error.name : 'unknown'})`,
-      );
-    }
-    for (const participant of participants) {
-      await this.safeRemoveParticipant(
-        session.livekitRoomName,
-        this.participantIdentity(session.id, participant),
-      );
-    }
-    await this.safeDeleteRoom(session.livekitRoomName);
+    await this.mediaSecurity.cleanupSession(session);
   }
 
   private async safeRemoveParticipant(
@@ -1914,18 +2927,20 @@ export class RealtimeCommunicationApplicationService {
       await this.livekit.removeParticipant(roomName, identity);
     } catch (error) {
       this.logger.warn(
-        `LiveKit token revocation deferred (${error instanceof Error ? error.name : 'unknown'})`,
+        `LiveKit participant removal deferred (${error instanceof Error ? error.name : 'unknown'})`,
       );
     }
   }
 
-  private async safeDeleteRoom(roomName: string): Promise<void> {
+  private async safeDeleteRoom(roomName: string): Promise<boolean> {
     try {
       await this.livekit.deleteRoom(roomName);
+      return true;
     } catch (error) {
       this.logger.warn(
         `LiveKit room cleanup deferred (${error instanceof Error ? error.name : 'unknown'})`,
       );
+      return false;
     }
   }
 
@@ -2019,11 +3034,13 @@ export class RealtimeCommunicationApplicationService {
 
   private async serializable<T>(
     operation: (transaction: Prisma.TransactionClient) => Promise<T>,
+    options: { timeout?: number } = {},
   ): Promise<T> {
     for (let attempt = 1; attempt <= SERIALIZABLE_RETRIES; attempt += 1) {
       try {
         return await this.prisma.$transaction(operation, {
           isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+          ...options,
         });
       } catch (error) {
         if (attempt === SERIALIZABLE_RETRIES || !isRetryable(error)) {
@@ -2032,6 +3049,21 @@ export class RealtimeCommunicationApplicationService {
       }
     }
     throw new RemoteDeviceBusyException();
+  }
+
+  private async lockRemoteSession(
+    transaction: Prisma.TransactionClient,
+    sessionId: string,
+  ): Promise<void> {
+    const rows = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT \`id\`
+      FROM \`remote_assistance_sessions\`
+      WHERE \`id\` = ${sessionId}
+      FOR UPDATE
+    `);
+    if (rows.length !== 1) {
+      throw new RemoteSessionNotFoundException();
+    }
   }
 }
 

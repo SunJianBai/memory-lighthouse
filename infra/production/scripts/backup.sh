@@ -15,8 +15,17 @@ case "${OPENBMB_OPERATION_LOCK_HELD:-false}" in
 esac
 script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
 script_dir="$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd -P)"
+security_epoch_script="$script_dir/security-epoch.sh"
 backup_root="${OPENBMB_BACKUP_ROOT:-/var/backups/openbmb}"
 backup_root="$(readlink -m -- "$backup_root")"
+
+if bash "$security_epoch_script" pending-exists; then
+  printf 'Refusing an ordinary backup while a security boundary is pending. Resume or repair that deployment first.\n' >&2
+  exit 1
+else
+  pending_probe_status=$?
+  [[ "$pending_probe_status" -eq 3 ]] || exit "$pending_probe_status"
+fi
 
 case "$backup_root" in
   /var/backups/openbmb|/var/backups/openbmb/*) ;;
@@ -114,6 +123,8 @@ published_dir="$backup_root/${stamp}.${suffix}"
 }
 mkdir -p -- "$partial_dir/minio"
 chmod 0700 -- "$partial_dir" "$partial_dir/minio"
+bash "$security_epoch_script" minimum >"$partial_dir/minimum-security-epoch"
+chmod 0600 -- "$partial_dir/minimum-security-epoch"
 
 api_state="$(docker inspect --format '{{.State.Running}}' openbmb-api)"
 [[ "$api_state" == true || "$api_state" == false ]] || {
@@ -158,7 +169,7 @@ find "$partial_dir/minio" -type d -exec chmod 0700 {} +
 find "$partial_dir/minio" -type f -exec chmod 0600 {} +
 "$script_dir/compose.sh" images --format json > "$partial_dir/images.json"
 "$script_dir/compose.sh" ps --format json > "$partial_dir/containers.json"
-for required_file in mysql.sql.gz images.json containers.json; do
+for required_file in mysql.sql.gz images.json containers.json minimum-security-epoch; do
   [[ -s "$partial_dir/$required_file" ]] || {
     printf 'required backup artifact is empty: %s\n' "$required_file" >&2
     exit 1
@@ -167,7 +178,8 @@ done
 chmod 0600 \
   "$partial_dir/mysql.sql.gz" \
   "$partial_dir/images.json" \
-  "$partial_dir/containers.json"
+  "$partial_dir/containers.json" \
+  "$partial_dir/minimum-security-epoch"
 (
   cd "$partial_dir"
   find . -type f \

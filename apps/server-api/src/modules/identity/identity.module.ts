@@ -18,6 +18,7 @@ import {
   PASSWORD_HASHER_PORT,
 } from './identity.constants';
 import { AuthController } from './http/auth.controller';
+import { AdminAccessGuard } from './http/admin-access.guard';
 import { MeController } from './http/me.controller';
 import { UserAccessGuard } from './http/user-access.guard';
 import { SystemClock } from './ports/clock.port';
@@ -41,8 +42,15 @@ import { SystemClock } from './ports/clock.port';
     AccessTokenService,
     VerifiedEmailPolicy,
     IdentityApplicationService,
+    AdminAccessGuard,
     UserAccessGuard,
   ],
-  exports: [IdentityApplicationService, UserAccessGuard, VerifiedEmailPolicy],
+  exports: [
+    IDENTITY_SECURITY_CONFIG,
+    IdentityApplicationService,
+    AdminAccessGuard,
+    UserAccessGuard,
+    VerifiedEmailPolicy,
+  ],
 })
 export class IdentityModule {}

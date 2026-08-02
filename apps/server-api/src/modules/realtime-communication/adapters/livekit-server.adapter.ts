@@ -4,10 +4,15 @@ import { TrackSource } from '@livekit/protocol';
 import {
   AccessToken,
   RoomServiceClient,
+  ServerError,
   WebhookReceiver,
 } from 'livekit-server-sdk';
 
 import type { LiveKitPort } from '../ports/livekit.port';
+import {
+  LIVEKIT_RPC_TIMEOUT_SECONDS,
+  REMOTE_JOIN_TICKET_TTL_SECONDS,
+} from '../realtime.constants';
 import {
   LiveKitUnavailableException,
   LiveKitWebhookInvalidException,
@@ -52,8 +57,30 @@ export class LiveKitServerAdapter implements LiveKitPort {
       toHttpUrl(internalUrl),
       apiKey,
       apiSecret,
+      {
+        requestTimeout: LIVEKIT_RPC_TIMEOUT_SECONDS,
+        failover: false,
+      },
     );
     this.webhooks = new WebhookReceiver(apiKey, apiSecret);
+  }
+
+  async ensureRoom(roomName: string): Promise<void> {
+    try {
+      await this.rooms.createRoom({
+        name: roomName,
+        maxParticipants: 2,
+        emptyTimeout: REMOTE_JOIN_TICKET_TTL_SECONDS,
+      });
+    } catch (error) {
+      // Family and device ticket requests may race. Creating the same named
+      // room is therefore deliberately idempotent; no other provider error is
+      // safe to ignore because auto-creation is disabled.
+      if (error instanceof ServerError && error.code === 'already_exists') {
+        return;
+      }
+      throw new LiveKitUnavailableException();
+    }
   }
 
   async issueJoinTicket(command: LiveKitJoinTicketCommand): Promise<{
@@ -100,9 +127,10 @@ export class LiveKitServerAdapter implements LiveKitPort {
 
   async removeParticipant(roomName: string, identity: string): Promise<void> {
     try {
-      await this.rooms.removeParticipant(roomName, identity, {
-        revokeTokenTs: BigInt(Math.floor(Date.now() / 1_000)),
-      });
+      // On self-hosted LiveKit this disconnects the current participant but
+      // does not revoke refreshed access tokens. Disabled room auto-creation
+      // plus deleteRoom provide the terminal-session boundary.
+      await this.rooms.removeParticipant(roomName, identity);
     } catch {
       throw new LiveKitUnavailableException();
     }
@@ -111,7 +139,12 @@ export class LiveKitServerAdapter implements LiveKitPort {
   async deleteRoom(roomName: string): Promise<void> {
     try {
       await this.rooms.deleteRoom(roomName);
-    } catch {
+    } catch (error) {
+      // Cleanup is retried from every terminal reconciliation. An already
+      // absent room satisfies the same fail-closed postcondition.
+      if (error instanceof ServerError && error.code === 'not_found') {
+        return;
+      }
       throw new LiveKitUnavailableException();
     }
   }
@@ -123,10 +156,17 @@ export class LiveKitServerAdapter implements LiveKitPort {
     try {
       const event = await this.webhooks.receive(rawBody, authorization);
       const createdAtSeconds = Number(event.createdAt);
+      const participantMetadata = parseParticipantMetadata(
+        event.participant?.metadata,
+      );
       return {
+        eventId: event.id.trim(),
         event: event.event,
         roomName: event.room?.name || null,
         participantIdentity: event.participant?.identity || null,
+        participantSid: event.participant?.sid || null,
+        participantId: participantMetadata.participantId,
+        participantTicketId: participantMetadata.ticketId,
         trackSource:
           event.track?.source === TrackSource.MICROPHONE
             ? 'microphone'
@@ -143,6 +183,32 @@ export class LiveKitServerAdapter implements LiveKitPort {
     } catch {
       throw new LiveKitWebhookInvalidException();
     }
+  }
+}
+
+function parseParticipantMetadata(value: string | undefined): {
+  participantId: string | null;
+  ticketId: string | null;
+} {
+  if (!value) {
+    return { participantId: null, ticketId: null };
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { participantId: null, ticketId: null };
+    }
+    const metadata = parsed as Record<string, unknown>;
+    return {
+      participantId:
+        typeof metadata.participantId === 'string'
+          ? metadata.participantId
+          : null,
+      ticketId:
+        typeof metadata.ticketId === 'string' ? metadata.ticketId : null,
+    };
+  } catch {
+    return { participantId: null, ticketId: null };
   }
 }
 

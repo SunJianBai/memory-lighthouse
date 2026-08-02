@@ -9,6 +9,7 @@ import {
   IsEnum,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Length,
@@ -23,6 +24,13 @@ export enum HouseholdRoleCodeDto {
   OWNER = 'OWNER',
   CAREGIVER = 'CAREGIVER',
   VIEWER = 'VIEWER',
+}
+
+class PasswordReauthenticationDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(128)
+  currentPassword!: string;
 }
 
 export class CreateHouseholdDto {
@@ -53,7 +61,7 @@ export class UpdateHouseholdDto {
   version!: number;
 }
 
-export class UpdateHouseholdMemberDto {
+export class UpdateHouseholdMemberDto extends PasswordReauthenticationDto {
   @IsArray()
   @ArrayMinSize(1)
   @ArrayMaxSize(HOUSEHOLD_ROLE_CODES.length)
@@ -72,6 +80,8 @@ export class VersionQueryDto {
   @Min(0)
   version!: number;
 }
+
+export class RemoveHouseholdMemberDto extends PasswordReauthenticationDto {}
 
 export class CreateHouseholdInvitationDto {
   @IsEmail()
@@ -151,7 +161,7 @@ export class UpdateCareRecipientDto {
   version!: number;
 }
 
-export class PutCareAuthorityDto {
+export class PutCareAuthorityDto extends PasswordReauthenticationDto {
   @IsOptional()
   @IsString()
   @MaxLength(50)

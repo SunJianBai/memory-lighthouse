@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -83,11 +84,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -111,20 +112,21 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.sun.minicpmo_android.MainViewModel
 import com.sun.minicpmo_android.lighthouse.LighthouseViewModel
+import com.sun.minicpmo_android.lighthouse.call.CompanionMediaHandoffState
+import com.sun.minicpmo_android.lighthouse.call.CompanionMediaStopReason
 import com.sun.minicpmo_android.lighthouse.camera.QrCodeImage
 import com.sun.minicpmo_android.lighthouse.camera.QrScannerView
 import com.sun.minicpmo_android.lighthouse.model.ActivationPresentation
+import com.sun.minicpmo_android.lighthouse.model.ActivationApprovalDetails
 import com.sun.minicpmo_android.lighthouse.model.AppRole
 import com.sun.minicpmo_android.lighthouse.model.CompanionBindingView
 import com.sun.minicpmo_android.lighthouse.model.LighthouseUiState
 import com.sun.minicpmo_android.lighthouse.model.RemoteSessionView
 import com.sun.minicpmo_android.lighthouse.realtime.LiveCallPhase
 import com.sun.minicpmo_android.lighthouse.realtime.LiveCallState
+import com.sun.minicpmo_android.lighthouse.realtime.presentFamilyCall
 import com.sun.minicpmo_android.ui.MiniCpmRoute
 import com.sun.minicpmo_android.model.RealtimeMode
 import com.sun.minicpmo_android.ui.theme.MinicpmoAndroidTheme
@@ -139,13 +141,12 @@ fun LighthouseRoute(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val callState by viewModel.callState.collectAsStateWithLifecycle()
+    val mediaHandoffState by viewModel.companionMediaHandoffState.collectAsState()
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val latestCallPhase by rememberUpdatedState(callState.phase)
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var pendingPermissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
-    var remoteHandoffInProgress by remember { mutableStateOf(false) }
+    val remoteHandoffInProgress = mediaHandoffState !is CompanionMediaHandoffState.Idle
     val familyActions = remember(viewModel) {
         FamilyUiActions(
             requestEmailVerification = viewModel::requestEmailVerification,
@@ -154,6 +155,7 @@ fun LighthouseRoute(
             createHousehold = viewModel::createHousehold,
             createRecipient = viewModel::createRecipient,
             createActivation = viewModel::createActivation,
+            loadActivationApprovalDetails = viewModel::loadActivationApprovalDetails,
             approveActivation = viewModel::approveActivation,
             requestCall = viewModel::requestRemoteCall,
             createMemory = viewModel::createMemory,
@@ -166,6 +168,11 @@ fun LighthouseRoute(
             claimFamilyTask = viewModel::claimFamilyTask,
             finishFamilyTask = viewModel::finishFamilyTask,
             decideConsent = viewModel::decideConsent,
+            loadCareAuthorities = viewModel::loadCareAuthorities,
+            updateHouseholdMember = viewModel::updateHouseholdMember,
+            removeHouseholdMember = viewModel::removeHouseholdMember,
+            putCareAuthority = viewModel::putCareAuthority,
+            revokeBinding = viewModel::revokeBinding,
         )
     }
 
@@ -189,6 +196,57 @@ fun LighthouseRoute(
         }
     }
 
+    DisposableEffect(viewModel) {
+        viewModel.attachLocalCompanionStopConsumer()
+        onDispose { viewModel.detachLocalCompanionStopConsumer() }
+    }
+
+    LaunchedEffect(mediaHandoffState) {
+        val stopping = mediaHandoffState as? CompanionMediaHandoffState.StoppingLocalCompanion
+            ?: return@LaunchedEffect
+        viewModel.closeAiCompanion()
+        when (stopping.reason) {
+            CompanionMediaStopReason.REMOTE_ANSWER -> miniCpmViewModel.stopForRemoteCall(
+                onStopped = { viewModel.completeLocalCompanionStop(stopping.requestId) },
+                onFailure = { error ->
+                    viewModel.failLocalCompanionStop(stopping.requestId, error)
+                },
+            )
+            CompanionMediaStopReason.SERVER_DIRECTIVE ->
+                miniCpmViewModel.stopForServerDirective {
+                    viewModel.completeLocalCompanionStop(stopping.requestId)
+                }
+        }
+    }
+
+    LaunchedEffect(state.role, state.deviceActivated) {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            state.role == AppRole.COMPANION &&
+            state.deviceActivated &&
+            !context.hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+        }
+    }
+
+    LaunchedEffect(
+        state.pendingSystemAnswerSessionId,
+        state.incomingRemoteSession?.id,
+    ) {
+        val sessionId = state.pendingSystemAnswerSessionId ?: return@LaunchedEffect
+        val incoming = state.incomingRemoteSession?.takeIf { it.id == sessionId }
+            ?: return@LaunchedEffect
+        val permissions = buildList {
+            if (incoming.media.receiveDeviceAudio) add(Manifest.permission.RECORD_AUDIO)
+            if (incoming.media.receiveDeviceVideo) add(Manifest.permission.CAMERA)
+        }
+        withPermissions(permissions) {
+            viewModel.acceptIncomingCall(sessionId)
+            viewModel.consumeSystemAnswerIntent()
+        }
+    }
+
     LaunchedEffect(state.message, state.error) {
         (state.error ?: state.message)?.let {
             snackbar.showSnackbar(it)
@@ -204,36 +262,9 @@ fun LighthouseRoute(
         onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
 
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (
-                event == Lifecycle.Event.ON_STOP &&
-                latestCallPhase in setOf(LiveCallPhase.CONNECTING, LiveCallPhase.CONNECTED)
-            ) {
-                viewModel.onAppBackgrounded()
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
     if (state.aiScreenVisible) {
         MinicpmoAndroidTheme {
             val incoming = state.incomingRemoteSession
-            LaunchedEffect(remoteHandoffInProgress, incoming?.id) {
-                if (!remoteHandoffInProgress) return@LaunchedEffect
-                if (incoming == null) {
-                    remoteHandoffInProgress = false
-                    return@LaunchedEffect
-                }
-                // This effect starts after the handoff composition has removed
-                // MiniCpmRoute, so CameraX releases the camera before LiveKit joins.
-                miniCpmViewModel.stopForRemoteCall {
-                    viewModel.closeAiCompanion()
-                    remoteHandoffInProgress = false
-                    viewModel.acceptIncomingCall()
-                }
-            }
 
             Box(Modifier.fillMaxSize()) {
                 if (remoteHandoffInProgress) {
@@ -258,7 +289,7 @@ fun LighthouseRoute(
                                 }
                             }
                             withPermissions(permissions) {
-                                remoteHandoffInProgress = true
+                                viewModel.acceptIncomingCall()
                             }
                         },
                         onDecline = viewModel::declineIncomingCall,
@@ -293,12 +324,17 @@ fun LighthouseRoute(
         ) {
             when {
                 state.restoring -> LoadingScreen("正在安全恢复会话")
-                !state.signedIn -> AuthScreen(
+                !state.signedIn && !state.companionDeviceLocked -> AuthScreen(
                     busy = state.busy,
                     apiBaseUrl = state.apiBaseUrl,
                     onLogin = viewModel::login,
                     onRegister = viewModel::register,
                     onSaveApiBase = viewModel::saveApiBaseUrl,
+                    onReturnToCompanion = if (state.deviceActivated) {
+                        { viewModel.returnToCompanionDevice() }
+                    } else {
+                        null
+                    },
                 )
                 state.qrScannerVisible -> QrScannerScreen(
                     cameraGranted = context.hasPermission(Manifest.permission.CAMERA),
@@ -316,6 +352,7 @@ fun LighthouseRoute(
                     callState = callState,
                     onSwitchRole = viewModel::switchRole,
                     onLogout = viewModel::logout,
+                    onRequireFamilyAuthentication = viewModel::requireFamilyAuthentication,
                     onRefresh = viewModel::refresh,
                     familyActions = familyActions,
                     onCancelCall = viewModel::cancelRemoteRequest,
@@ -340,6 +377,7 @@ fun LighthouseRoute(
                         withPermissions(permissions) { viewModel.acceptIncomingCall() }
                     },
                     onDeclineCall = viewModel::declineIncomingCall,
+                    onDismissRemoteCallFailure = viewModel::dismissRemoteCallFailure,
                     onConnectDeviceCall = {
                         val media = state.activeRemoteSession?.media
                         val permissions = buildList {
@@ -354,7 +392,7 @@ fun LighthouseRoute(
                 )
             }
 
-            if (state.busy && state.signedIn) {
+            if (state.busy && (state.signedIn || state.companionDeviceLocked)) {
                 Surface(
                     color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.48f),
                     modifier = Modifier
@@ -387,13 +425,14 @@ private fun AuthScreen(
     onLogin: (String, String) -> Unit,
     onRegister: (String?, String?, String, String) -> Unit,
     onSaveApiBase: (String) -> Unit,
+    onReturnToCompanion: (() -> Unit)?,
 ) {
     var registering by rememberSaveable { mutableStateOf(false) }
     var identifier by rememberSaveable { mutableStateOf("") }
     var email by rememberSaveable { mutableStateOf("") }
     var username by rememberSaveable { mutableStateOf("") }
     var displayName by rememberSaveable { mutableStateOf("") }
-    var password by rememberSaveable { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var showServerSettings by rememberSaveable { mutableStateOf(false) }
     var serverDraft by remember(apiBaseUrl) { mutableStateOf(apiBaseUrl) }
@@ -512,10 +551,12 @@ private fun AuthScreen(
                     )
                     Button(
                         onClick = {
+                            val passwordForRequest = password
+                            password = ""
                             if (registering) {
-                                onRegister(email, username, password, displayName)
+                                onRegister(email, username, passwordForRequest, displayName)
                             } else {
-                                onLogin(identifier, password)
+                                onLogin(identifier, passwordForRequest)
                             }
                         },
                         enabled = !busy && password.isNotBlank() &&
@@ -532,6 +573,18 @@ private fun AuthScreen(
                 }
             }
             Spacer(Modifier.height(16.dp))
+            onReturnToCompanion?.let { onReturn ->
+                OutlinedButton(
+                    onClick = onReturn,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                ) {
+                    Icon(Icons.Rounded.Home, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("返回专用陪伴模式")
+                }
+                Spacer(Modifier.height(8.dp))
+            }
             TextButton(
                 onClick = { showServerSettings = !showServerSettings },
                 modifier = Modifier.height(48.dp),
@@ -578,6 +631,7 @@ private fun SignedInShell(
     callState: LiveCallState,
     onSwitchRole: (AppRole) -> Unit,
     onLogout: () -> Unit,
+    onRequireFamilyAuthentication: () -> Unit,
     onRefresh: () -> Unit,
     familyActions: FamilyUiActions,
     onCancelCall: () -> Unit,
@@ -587,13 +641,20 @@ private fun SignedInShell(
     onOpenAi: () -> Unit,
     onAcceptCall: () -> Unit,
     onDeclineCall: () -> Unit,
+    onDismissRemoteCallFailure: () -> Unit,
     onConnectDeviceCall: () -> Unit,
     onEndCall: () -> Unit,
     onAttachRenderer: (SurfaceViewRenderer) -> Unit,
     onDetachRenderer: (SurfaceViewRenderer) -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
-        AppHeader(state, onSwitchRole, onRefresh, onLogout)
+        AppHeader(
+            state,
+            onSwitchRole,
+            onRefresh,
+            onLogout,
+            onRequireFamilyAuthentication,
+        )
         HorizontalDivider()
         Box(Modifier.weight(1f)) {
             if (state.activeRemoteSession != null &&
@@ -603,6 +664,8 @@ private fun SignedInShell(
                     role = state.role,
                     session = state.activeRemoteSession,
                     callState = callState,
+                    familyFailureLatched = state.remoteCallFailureSessionId ==
+                        state.activeRemoteSession.id,
                     onConnect = if (state.role == AppRole.FAMILY) onConnectFamilyCall else onConnectDeviceCall,
                     onCancel = onCancelCall,
                     onEnd = onEndCall,
@@ -622,6 +685,7 @@ private fun SignedInShell(
                     onOpenAi,
                     onAcceptCall,
                     onDeclineCall,
+                    onDismissRemoteCallFailure,
                 )
             }
         }
@@ -634,6 +698,7 @@ private fun AppHeader(
     onSwitchRole: (AppRole) -> Unit,
     onRefresh: () -> Unit,
     onLogout: () -> Unit,
+    onRequireFamilyAuthentication: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -646,7 +711,11 @@ private fun AppHeader(
             Column(Modifier.weight(1f)) {
                 Text("守忆灯塔", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    state.user?.displayName.orEmpty(),
+                    if (state.companionDeviceLocked) {
+                        "${state.companionContext?.recipientName ?: "长者"}的专用陪伴设备"
+                    } else {
+                        state.user?.displayName.orEmpty()
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -654,11 +723,35 @@ private fun AppHeader(
             IconButton(onClick = onRefresh, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Rounded.Refresh, contentDescription = "刷新数据")
             }
-            IconButton(onClick = onLogout, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = "退出登录")
+            if (state.companionDeviceLocked) {
+                IconButton(
+                    onClick = onRequireFamilyAuthentication,
+                    enabled = state.activeRemoteSession == null,
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Icon(Icons.Rounded.Person, contentDescription = "家属管理（需要重新登录）")
+                }
+            } else {
+                IconButton(onClick = onLogout, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = "退出登录")
+                }
             }
         }
         Spacer(Modifier.height(8.dp))
+        if (state.companionDeviceLocked) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(Icons.Rounded.Lock, contentDescription = null, Modifier.size(18.dp))
+                Text(
+                    "设备身份已锁定；家属端令牌不保留",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            return@Column
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             RoleButton(
                 selected = state.role == AppRole.FAMILY,
@@ -702,7 +795,10 @@ private fun FamilyScreen(
     state.activation?.takeIf { it.challengeId != dismissedActivationId }?.let { activation ->
         ActivationDialog(
             activation = activation,
+            approvalDetails = state.activationApprovalDetails
+                ?.takeIf { it.challengeId == activation.challengeId },
             pendingChallengeId = state.pendingDeviceActivation?.challengeId,
+            onLoadApprovalDetails = actions.loadActivationApprovalDetails,
             onApprove = actions.approveActivation,
             onDismiss = { dismissedActivationId = activation.challengeId },
         )
@@ -765,6 +861,7 @@ private fun CompanionScreen(
     onOpenAi: () -> Unit,
     onAcceptCall: () -> Unit,
     onDeclineCall: () -> Unit,
+    onDismissRemoteCallFailure: () -> Unit,
 ) {
     if (!state.deviceActivated) {
         DeviceActivationScreen(state, onClaimDynamic, onOpenScanner)
@@ -804,6 +901,38 @@ private fun CompanionScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
+        state.remoteCallFailure?.let { failure ->
+            OutlinedCard(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.outlinedCardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                ),
+            ) {
+                Column(
+                    Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        state.remoteCallFailureTitle ?: "通话连接失败",
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        fontSize = 21.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        failure,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        fontSize = 18.sp,
+                        lineHeight = 28.sp,
+                    )
+                    OutlinedButton(
+                        onClick = onDismissRemoteCallFailure,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("我知道了")
+                    }
+                }
+            }
+        }
         Button(
             onClick = onOpenAi,
             modifier = Modifier.fillMaxWidth().height(76.dp),
@@ -932,12 +1061,23 @@ private fun RemoteCallScreen(
     role: AppRole,
     session: RemoteSessionView,
     callState: LiveCallState,
+    familyFailureLatched: Boolean,
     onConnect: () -> Unit,
     onCancel: () -> Unit,
     onEnd: () -> Unit,
     onAttachRenderer: (SurfaceViewRenderer) -> Unit,
     onDetachRenderer: (SurfaceViewRenderer) -> Unit,
 ) {
+    val familyPresentation = if (role == AppRole.FAMILY) {
+        presentFamilyCall(
+            sessionStatus = session.status,
+            sessionId = session.id,
+            mediaState = callState,
+            failureLatched = familyFailureLatched,
+        )
+    } else {
+        null
+    }
     BackHandler { if (session.status == "RINGING") onCancel() else onEnd() }
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -971,6 +1111,7 @@ private fun RemoteCallScreen(
                         Spacer(Modifier.height(12.dp))
                         Text(
                             when {
+                                familyPresentation != null -> familyPresentation.title
                                 session.status == "RINGING" -> "等待陪伴设备现场接听"
                                 callState.phase == LiveCallPhase.CONNECTING -> "正在连接音视频"
                                 else -> "对方已接听，可以进入通话"
@@ -986,6 +1127,29 @@ private fun RemoteCallScreen(
             title = "隐私保护已开启",
             body = "本次通话不录音、不录像、不转写。摄像头和麦克风状态会明确显示。",
         )
+        if (familyPresentation?.mediaFailed == true) {
+            OutlinedCard(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.outlinedCardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                ),
+            ) {
+                Column(
+                    Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        familyPresentation.title,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        familyPresentation.message,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
+        }
         if (callState.phase == LiveCallPhase.CONNECTED) {
             Row(
                 Modifier.fillMaxWidth(),
@@ -1005,7 +1169,11 @@ private fun RemoteCallScreen(
             OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth().height(60.dp)) {
                 Text("取消呼叫", fontSize = 18.sp)
             }
-        } else if (callState.phase !in setOf(LiveCallPhase.CONNECTING, LiveCallPhase.CONNECTED)) {
+        } else if (
+            familyPresentation?.canConnect == true ||
+            (role != AppRole.FAMILY &&
+                callState.phase !in setOf(LiveCallPhase.CONNECTING, LiveCallPhase.CONNECTED))
+        ) {
             Button(onClick = onConnect, modifier = Modifier.fillMaxWidth().height(64.dp)) {
                 Icon(Icons.Rounded.Call, contentDescription = null)
                 Spacer(Modifier.width(10.dp))
@@ -1115,7 +1283,9 @@ private fun IncomingCallDialog(
 @Composable
 private fun ActivationDialog(
     activation: ActivationPresentation,
+    approvalDetails: ActivationApprovalDetails?,
     pendingChallengeId: String?,
+    onLoadApprovalDetails: (String) -> Unit,
     onApprove: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1142,19 +1312,53 @@ private fun ActivationDialog(
                     "先让陪伴设备扫描或输入动态码，再由家属点击批准。二维码和动态码均为短时一次性凭据。",
                     textAlign = TextAlign.Center,
                 )
+                if (approvalDetails == null) {
+                    Text(
+                        "设备认领后，请先读取并核对型号、系统版本、认领时间和脱敏网络来源。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    OutlinedButton(
+                        onClick = { onLoadApprovalDetails(activation.challengeId) },
+                        modifier = Modifier.height(52.dp),
+                    ) { Text("读取待批准设备信息") }
+                } else {
+                    val deviceName = listOfNotNull(
+                        approvalDetails.device.manufacturer,
+                        approvalDetails.device.model,
+                    ).joinToString(" ").ifBlank { "未报告型号" }
+                    HorizontalDivider()
+                    Text("待批准设备", fontWeight = FontWeight.Bold)
+                    Text(deviceName)
+                    Text("${approvalDetails.device.platform} / ${approvalDetails.device.osVersion ?: "系统版本未知"}")
+                    Text("App ${approvalDetails.device.appVersion ?: "版本未知"}")
+                    Text("密钥算法：${approvalDetails.device.installationKeyAlgorithm}")
+                    Text("认领时间：${approvalDetails.claimedAt}")
+                    Text("网络来源：${approvalNetworkLabel(approvalDetails.claimNetworkSource)}")
+                    Text("安装密钥尾号：…${approvalDetails.device.keyFingerprintSuffix}")
+                }
             }
         },
         confirmButton = {
             Button(
                 onClick = { onApprove(activation.challengeId) },
-                enabled = pendingChallengeId == null || pendingChallengeId == activation.challengeId,
+                enabled = approvalDetails != null &&
+                    (pendingChallengeId == null || pendingChallengeId == activation.challengeId),
                 modifier = Modifier.height(52.dp),
-            ) { Text("设备已认领，批准激活") }
+            ) { Text(if (approvalDetails == null) "请先核对设备信息" else "确认上述信息并批准") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss, modifier = Modifier.height(52.dp)) { Text("稍后处理") }
         },
     )
+}
+
+private fun approvalNetworkLabel(source: String): String = when (source) {
+    "LOCAL_NETWORK" -> "本地或家庭网络（地址已隐藏）"
+    "LOOPBACK" -> "本机测试网络"
+    "PUBLIC_IPV4" -> "公网 IPv4（地址已隐藏）"
+    "PUBLIC_IPV6" -> "公网 IPv6（地址已隐藏）"
+    else -> "网络来源未知"
 }
 
 @Composable

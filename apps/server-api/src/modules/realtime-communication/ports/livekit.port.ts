@@ -4,6 +4,7 @@ import type {
 } from '../realtime.types';
 
 export interface LiveKitPort {
+  ensureRoom(roomName: string): Promise<void>;
   issueJoinTicket(command: LiveKitJoinTicketCommand): Promise<{
     token: string;
     url: string;

@@ -52,6 +52,13 @@ function harness() {
       status: 'CONFIRMED',
       version: 3,
     })),
+    requestFamilyContactByDevice: jest.fn(async () => ({
+      accepted: true as const,
+      careEventId: 'care-event-1',
+      familyTaskId: 'family-task-1',
+      occurrenceId: occurrence.id,
+      taskStatus: 'OPEN',
+    })),
   };
   return {
     workflow,
@@ -103,7 +110,12 @@ describe('DeviceOccurrencesController routes', () => {
     };
 
     await expect(
-      test.controller.confirm(principal, occurrence.id, body),
+      test.controller.confirm(
+        principal,
+        occurrence.id,
+        body.idempotencyKey,
+        body,
+      ),
     ).resolves.toMatchObject({ status: 'CONFIRMED', version: 3 });
     expect(test.workflow.confirmOccurrenceByDevice).toHaveBeenCalledWith(
       principal,
@@ -122,6 +134,41 @@ describe('DeviceOccurrencesController routes', () => {
         METHOD_METADATA,
         // eslint-disable-next-line @typescript-eslint/unbound-method
         DeviceOccurrencesController.prototype.confirm,
+      ),
+    ).toBe(RequestMethod.POST);
+  });
+
+  it('exposes the device family-contact command as an accepted POST route', async () => {
+    const test = harness();
+    const body = {
+      idempotencyKey: 'family-contact-route-1',
+      source: 'RECIPIENT_BUTTON' as const,
+      occurrenceId: occurrence.id,
+    };
+
+    await expect(
+      test.controller.requestFamilyContact(
+        principal,
+        body.idempotencyKey,
+        body,
+      ),
+    ).resolves.toMatchObject({ accepted: true, taskStatus: 'OPEN' });
+    expect(test.workflow.requestFamilyContactByDevice).toHaveBeenCalledWith(
+      principal,
+      body,
+    );
+    expect(
+      Reflect.getMetadata(
+        PATH_METADATA,
+        // eslint-disable-next-line @typescript-eslint/unbound-method
+        DeviceOccurrencesController.prototype.requestFamilyContact,
+      ),
+    ).toBe('family-contact-requests');
+    expect(
+      Reflect.getMetadata(
+        METHOD_METADATA,
+        // eslint-disable-next-line @typescript-eslint/unbound-method
+        DeviceOccurrencesController.prototype.requestFamilyContact,
       ),
     ).toBe(RequestMethod.POST);
   });

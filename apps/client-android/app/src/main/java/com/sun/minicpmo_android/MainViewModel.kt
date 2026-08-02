@@ -118,19 +118,44 @@ class MainViewModel(
         )
     }
 
-    /**
-     * Ends local capture/playback immediately, then attempts to close the
-     * server-side model session before allowing an onsite family call to be
-     * accepted. The callback runs on the ViewModel main scope exactly once.
-     */
-    fun stopForRemoteCall(onStopped: () -> Unit) {
+    /** Stops local capture/provider and confirms the server model is closed. */
+    fun stopForRemoteCall(
+        onStopped: () -> Unit,
+        onFailure: (Throwable) -> Unit,
+    ) {
+        val connection = stopLocalCompanionForHandoff()
+        if (connection == null) {
+            onStopped()
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                withTimeout(2_500) {
+                    requireNotNull(companionBridge) {
+                        "Companion session bridge is unavailable"
+                    }.end(connection, "REMOTE_CALL_ACCEPTED")
+                }
+            }.onSuccess {
+                onStopped()
+            }.onFailure(onFailure)
+        }
+    }
+
+    /** A STOP heartbeat means the server session is already non-reusable. */
+    fun stopForServerDirective(onStopped: () -> Unit) {
+        val connection = stopLocalCompanionForHandoff()
+        connection?.let { companionBridge?.acknowledgeServerStop(it) }
+        onStopped()
+    }
+
+    private fun stopLocalCompanionForHandoff(): CompanionModelConnection? {
         stoppedByUser = true
         pendingChat = null
+        val connection = companionConnection
+        companionConnection = null
         audioEngine.stop()
         realtimeClient.close("remote_call")
         latestVideoFrame.set(null)
-        val connection = companionConnection
-        companionConnection = null
         _uiState.value = _uiState.value.copy(
             phase = SessionPhase.STOPPED,
             statusText = "正在切换到家属通话",
@@ -140,18 +165,7 @@ class MainViewModel(
             audioLevel = 0f,
             forceListen = false,
         )
-        if (connection == null) {
-            onStopped()
-            return
-        }
-        viewModelScope.launch {
-            runCatching {
-                withTimeout(5_000) {
-                    companionBridge?.end(connection, "REMOTE_CALL_ACCEPTED")
-                }
-            }
-            onStopped()
-        }
+        return connection
     }
 
     fun togglePause() {

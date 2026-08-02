@@ -14,16 +14,22 @@ jest.mock('../identity.application.service', () => ({
 const config: IdentitySecurityConfig = {
   environment: 'test',
   accessTokenSecret: Buffer.from('a'.repeat(48)),
+  adminAccessTokenSecret: Buffer.from('d'.repeat(48)),
   refreshTokenPepper: Buffer.from('b'.repeat(48)),
   oneTimeTokenPepper: Buffer.from('c'.repeat(48)),
   accessTokenTtlSeconds: 900,
+  adminAccessTokenTtlSeconds: 600,
   refreshTokenTtlSeconds: 2_592_000,
   emailVerificationTtlSeconds: 86_400,
   passwordResetTtlSeconds: 1_800,
   accessTokenIssuer: 'issuer',
   accessTokenAudience: 'audience',
+  adminAccessTokenIssuer: 'admin-issuer',
+  adminAccessTokenAudience: 'admin-audience',
   refreshCookieName: 'refresh',
   refreshCookiePath: '/openBMB/api/v1/auth',
+  adminRefreshCookieName: 'admin-refresh',
+  adminRefreshCookiePath: '/openBMB/api/v1/admin/auth',
   secureCookies: false,
 };
 
@@ -98,5 +104,34 @@ describe('AuthController refresh transport', () => {
 
     expect(body.refreshToken).toBe('raw-refresh-token-must-not-leak-on-web');
     expect(cookie).not.toHaveBeenCalled();
+  });
+
+  it('revokes and clears a stale Web refresh cookie before device mode', async () => {
+    const revokeWebSessionByRefreshToken = jest.fn(() => Promise.resolve());
+    const identity = {
+      revokeWebSessionByRefreshToken,
+    } as unknown as IdentityApplicationService;
+    const clearCookie = jest.fn();
+    const response = { clearCookie } as unknown as Response;
+    const requestWithCookie = {
+      ...request,
+      headers: { cookie: 'refresh=stale-web-refresh-token' },
+    } as unknown as Request;
+    const controller = new AuthController(identity, config);
+
+    await expect(
+      controller.lockDeviceMode(requestWithCookie, response),
+    ).resolves.toEqual({ locked: true });
+    expect(revokeWebSessionByRefreshToken).toHaveBeenCalledWith(
+      'stale-web-refresh-token',
+    );
+    expect(clearCookie).toHaveBeenCalledWith(
+      'refresh',
+      expect.objectContaining({
+        httpOnly: true,
+        path: '/openBMB/api/v1/auth',
+        sameSite: 'strict',
+      }),
+    );
   });
 });

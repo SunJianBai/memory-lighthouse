@@ -52,6 +52,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -68,15 +69,20 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sun.minicpmo_android.lighthouse.model.CareRecipientInput
 import com.sun.minicpmo_android.lighthouse.model.CareEventView
+import com.sun.minicpmo_android.lighthouse.model.CareAuthorityInput
+import com.sun.minicpmo_android.lighthouse.model.CareAuthorityView
+import com.sun.minicpmo_android.lighthouse.model.CompanionBindingView
 import com.sun.minicpmo_android.lighthouse.model.ConsentCatalog
 import com.sun.minicpmo_android.lighthouse.model.ConsentScopeDefinition
 import com.sun.minicpmo_android.lighthouse.model.FamilyTaskView
 import com.sun.minicpmo_android.lighthouse.model.LighthouseUiState
+import com.sun.minicpmo_android.lighthouse.model.HouseholdMemberView
 import com.sun.minicpmo_android.lighthouse.model.MemoryInput
 import com.sun.minicpmo_android.lighthouse.model.MemoryView
 import com.sun.minicpmo_android.lighthouse.model.OccurrenceView
@@ -95,6 +101,7 @@ internal class FamilyUiActions(
     val createHousehold: (String, String) -> Unit,
     val createRecipient: (CareRecipientInput) -> Unit,
     val createActivation: (String) -> Unit,
+    val loadActivationApprovalDetails: (String) -> Unit,
     val approveActivation: (String) -> Unit,
     val requestCall: (String) -> Unit,
     val createMemory: (MemoryInput) -> Unit,
@@ -107,6 +114,11 @@ internal class FamilyUiActions(
     val claimFamilyTask: (FamilyTaskView) -> Unit,
     val finishFamilyTask: (FamilyTaskView, Boolean, String?) -> Unit,
     val decideConsent: (String, Boolean) -> Unit,
+    val loadCareAuthorities: () -> Unit,
+    val updateHouseholdMember: (HouseholdMemberView, Set<String>, String) -> Unit,
+    val removeHouseholdMember: (HouseholdMemberView, String) -> Unit,
+    val putCareAuthority: (String, CareAuthorityInput, String) -> Unit,
+    val revokeBinding: (CompanionBindingView, String?, String) -> Unit,
 )
 
 private enum class FamilySection(
@@ -117,6 +129,7 @@ private enum class FamilySection(
     MEMORIES("记忆", Icons.AutoMirrored.Rounded.MenuBook),
     CARE("照护", Icons.Rounded.CalendarMonth),
     PRIVACY("授权", Icons.Rounded.PrivacyTip),
+    ACCESS("成员", Icons.Rounded.VerifiedUser),
 }
 
 private data class TaskDecision(
@@ -152,6 +165,10 @@ internal fun FamilyManagementContent(
     var taskDecision by remember { mutableStateOf<TaskDecision?>(null) }
     var occurrenceDecision by remember { mutableStateOf<OccurrenceDecision?>(null) }
     var consentDecision by remember { mutableStateOf<ConsentDecision?>(null) }
+    var authorityEditor by remember { mutableStateOf<HouseholdMemberView?>(null) }
+    var memberRoleEditor by remember { mutableStateOf<HouseholdMemberView?>(null) }
+    var memberRemoval by remember { mutableStateOf<HouseholdMemberView?>(null) }
+    var bindingRevoke by remember { mutableStateOf<CompanionBindingView?>(null) }
 
     Column(Modifier.fillMaxSize()) {
         WorkspaceSelector(
@@ -169,7 +186,17 @@ internal fun FamilyManagementContent(
             items(FamilySection.entries) { item ->
                 FilterChip(
                     selected = section == item,
-                    onClick = { section = item },
+                    onClick = {
+                        section = item
+                        if (
+                            item == FamilySection.ACCESS &&
+                            state.selectedHousehold?.roleCodes?.contains("OWNER") == true &&
+                            state.selectedRecipientId != null &&
+                            state.authoritiesLoadedRecipientId != state.selectedRecipientId
+                        ) {
+                            actions.loadCareAuthorities()
+                        }
+                    },
                     label = { Text(item.label) },
                     leadingIcon = {
                         Icon(item.icon, contentDescription = null, Modifier.size(18.dp))
@@ -187,6 +214,7 @@ internal fun FamilyManagementContent(
                 onAddRecipient = { createRecipientVisible = true },
                 onCreateActivation = actions.createActivation,
                 onRequestCall = actions.requestCall,
+                onRevokeBinding = { bindingRevoke = it },
             )
             FamilySection.MEMORIES -> MemoriesSection(
                 state = state,
@@ -225,7 +253,63 @@ internal fun FamilyManagementContent(
                     consentDecision = ConsentDecision(definition, grant)
                 },
             )
+            FamilySection.ACCESS -> AuthoritySection(
+                state = state,
+                onLoad = actions.loadCareAuthorities,
+                onEditAuthority = { authorityEditor = it },
+                onEditRoles = { memberRoleEditor = it },
+                onRemoveMember = { memberRemoval = it },
+            )
         }
+    }
+
+    memberRoleEditor?.let { member ->
+        HouseholdMemberRoleDialog(
+            member = member,
+            busy = state.busy,
+            onDismiss = { memberRoleEditor = null },
+            onSave = { roleCodes, currentPassword ->
+                memberRoleEditor = null
+                actions.updateHouseholdMember(member, roleCodes, currentPassword)
+            },
+        )
+    }
+
+    memberRemoval?.let { member ->
+        RemoveHouseholdMemberDialog(
+            member = member,
+            busy = state.busy,
+            onDismiss = { memberRemoval = null },
+            onConfirm = { currentPassword ->
+                memberRemoval = null
+                actions.removeHouseholdMember(member, currentPassword)
+            },
+        )
+    }
+
+    authorityEditor?.let { member ->
+        CareAuthorityEditorDialog(
+            member = member,
+            authority = state.careAuthorities.firstOrNull { it.memberId == member.id },
+            busy = state.busy,
+            onDismiss = { authorityEditor = null },
+            onSave = { input, currentPassword ->
+                authorityEditor = null
+                actions.putCareAuthority(member.id, input, currentPassword)
+            },
+        )
+    }
+
+    bindingRevoke?.let { binding ->
+        RevokeBindingDialog(
+            binding = binding,
+            busy = state.busy,
+            onDismiss = { bindingRevoke = null },
+            onConfirm = { reasonCode, currentPassword ->
+                bindingRevoke = null
+                actions.revokeBinding(binding, reasonCode, currentPassword)
+            },
+        )
     }
 
     if (createHouseholdVisible) {
@@ -397,6 +481,7 @@ private fun OverviewSection(
     onAddRecipient: () -> Unit,
     onCreateActivation: (String) -> Unit,
     onRequestCall: (String) -> Unit,
+    onRevokeBinding: (CompanionBindingView) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -507,6 +592,17 @@ private fun OverviewSection(
                                         Spacer(Modifier.width(8.dp))
                                         Text("呼叫陪伴设备")
                                     }
+                                    OutlinedButton(
+                                        onClick = { onRevokeBinding(binding) },
+                                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                                        colors = ButtonDefaults.outlinedButtonColors(
+                                            contentColor = MaterialTheme.colorScheme.error,
+                                        ),
+                                    ) {
+                                        Icon(Icons.Rounded.Delete, contentDescription = null)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("解绑陪伴设备")
+                                    }
                                     Text(
                                         "需要陪伴设备现场明确接听；通话不录制、不转写。",
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -529,6 +625,502 @@ private fun OverviewSection(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AuthoritySection(
+    state: LighthouseUiState,
+    onLoad: () -> Unit,
+    onEditAuthority: (HouseholdMemberView) -> Unit,
+    onEditRoles: (HouseholdMemberView) -> Unit,
+    onRemoveMember: (HouseholdMemberView) -> Unit,
+) {
+    val recipient = state.selectedRecipient
+    val canManageMembers = state.selectedHousehold?.roleCodes?.contains("OWNER") == true
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 32.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            SectionHeading("成员照护权限", Icons.Rounded.VerifiedUser)
+            Text(
+                "家庭角色与长者级照护权限分别校验；服务端始终按当前身份重新授权。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (!canManageMembers) {
+            item {
+                Text(
+                    "只有家庭 OWNER 可以查看或修改成员角色与长者级照护权限。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            return@LazyColumn
+        }
+        if (recipient == null) {
+            item { Text("请先选择陪伴对象") }
+            return@LazyColumn
+        }
+        if (state.authoritiesLoadedRecipientId != recipient.id) {
+            item {
+                Button(
+                    onClick = onLoad,
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                ) {
+                    Icon(Icons.Rounded.Security, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("读取 ${recipient.preferredName} 的成员权限")
+                }
+            }
+            return@LazyColumn
+        }
+        if (state.householdMembers.isEmpty()) {
+            item { Text("当前家庭暂无已加入成员") }
+        } else {
+            items(state.householdMembers, key = { it.id }) { member ->
+                val authority = state.careAuthorities.firstOrNull { it.memberId == member.id }
+                OutlinedCard(Modifier.fillMaxWidth()) {
+                    Column(
+                        Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.Person, contentDescription = null)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(member.displayName, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    member.roleCodes.joinToString(" · ").ifBlank { "家庭成员" },
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Text(
+                                authority?.status?.let(::statusLabel) ?: "未授权",
+                                color = if (authority?.status == "ACTIVE") {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
+                        Text(
+                            authority?.permissionSummary() ?: "尚未为这位成员配置长者级权限",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            onClick = { onEditAuthority(member) },
+                            enabled = canManageMembers && member.status == "ACTIVE" && !state.busy,
+                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                        ) {
+                            Icon(Icons.Rounded.Edit, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (authority == null) "配置权限" else "修改权限")
+                        }
+                        if (canManageMembers) {
+                            val isSelf = member.userId == state.user?.id
+                            if (isSelf) {
+                                Text(
+                                    "为防误操作，不能在此修改或移除自己的家庭成员身份。",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            } else {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    OutlinedButton(
+                                        onClick = { onEditRoles(member) },
+                                        enabled = member.status == "ACTIVE" && !state.busy,
+                                        modifier = Modifier.weight(1f).height(48.dp),
+                                    ) {
+                                        Icon(Icons.Rounded.Security, contentDescription = null)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("家庭角色")
+                                    }
+                                    OutlinedButton(
+                                        onClick = { onRemoveMember(member) },
+                                        enabled = member.status == "ACTIVE" && !state.busy,
+                                        modifier = Modifier.weight(1f).height(48.dp),
+                                        colors = ButtonDefaults.outlinedButtonColors(
+                                            contentColor = MaterialTheme.colorScheme.error,
+                                        ),
+                                    ) {
+                                        Icon(Icons.Rounded.Delete, contentDescription = null)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("移除成员")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HouseholdMemberRoleDialog(
+    member: HouseholdMemberView,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (Set<String>, String) -> Unit,
+) {
+    var selectedRoles by remember(member.id, member.version) {
+        mutableStateOf(member.roleCodes.toSet())
+    }
+    // Deliberately not saveable and never normalized: this is one-request proof of presence.
+    var currentPassword by remember(member.id, member.version) { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = {
+            currentPassword = ""
+            onDismiss()
+        },
+        icon = { Icon(Icons.Rounded.Security, contentDescription = null) },
+        title = { Text("${member.displayName} 的家庭角色") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "角色决定家庭级权限。服务端会校验当前操作者仍为 OWNER，并保护最后一位所有者。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                HOUSEHOLD_ROLE_OPTIONS.forEach { (code, label) ->
+                    AuthorityToggle(label, code in selectedRoles) { checked ->
+                        selectedRoles = if (checked) selectedRoles + code else selectedRoles - code
+                    }
+                }
+                if (selectedRoles.isEmpty()) {
+                    Text("请至少保留一个角色", color = MaterialTheme.colorScheme.error)
+                }
+                OutlinedTextField(
+                    value = currentPassword,
+                    onValueChange = { currentPassword = it },
+                    label = { Text("当前账号密码") },
+                    supportingText = { Text("原样发送，仅用于本次角色变更") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val passwordForRequest = currentPassword
+                    currentPassword = ""
+                    onSave(selectedRoles, passwordForRequest)
+                },
+                enabled = !busy && selectedRoles.isNotEmpty() && currentPassword.isNotEmpty(),
+            ) { Text(if (busy) "正在提交" else "确认角色变更") }
+        },
+        dismissButton = {
+            TextButton(onClick = {
+                currentPassword = ""
+                onDismiss()
+            }) { Text("取消") }
+        },
+    )
+}
+
+@Composable
+private fun RemoveHouseholdMemberDialog(
+    member: HouseholdMemberView,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    // Deliberately not saveable and never normalized: this is one-request proof of presence.
+    var currentPassword by remember(member.id, member.version) { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = {
+            currentPassword = ""
+            onDismiss()
+        },
+        icon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+        title = { Text("移除 ${member.displayName}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "移除后，该成员的家庭角色、长者级照护权限、待接远程通话和未接受邀请都会由服务器同步撤销。",
+                )
+                OutlinedTextField(
+                    value = currentPassword,
+                    onValueChange = { currentPassword = it },
+                    label = { Text("当前账号密码") },
+                    supportingText = { Text("原样发送，仅用于本次移除") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val passwordForRequest = currentPassword
+                    currentPassword = ""
+                    onConfirm(passwordForRequest)
+                },
+                enabled = !busy && currentPassword.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                ),
+            ) { Text(if (busy) "正在移除" else "确认移除") }
+        },
+        dismissButton = {
+            TextButton(onClick = {
+                currentPassword = ""
+                onDismiss()
+            }) { Text("取消") }
+        },
+    )
+}
+
+@Composable
+private fun CareAuthorityEditorDialog(
+    member: HouseholdMemberView,
+    authority: CareAuthorityView?,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (CareAuthorityInput, String) -> Unit,
+) {
+    var relationshipLabel by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.relationshipLabel.orEmpty())
+    }
+    var accessLevel by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.accessLevel ?: "CUSTOM")
+    }
+    var canManageProfile by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.canManageProfile ?: false)
+    }
+    var canManageConsent by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.canManageConsent ?: false)
+    }
+    var canManageRoutine by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.canManageRoutine ?: false)
+    }
+    var canViewEvents by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.canViewEvents ?: false)
+    }
+    var canViewConversation by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.canViewConversation ?: false)
+    }
+    var canActivateDevice by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.canActivateDevice ?: false)
+    }
+    var canRemoteCall by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.canRemoteCall ?: false)
+    }
+    var receiveNotifications by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.receiveNotifications ?: false)
+    }
+    var active by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.status != "REVOKED")
+    }
+    var contactPriority by remember(member.id, authority?.version) {
+        mutableStateOf(authority?.contactPriority?.toString().orEmpty())
+    }
+    // Deliberately not saveable: the password disappears with the dialog/configuration.
+    var currentPassword by remember(member.id, authority?.version) { mutableStateOf("") }
+    val parsedPriority = contactPriority.trim().takeIf(String::isNotBlank)?.toIntOrNull()
+    val priorityValid = contactPriority.isBlank() || parsedPriority in 1..100
+
+    AlertDialog(
+        onDismissRequest = {
+            currentPassword = ""
+            onDismiss()
+        },
+        icon = { Icon(Icons.Rounded.VerifiedUser, contentDescription = null) },
+        title = { Text("${member.displayName} 的照护权限") },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "高风险能力按长者单独授权；提交时由服务器再次校验你的角色、权限与当前密码。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = relationshipLabel,
+                    onValueChange = { relationshipLabel = it.take(50) },
+                    label = { Text("与长者关系（可选）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = accessLevel,
+                    onValueChange = { accessLevel = it.take(32).uppercase() },
+                    label = { Text("权限级别") },
+                    supportingText = { Text("例如 FULL 或 CUSTOM") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                AuthorityToggle("管理长者资料", canManageProfile) { canManageProfile = it }
+                AuthorityToggle("管理隐私授权", canManageConsent) { canManageConsent = it }
+                AuthorityToggle("管理提醒日程", canManageRoutine) { canManageRoutine = it }
+                AuthorityToggle("查看照护事件", canViewEvents) { canViewEvents = it }
+                AuthorityToggle("查看陪伴对话", canViewConversation) { canViewConversation = it }
+                AuthorityToggle("激活陪伴设备", canActivateDevice) { canActivateDevice = it }
+                AuthorityToggle("发起远程通话", canRemoteCall) { canRemoteCall = it }
+                AuthorityToggle("接收通知", receiveNotifications) { receiveNotifications = it }
+                AuthorityToggle("权限启用", active) { active = it }
+                OutlinedTextField(
+                    value = contactPriority,
+                    onValueChange = { contactPriority = it.filter(Char::isDigit).take(3) },
+                    label = { Text("通知优先级（1–100，可选）") },
+                    isError = !priorityValid,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = currentPassword,
+                    onValueChange = { currentPassword = it },
+                    label = { Text("当前账号密码") },
+                    supportingText = { Text("仅随本次请求发送，不会保存") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val passwordForRequest = currentPassword
+                    currentPassword = ""
+                    onSave(
+                        CareAuthorityInput(
+                            relationshipLabel = relationshipLabel.trim().takeIf(String::isNotBlank),
+                            accessLevel = accessLevel.trim(),
+                            canManageProfile = canManageProfile,
+                            canManageConsent = canManageConsent,
+                            canManageRoutine = canManageRoutine,
+                            canViewEvents = canViewEvents,
+                            canViewConversation = canViewConversation,
+                            canActivateDevice = canActivateDevice,
+                            canRemoteCall = canRemoteCall,
+                            receiveNotifications = receiveNotifications,
+                            contactPriority = parsedPriority,
+                            status = if (active) "ACTIVE" else "REVOKED",
+                            version = authority?.version,
+                        ),
+                        passwordForRequest,
+                    )
+                },
+                enabled = !busy && currentPassword.isNotEmpty() && accessLevel.isNotBlank() && priorityValid,
+            ) { Text(if (busy) "正在提交" else "确认更新") }
+        },
+        dismissButton = {
+            TextButton(onClick = {
+                currentPassword = ""
+                onDismiss()
+            }) { Text("取消") }
+        },
+    )
+}
+
+@Composable
+private fun AuthorityToggle(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun RevokeBindingDialog(
+    binding: CompanionBindingView,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (String?, String) -> Unit,
+) {
+    var reasonCode by remember(binding.id) { mutableStateOf("FAMILY_REQUESTED_UNBIND") }
+    // Deliberately not saveable: the password disappears with the dialog/configuration.
+    var currentPassword by remember(binding.id) { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = {
+            currentPassword = ""
+            onDismiss()
+        },
+        icon = { Icon(Icons.Rounded.Delete, contentDescription = null) },
+        title = { Text("解绑 ${binding.displayName}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("解绑后该设备的全部凭据立即失效，长者需要重新走现场激活与家属批准流程。")
+                OutlinedTextField(
+                    value = reasonCode,
+                    onValueChange = { reasonCode = it.take(64) },
+                    label = { Text("原因代码（可选）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = currentPassword,
+                    onValueChange = { currentPassword = it },
+                    label = { Text("当前账号密码") },
+                    supportingText = { Text("仅随本次请求发送，不会保存") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val passwordForRequest = currentPassword
+                    currentPassword = ""
+                    onConfirm(reasonCode.trim().takeIf(String::isNotBlank), passwordForRequest)
+                },
+                enabled = !busy && currentPassword.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                ),
+            ) { Text(if (busy) "正在解绑" else "确认解绑") }
+        },
+        dismissButton = {
+            TextButton(onClick = {
+                currentPassword = ""
+                onDismiss()
+            }) { Text("取消") }
+        },
+    )
+}
+
+private fun CareAuthorityView.permissionSummary(): String {
+    val permissions = buildList {
+        if (canManageProfile) add("资料")
+        if (canManageConsent) add("授权")
+        if (canManageRoutine) add("日程")
+        if (canViewEvents) add("事件")
+        if (canViewConversation) add("对话")
+        if (canActivateDevice) add("设备激活")
+        if (canRemoteCall) add("远程通话")
+        if (receiveNotifications) add("通知")
+    }
+    return buildString {
+        append(relationshipLabel?.let { "$it · " }.orEmpty())
+        append(accessLevel)
+        append(" · ")
+        append(permissions.joinToString("、").ifBlank { "无功能权限" })
     }
 }
 
@@ -1676,6 +2268,12 @@ private val ROUTINE_TYPES = listOf(
     "OTHER" to "其他",
 )
 
+private val HOUSEHOLD_ROLE_OPTIONS = listOf(
+    "OWNER" to "家庭所有者",
+    "CAREGIVER" to "照护成员",
+    "VIEWER" to "只读成员",
+)
+
 /** Bit 0 is Sunday and bit 6 is Saturday, matching the server contract. */
 private val WEEKDAYS = listOf(
     1 to "日",
@@ -1739,6 +2337,7 @@ private fun severityLabel(value: String) = when (value) {
 
 private fun statusLabel(value: String) = when (value) {
     "ACTIVE" -> "已启用"
+    "REVOKED" -> "已撤销"
     "DELETED" -> "已删除"
     else -> value
 }

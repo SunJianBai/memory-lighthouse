@@ -21,7 +21,12 @@ export interface StoredObjectHead {
   contentLength: number | null;
   contentType: string | null;
   checksumSha256Base64: string | null;
+  serverSideEncryption: string | null;
   metadata: Record<string, string>;
+}
+
+export interface StoredObjectBody {
+  content: AsyncIterable<Uint8Array>;
 }
 
 export interface CreateDownloadGrantInput extends ObjectLocation {
@@ -39,6 +44,7 @@ export interface ObjectStoragePort {
 
   createUploadGrant: (input: CreateUploadGrantInput) => Promise<UploadGrant>;
   headObject: (location: ObjectLocation) => Promise<StoredObjectHead | null>;
+  readObject: (location: ObjectLocation) => Promise<StoredObjectBody | null>;
   createDownloadGrant: (
     input: CreateDownloadGrantInput,
   ) => Promise<DownloadGrant>;

@@ -3,7 +3,7 @@
 同一个 React/Vite Web 提供两个真实工作区，并保留原比赛 Demo：
 
 - `/openBMB/app/*`：家属工作区，数据与权限以 Server API 为准；
-- `/openBMB/companion`：陪伴设备模式，登录家属账号后还必须完成设备激活；
+- `/openBMB/companion`：陪伴设备模式；首次 Claim/批准后改用独立 Device Identity，已激活设备无需家属登录；
 - `/openBMB/demo/*`：完整保留原本地 Demo、MiniCPM-o runtime 和测试。
 
 ## 本地运行
@@ -29,6 +29,16 @@ npm run dev:client
   `/openBMB/auth/reset-password`、`/openBMB/invitations/accept`；token 仅在 fragment。
 - 陪伴 Web 使用 IndexedDB 保存 Ed25519 `CryptoKey` 和轮换设备凭据；长期
   credential 从不作为 Bearer Token，业务请求只使用短时 device access token。
+- 设备凭据兑换成功或检测到既有设备凭据时，客户端先撤销并清除当前家属会话，
+  再进入锁定的陪伴壳；返回家属工作区必须重新登录，不能用页面角色切换保留家属令牌。
+- 待兑换 Challenge 保存在当前浏览器会话中；瞬时失败释放单航班门闩。`CONSUMED`
+  状态返回绑定 MySQL Challenge 版本的 60 秒恢复令牌，浏览器用不可导出安装私钥签署
+  独立 `exchange-recovery` proof；旧请求不能重放。即使兑换已提交但响应丢失，也不会
+  重复创建 Binding，凭据落盘后会直接恢复设备上下文。
+- `CANCELLED / EXPIRED / ATTEMPTS_EXCEEDED` 会停止轮询并清理旧 Challenge；网络、5xx、
+  408、429 才自动重试，两类 409 恢复冲突最多尝试五次。若服务端已提交但 IndexedDB
+  事务在 commit 阶段中止，页面停止自动轮询但保留 Challenge 与恢复标记，刷新后继续
+  使用新恢复令牌；恢复完成前禁止新 Claim 覆盖该句柄，运行中的兑换门闩也不能被重置。
 - 家属远程通话只在陪伴端现场接听后连接 LiveKit，ticket 必须声明
   `recording=false` 和 `transcription=false`。
 - 陪伴端轮询受设备凭据保护的 `GET /device/remote-sessions/current` 发现跨设备

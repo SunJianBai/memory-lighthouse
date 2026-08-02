@@ -20,9 +20,17 @@ _Avoid_: Token, Identity
 User 在一个客户端上的可撤销登录状态。
 _Avoid_: Login, Device Session
 
+**Admin Session**:
+Operator 仅在管理员入口中使用的可撤销登录状态；它与 User Session 具有不同的令牌受众、刷新凭据用途和 Cookie 作用域，不能互换。
+_Avoid_: User Session, Platform Role
+
 **Device Identity**:
 陪伴设备完成激活后取得的独立身份，只拥有指定陪伴对象和用途的权限。
 _Avoid_: Family Session, Shared Login
+
+**Device Key Protection Capability**:
+官方客户端在安装登记时显式声明的密钥算法与不可导出保护协议版本；算法为 `ED25519` 或 `ECDSA_P256_SHA256`，保护值为 `NON_EXPORTABLE_V1`。服务端严格校验算法和公钥类型，但保护值仍是客户端版本门槛，不是硬件远程证明。
+_Avoid_: Attestation, Hardware Proof
 
 **Activation Challenge**:
 由家属发起、短时有效且只能成功使用一次的设备激活邀请。
@@ -31,4 +39,3 @@ _Avoid_: Permanent Code, Pairing Password
 **Platform Role**:
 User 在整个平台范围内承担的运营身份，例如开发检查员或平台管理员。
 _Avoid_: Household Role, Permission Group
-

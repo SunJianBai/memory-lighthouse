@@ -1,5 +1,6 @@
 export const DATA_ENCRYPTION_PORT = Symbol('DATA_ENCRYPTION_PORT');
 export const OBJECT_STORAGE_PORT = Symbol('OBJECT_STORAGE_PORT');
+export const MALWARE_SCANNER_PORT = Symbol('MALWARE_SCANNER_PORT');
 
 export const MEMORY_STATUS = {
   active: 'ACTIVE',
@@ -38,3 +39,10 @@ export const MEMORY_PAGE_MAX = 50;
 export const ASSET_UPLOAD_TTL_SECONDS = 300;
 export const ASSET_DOWNLOAD_TTL_SECONDS = 60;
 export const MAX_ASSET_BYTES = 100 * 1024 * 1024;
+
+export const ASSET_LIFECYCLE_EVENT = {
+  scanRequested: 'asset.scan-requested',
+  deleteRequested: 'asset.delete-requested',
+} as const;
+
+export const ASSET_LIFECYCLE_CONSUMER = 'asset-lifecycle-v1';

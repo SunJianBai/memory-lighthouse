@@ -143,9 +143,8 @@ export function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Pr
 
 export function refreshAccessToken(): Promise<SessionToken> {
   if (!refreshInFlight) {
-    refreshInFlight = performRequest<SessionToken>('/auth/refresh', {
+    refreshInFlight = performRequest<SessionToken>('/admin/auth/refresh', {
       method: 'POST',
-      body: { clientType: 'WEB' },
       authenticated: false,
       retryAuthentication: false
     })

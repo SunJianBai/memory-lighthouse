@@ -4,6 +4,7 @@ import type { Prisma } from '../../infrastructure/database/generated/prisma/clie
 import { PrismaService } from '../../infrastructure/database/prisma.service';
 import { newUlid } from '../identity/domain/ulid';
 import { VerifiedEmailPolicy } from '../identity/domain/verified-email.policy';
+import { IdentityApplicationService } from '../identity/identity.application.service';
 import type { HouseholdSecurityConfig } from './config/household-security.config';
 import { InvitationTokenService } from './crypto/invitation-token.service';
 import { HouseholdAccessPolicy } from './domain/household-access.policy';
@@ -46,6 +47,7 @@ import type {
   HouseholdMemberView,
   HouseholdView,
   PutCareAuthorityCommand,
+  RemoveHouseholdMemberCommand,
   RecipientAction,
   UpdateCareRecipientCommand,
   UpdateHouseholdCommand,
@@ -53,8 +55,11 @@ import type {
 } from './household.types';
 import type { HouseholdClock } from './ports/household-clock.port';
 import type { InvitationDeliveryPort } from './ports/invitation-delivery.port';
+import { RemoteMediaSecurityCoordinator } from '../realtime-communication/remote-media-security.coordinator';
 
 type TransactionClient = Prisma.TransactionClient;
+
+const SERIALIZABLE_RETRY_LIMIT = 3;
 
 interface HouseholdRecord {
   id: string;
@@ -124,6 +129,8 @@ export class HouseholdApplicationService {
     @Inject(HOUSEHOLD_CLOCK) private readonly clock: HouseholdClock,
     @Inject(HOUSEHOLD_SECURITY_CONFIG)
     private readonly securityConfig: HouseholdSecurityConfig,
+    private readonly mediaSecurity: RemoteMediaSecurityCoordinator,
+    private readonly identity: IdentityApplicationService,
   ) {}
 
   async listHouseholds(principal: AuthPrincipal): Promise<HouseholdView[]> {
@@ -229,35 +236,36 @@ export class HouseholdApplicationService {
     householdId: string,
     command: UpdateHouseholdCommand,
   ): Promise<HouseholdView> {
-    const member = await this.policy.requireHouseholdAction(
-      this.prisma,
-      principal.userId,
-      householdId,
-      'MANAGE_HOUSEHOLD',
-    );
-    const result = await this.prisma.household.updateMany({
-      where: { id: householdId, version: command.version },
-      data: {
-        ...(command.name === undefined ? {} : { name: command.name.trim() }),
-        ...(command.timezone === undefined
-          ? {}
-          : { timezone: command.timezone }),
-        version: { increment: 1 },
-      },
+    const result = await this.serializable(async (transaction) => {
+      const member = await this.policy.requireHouseholdAction(
+        transaction,
+        principal.userId,
+        householdId,
+        'MANAGE_HOUSEHOLD',
+      );
+      const updated = await transaction.household.updateMany({
+        where: { id: householdId, version: command.version },
+        data: {
+          ...(command.name === undefined ? {} : { name: command.name.trim() }),
+          ...(command.timezone === undefined
+            ? {}
+            : { timezone: command.timezone }),
+          version: { increment: 1 },
+        },
+      });
+      this.requireUpdated(updated.count);
+      const household = await transaction.household.findUnique({
+        where: { id: householdId },
+      });
+      return {
+        household,
+        roleCodes: this.checkedRoleCodes(member.roleCodes),
+      };
     });
-    this.requireUpdated(result.count);
-
-    const household = await this.prisma.household.findUnique({
-      where: { id: householdId },
-    });
-    if (!household) {
+    if (!result.household) {
       throw new HouseholdNotFoundException();
     }
-
-    return this.toHouseholdView(
-      household,
-      this.checkedRoleCodes(member.roleCodes),
-    );
+    return this.toHouseholdView(result.household, result.roleCodes);
   }
 
   async listMembers(
@@ -289,8 +297,12 @@ export class HouseholdApplicationService {
     if (roleCodes.length === 0) {
       throw new InvalidHouseholdRoleException();
     }
+    await this.identity.reauthenticateUser(
+      principal.userId,
+      command.currentPassword,
+    );
 
-    return this.serializable(async (transaction) => {
+    const result = await this.serializable(async (transaction) => {
       await this.policy.requireHouseholdAction(
         transaction,
         principal.userId,
@@ -335,16 +347,29 @@ export class HouseholdApplicationService {
       if (!member) {
         throw new HouseholdMemberNotFoundException();
       }
+      await this.mediaSecurity.markMemberRevoked(
+        transaction,
+        householdId,
+        memberId,
+        'MEMBER_AUTHORITY_CHANGED',
+        this.clock.now(),
+      );
       return this.toMemberView(member);
     });
+    await this.mediaSecurity.cleanupPendingForMember(householdId, memberId);
+    return result;
   }
 
   async removeMember(
     principal: AuthPrincipal,
     householdId: string,
     memberId: string,
-    version: number,
+    command: RemoveHouseholdMemberCommand,
   ): Promise<void> {
+    await this.identity.reauthenticateUser(
+      principal.userId,
+      command.currentPassword,
+    );
     await this.serializable(async (transaction) => {
       const removedAt = this.clock.now();
       await this.policy.requireHouseholdAction(
@@ -366,7 +391,7 @@ export class HouseholdApplicationService {
       if (!target) {
         throw new HouseholdAccessDeniedException();
       }
-      if (target.version !== version) {
+      if (target.version !== command.version) {
         throw new VersionConflictException();
       }
       if (this.roleCodes(target.roles).includes('OWNER')) {
@@ -378,7 +403,7 @@ export class HouseholdApplicationService {
           id: memberId,
           householdId,
           status: ACTIVE_MEMBER_STATUS,
-          version,
+          version: command.version,
         },
         data: {
           status: LEFT_MEMBER_STATUS,
@@ -404,7 +429,15 @@ export class HouseholdApplicationService {
           version: { increment: 1 },
         },
       });
+      await this.mediaSecurity.markMemberRevoked(
+        transaction,
+        householdId,
+        memberId,
+        'HOUSEHOLD_MEMBER_REMOVED',
+        removedAt,
+      );
     });
+    await this.mediaSecurity.cleanupPendingForMember(householdId, memberId);
   }
 
   async createInvitation(
@@ -430,7 +463,7 @@ export class HouseholdApplicationService {
     const targetEmail = this.normalizeEmail(command.targetEmail);
     const issuedToken = this.invitationTokens.issue();
 
-    const created = await this.prisma.$transaction(async (transaction) => {
+    const created = await this.serializable(async (transaction) => {
       const issuer = await this.policy.requireHouseholdAction(
         transaction,
         principal.userId,
@@ -489,7 +522,7 @@ export class HouseholdApplicationService {
     const now = this.clock.now();
     const tokenHash = this.invitationTokens.hash(rawToken);
 
-    return this.serializable(async (transaction) => {
+    const result = await this.serializable(async (transaction) => {
       const invitation = await transaction.householdInvitation.findUnique({
         where: { tokenHash },
         include: {
@@ -585,6 +618,7 @@ export class HouseholdApplicationService {
       }
       return this.toMemberView(member);
     });
+    return result;
   }
 
   async listCareRecipients(
@@ -627,7 +661,7 @@ export class HouseholdApplicationService {
   ): Promise<CareRecipientView> {
     const now = this.clock.now();
 
-    const recipient = await this.prisma.$transaction(async (transaction) => {
+    const recipient = await this.serializable(async (transaction) => {
       const creator = await this.policy.requireHouseholdAction(
         transaction,
         principal.userId,
@@ -705,47 +739,48 @@ export class HouseholdApplicationService {
     recipientId: string,
     command: UpdateCareRecipientCommand,
   ): Promise<CareRecipientView> {
-    await this.policy.requireRecipientAction(
-      this.prisma,
-      principal.userId,
-      householdId,
-      recipientId,
-      'MANAGE_RECIPIENT',
-    );
-    const updated = await this.prisma.careRecipient.updateMany({
-      where: {
-        id: recipientId,
+    const recipient = await this.serializable(async (transaction) => {
+      await this.policy.requireRecipientAction(
+        transaction,
+        principal.userId,
         householdId,
-        status: ACTIVE_RECIPIENT_STATUS,
-        deletedAt: null,
-        version: command.version,
-      },
-      data: {
-        ...(command.name === undefined ? {} : { name: command.name.trim() }),
-        ...(command.preferredName === undefined
-          ? {}
-          : { preferredName: command.preferredName.trim() }),
-        ...(command.birthDate === undefined
-          ? {}
-          : {
-              birthDate:
-                command.birthDate === null
-                  ? null
-                  : this.parseDateOnly(command.birthDate),
-            }),
-        ...(command.timezone === undefined
-          ? {}
-          : { timezone: command.timezone }),
-        ...(command.homeLabel === undefined
-          ? {}
-          : { homeLabel: command.homeLabel?.trim() ?? null }),
-        version: { increment: 1 },
-      },
-    });
-    this.requireUpdated(updated.count);
-
-    const recipient = await this.prisma.careRecipient.findFirst({
-      where: { id: recipientId, householdId, deletedAt: null },
+        recipientId,
+        'MANAGE_RECIPIENT',
+      );
+      const updated = await transaction.careRecipient.updateMany({
+        where: {
+          id: recipientId,
+          householdId,
+          status: ACTIVE_RECIPIENT_STATUS,
+          deletedAt: null,
+          version: command.version,
+        },
+        data: {
+          ...(command.name === undefined ? {} : { name: command.name.trim() }),
+          ...(command.preferredName === undefined
+            ? {}
+            : { preferredName: command.preferredName.trim() }),
+          ...(command.birthDate === undefined
+            ? {}
+            : {
+                birthDate:
+                  command.birthDate === null
+                    ? null
+                    : this.parseDateOnly(command.birthDate),
+              }),
+          ...(command.timezone === undefined
+            ? {}
+            : { timezone: command.timezone }),
+          ...(command.homeLabel === undefined
+            ? {}
+            : { homeLabel: command.homeLabel?.trim() ?? null }),
+          version: { increment: 1 },
+        },
+      });
+      this.requireUpdated(updated.count);
+      return transaction.careRecipient.findFirst({
+        where: { id: recipientId, householdId, deletedAt: null },
+      });
     });
     if (!recipient) {
       throw new RecipientNotFoundException();
@@ -785,7 +820,11 @@ export class HouseholdApplicationService {
     memberId: string,
     command: PutCareAuthorityCommand,
   ): Promise<CareAuthorityView> {
-    return this.serializable(async (transaction) => {
+    await this.identity.reauthenticateUser(
+      principal.userId,
+      command.currentPassword,
+    );
+    const result = await this.serializable(async (transaction) => {
       await this.policy.requireRecipientAction(
         transaction,
         principal.userId,
@@ -872,8 +911,21 @@ export class HouseholdApplicationService {
       if (!authority) {
         throw new RecipientNotFoundException();
       }
+      if (command.status !== 'ACTIVE' || !command.canRemoteCall) {
+        await this.mediaSecurity.markMemberRevoked(
+          transaction,
+          householdId,
+          memberId,
+          'RECIPIENT_REMOTE_AUTHORITY_REVOKED',
+          this.clock.now(),
+        );
+      }
       return this.toAuthorityView(authority);
     });
+    if (command.status !== 'ACTIVE' || !command.canRemoteCall) {
+      await this.mediaSecurity.cleanupPendingForMember(householdId, memberId);
+    }
+    return result;
   }
 
   async authorizeHouseholdAction(
@@ -923,12 +975,21 @@ export class HouseholdApplicationService {
     }
   }
 
-  private serializable<T>(
+  private async serializable<T>(
     work: (transaction: TransactionClient) => Promise<T>,
   ): Promise<T> {
-    return this.prisma.$transaction(work, {
-      isolationLevel: 'Serializable',
-    });
+    for (let attempt = 1; attempt <= SERIALIZABLE_RETRY_LIMIT; attempt += 1) {
+      try {
+        return await this.prisma.$transaction(work, {
+          isolationLevel: 'Serializable',
+        });
+      } catch (error) {
+        if (attempt === SERIALIZABLE_RETRY_LIMIT || !isRetryable(error)) {
+          throw error;
+        }
+      }
+    }
+    throw new Error('Serializable household transaction exhausted');
   }
 
   private async requireRole(
@@ -1154,4 +1215,13 @@ export class HouseholdApplicationService {
     }
     return date;
   }
+}
+
+function isRetryable(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'P2034'
+  );
 }

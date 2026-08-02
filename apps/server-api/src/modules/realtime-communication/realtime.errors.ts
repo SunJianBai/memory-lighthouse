@@ -66,6 +66,15 @@ export class RemoteSessionStateException extends ConflictException {
   }
 }
 
+export class RemoteJoinTicketAlreadyIssuedException extends ConflictException {
+  constructor() {
+    super({
+      code: 'REMOTE_JOIN_TICKET_ALREADY_ISSUED',
+      message: '本次参与者入场票已经签发，不能重复获取',
+    });
+  }
+}
+
 export class RemoteMediaInvalidException extends BadRequestException {
   constructor() {
     super({

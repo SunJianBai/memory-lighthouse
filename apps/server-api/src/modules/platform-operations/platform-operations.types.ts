@@ -1,4 +1,4 @@
-import type { UserPrincipal } from '../identity/identity.types';
+import type { AdminPrincipal } from '../identity/identity.types';
 import type { UserView } from '../identity/identity.types';
 import type { PlatformCapabilityCode } from './platform-capabilities';
 import type {
@@ -6,7 +6,7 @@ import type {
   PlatformRoleCode,
 } from './platform-operations.constants';
 
-export interface PlatformPrincipal extends UserPrincipal {
+export interface PlatformPrincipal extends AdminPrincipal {
   platformRoles: PlatformRoleCode[];
 }
 
@@ -33,6 +33,7 @@ export interface PlatformPage<T> {
 
 export interface PlatformRequestMetadata {
   requestId: string;
+  sourceIpHash: Uint8Array;
   userAgent?: string;
 }
 

@@ -9,6 +9,7 @@ const ALLOWED_TRANSITIONS: Readonly<
 > = {
   [OCCURRENCE_STATUS.due]: [
     OCCURRENCE_STATUS.awaitingConfirmation,
+    OCCURRENCE_STATUS.needsFamilyReview,
     OCCURRENCE_STATUS.expired,
   ],
   [OCCURRENCE_STATUS.awaitingConfirmation]: [

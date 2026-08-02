@@ -15,7 +15,7 @@ const token: SessionToken = {
   accessToken: 'access-token',
   accessTokenExpiresAt: '2026-08-01T00:05:00.000Z',
   expiresInSeconds: 300,
-  clientType: 'WEB',
+  purpose: 'ADMIN_WEB',
   refreshTokenExpiresAt: '2026-08-08T00:00:00.000Z',
   sessionId: 'session-1'
 }
@@ -58,7 +58,7 @@ describe('admin session', () => {
 
   it('clears a password login when the identity response has no platform role', async () => {
     api.apiRequest.mockImplementation(async (path: string) => {
-      if (path === '/auth/login') return token
+      if (path === '/admin/auth/login') return token
       return { ...adminIdentity, platformRoles: [], capabilities: [] }
     })
     const { login, sessionState } = await import('./session')
@@ -67,6 +67,12 @@ describe('admin session', () => {
       '当前账号没有管理中心访问权限'
     )
 
+    expect(api.apiRequest).toHaveBeenNthCalledWith(1, '/admin/auth/login', {
+      method: 'POST',
+      body: { identifier: 'household-user', password: 'password' },
+      authenticated: false,
+      retryAuthentication: false
+    })
     expect(api.apiRequest).toHaveBeenLastCalledWith('/admin/identity')
     expect(api.setAccessToken).toHaveBeenLastCalledWith(null)
     expect(sessionState.status).toBe('anonymous')

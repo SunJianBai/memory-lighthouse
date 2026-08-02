@@ -19,6 +19,7 @@ import {
   routeFromLocation,
   type ClientRoute,
 } from "./navigation";
+import { requiresFamilySession } from "./access-boundary";
 
 const CarePage = lazy(() => import("../pages/CarePage").then((module) => ({ default: module.CarePage })));
 const DemoPage = lazy(() => import("../pages/DemoPage").then((module) => ({ default: module.DemoPage })));
@@ -121,7 +122,7 @@ export const App = ({ sensitiveAction }: { sensitiveAction: SensitiveFragmentAct
 
   if (auth.status === "bootstrapping") return <LoadingScreen />;
 
-  const protectedRoute = route === "companion" || route.startsWith("workspace-") || route === "accept-invitation";
+  const protectedRoute = requiresFamilySession(route);
   if ((route === "login" || protectedRoute) && auth.status !== "authenticated") {
     return <AuthPage mode="login" returnToInvitation={route === "accept-invitation"} />;
   }

@@ -29,3 +29,12 @@ export const DEVICE_STATUS = {
   active: 'ACTIVE',
   revoked: 'REVOKED',
 } as const;
+
+export const DEVICE_KEY_PROTECTION = {
+  nonExportableV1: 'NON_EXPORTABLE_V1',
+} as const;
+
+export const INSTALLATION_KEY_ALGORITHM = {
+  ed25519: 'ED25519',
+  ecdsaP256Sha256: 'ECDSA_P256_SHA256',
+} as const;

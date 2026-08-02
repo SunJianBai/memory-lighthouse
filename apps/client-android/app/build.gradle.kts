@@ -52,6 +52,7 @@ android {
 dependencies {
 
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core.telecom)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
@@ -69,7 +70,6 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.livekit.android)
     implementation(libs.zxing.core)
-    implementation(libs.bouncycastle.provider)
     testImplementation(libs.junit)
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.org.json)

@@ -16,7 +16,7 @@ export interface SessionToken {
   accessToken: string
   accessTokenExpiresAt: string
   expiresInSeconds: number
-  clientType: 'WEB'
+  purpose: 'ADMIN_WEB'
   refreshTokenExpiresAt: string
   sessionId: string
 }

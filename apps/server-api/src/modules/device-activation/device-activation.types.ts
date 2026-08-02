@@ -1,5 +1,7 @@
 export type ActivationProofType = 'QR_SECRET' | 'DYNAMIC_CODE';
 
+export type InstallationKeyAlgorithm = 'ED25519' | 'ECDSA_P256_SHA256';
+
 export interface DevicePrincipal {
   kind: 'DEVICE';
   tokenId: string;
@@ -34,6 +36,29 @@ export interface PublicActivationStatus {
   expiresAt: string;
   claimedAt: string | null;
   approvedAt: string | null;
+  recoveryToken: string | null;
+  recoveryTokenExpiresAt: string | null;
+}
+
+export type ClaimNetworkSource =
+  'LOCAL_NETWORK' | 'LOOPBACK' | 'PUBLIC_IPV4' | 'PUBLIC_IPV6' | 'UNKNOWN';
+
+export interface ActivationApprovalDetails {
+  challengeId: string;
+  status: 'CLAIMED';
+  expiresAt: string;
+  claimedAt: string;
+  claimNetworkSource: ClaimNetworkSource;
+  claimSnapshotToken: string;
+  device: {
+    platform: string;
+    installationKeyAlgorithm: InstallationKeyAlgorithm;
+    manufacturer: string | null;
+    model: string | null;
+    osVersion: string | null;
+    appVersion: string | null;
+    keyFingerprintSuffix: string;
+  };
 }
 
 export interface DeviceCredentialPresentation {

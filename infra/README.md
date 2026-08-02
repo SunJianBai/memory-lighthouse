@@ -15,7 +15,8 @@ DNS records are required.
 ## Local development
 
 Copy `compose/.env.example` to the ignored `compose/.env`, replace every empty
-secret independently, and run:
+secret independently, including a MinIO SSE-S3 key in the documented
+`<name>:<base64-32-byte-key>` format, and run:
 
 ```sh
 docker compose --env-file infra/compose/.env -f infra/compose/compose.yml up -d
@@ -28,6 +29,9 @@ On Windows, the non-destructive health and isolation checks are available as:
 ```
 
 Do not run `docker compose down -v`; `-v` deletes the named data volumes.
+The API-side asset worker fails closed when `CLAMAV_HOST` is absent. A local
+clamd is optional for infrastructure-only checks but required for an upload to
+reach `CLEAN`.
 
 ## Production
 

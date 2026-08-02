@@ -39,4 +39,47 @@ describe('RateLimitRequestSubjectFactory proxy boundary', () => {
       factory.resolve(request('198.51.100.9', '203.0.113.8'), ['ip']),
     ).toEqual([{ kind: 'ip', value: '198.51.100.9' }]);
   });
+
+  it('extracts authenticated account, source session, and target device dimensions', () => {
+    const factory = new RateLimitRequestSubjectFactory(config(0));
+    const authenticated = request('198.51.100.9', '') as Request & {
+      userPrincipal: { userId: string; sessionId: string };
+    };
+    authenticated.userPrincipal = {
+      userId: 'user-1',
+      sessionId: 'session-1',
+    };
+    authenticated.body = { bindingId: 'binding-1' };
+
+    expect(
+      factory.resolve(authenticated, [
+        'user-account',
+        'user-session',
+        'binding-id',
+      ]),
+    ).toEqual([
+      { kind: 'user-account', value: 'user-1' },
+      { kind: 'user-session', value: 'session-1' },
+      { kind: 'binding-id', value: 'binding-1' },
+    ]);
+  });
+
+  it('extracts the recipient dimension from an authenticated activation route', () => {
+    const factory = new RateLimitRequestSubjectFactory(config(0));
+    const authenticated = request('198.51.100.9', '') as Request & {
+      userPrincipal: { userId: string; sessionId: string };
+    };
+    authenticated.userPrincipal = {
+      userId: 'user-1',
+      sessionId: 'session-1',
+    };
+    authenticated.params = { recipientId: 'recipient-1' };
+
+    expect(
+      factory.resolve(authenticated, ['user-account', 'recipient-id']),
+    ).toEqual([
+      { kind: 'user-account', value: 'user-1' },
+      { kind: 'recipient-id', value: 'recipient-1' },
+    ]);
+  });
 });

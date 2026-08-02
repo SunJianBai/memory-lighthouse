@@ -1,0 +1,3 @@
+This release only registers device installations that declare the
+NON_EXPORTABLE_V1 activation protocol and whose official clients generate the
+private signing key in a non-exportable platform keystore.
