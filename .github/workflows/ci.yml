@@ -43,15 +43,13 @@ jobs:
       - name: Validate Prisma schema
         run: npm run prisma:validate
 
+      - name: Test documented database model guard
+        shell: bash
+        run: ./.github/scripts/test-verify-prisma-schema-equivalence.sh
+
       - name: Validate documented database model stays equivalent
         shell: bash
-        run: |
-          set -euo pipefail
-          npx prisma validate --config docs/refactor/database/prisma.config.ts
-          npx prisma migrate diff \
-            --from-schema apps/server-api/prisma/schema.prisma \
-            --to-schema docs/refactor/database/schema.prisma \
-            --exit-code
+        run: ./.github/scripts/verify-prisma-schema-equivalence.sh
 
       - name: Check API and event contracts
         run: npm run check:contracts
