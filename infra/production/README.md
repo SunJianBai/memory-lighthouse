@@ -212,8 +212,9 @@ TX4H4G 所在网络不能可靠持续拉取 GHCR/Docker Hub 大镜像，因此�
 `.github/workflows/production-delivery.yml` 在已通过 CI 的 GitHub Runner 上构建
 四个应用镜像、拉取本文件锁定的基础设施镜像，并把十个精确镜像推送到 GHCR 留存
 registry digest 溯源。实际交付通过固定主机密钥的 SSH 完成，不把 GHCR Token 传给
-服务器：服务器先按精确 image ID 复用已有内容；仅对缺失镜像逐个执行压缩、32 MiB
-分块、块级与整包 SHA-256 校验和 `docker load`。失败重跑会从内容寻址 cache 复用已经
+服务器：服务器先按精确 image ID 复用已有内容；仅对缺失镜像逐个执行压缩、分块、
+块级与整包 SHA-256 校验和 `docker load`。生产工作流使用 8 MiB 分块，脚本默认上限为
+32 MiB；失败重跑会从内容寻址 cache 复用已经
 验证的块，session 元数据按 Actions run/attempt 隔离；每个镜像导入后立即清理压缩块，
 全程至少保留 4 GiB Docker 磁盘余量。服务器不会从第三方公共加速器或 Docker Hub
 拉取镜像。
@@ -223,6 +224,13 @@ ControlMaster；完整 SSH banner/KEX/认证失败最多重试 6 次，后续 `s
 连接。普通连接配置以 `ProxyCommand /bin/false` 禁止主连接缺失时自动直连；重试辅助
 脚本不会重放可能已经开始执行的远端命令。主连接意外丢失时，当前步骤安全失败，由
 不可变发布与断点 cache 支持整次工作流重跑。
+
+镜像传输另外顺序建立 `tx4h4g-prod-lane-1` 至 `lane-8` 八条独立数据连接；SSH
+`ControlPath` 包含原始主机别名，确保它们不会折叠回同一条 TCP。主连接独占远端
+transfer lease、元数据、导入与最终清单，数据连接只并行传送同一镜像的缺失分块。
+数据连接中断时，只允许通过无远端命令的 helper 重建连接，再按 size/SHA-256 探测
+final/partial 状态；已完成的 SCP 或原子 `mv -Tf` 不会被盲目重放。主 lease 丢失会终止
+全部上传 worker，并禁止随后执行 import/finalize。
 
 仓库的 `production` Environment 需要两个 Base64 编码的 Actions Secret：
 `TX4H4G_SSH_PRIVATE_KEY_BASE64` 和 `TX4H4G_KNOWN_HOSTS_BASE64`。仓库变量

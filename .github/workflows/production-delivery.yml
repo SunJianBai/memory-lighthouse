@@ -34,7 +34,7 @@ jobs:
        vars.PRODUCTION_DEPLOY_ENABLED == 'true')
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 120
+    timeout-minutes: 360
 
     steps:
       - name: Check out the exact validated commit
@@ -76,7 +76,7 @@ jobs:
           chmod 0600 "$HOME/.ssh/openbmb_deploy" "$HOME/.ssh/known_hosts"
           ssh-keygen -y -f "$HOME/.ssh/openbmb_deploy" >/dev/null
           cat > "$HOME/.ssh/config" <<EOF
-          Host tx4h4g-prod
+          Host tx4h4g-prod tx4h4g-prod-lane-*
             HostName $DEPLOY_HOST
             User $DEPLOY_USER
             IdentityFile ~/.ssh/openbmb_deploy
@@ -88,7 +88,7 @@ jobs:
             UserKnownHostsFile ~/.ssh/known_hosts
             GlobalKnownHostsFile /dev/null
             ControlMaster no
-            ControlPath ~/.ssh/openbmb-%C
+            ControlPath ~/.ssh/openbmb-%n-%C
             ControlPersist 130m
             ProxyCommand /bin/false
             ServerAliveInterval 30
@@ -262,12 +262,18 @@ jobs:
         run: |
           set -euo pipefail
           bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
+          for lane in {1..8}; do
+            bash infra/production/scripts/ensure-ssh-master.sh \
+              "tx4h4g-prod-lane-$lane" 6 5
+          done
           manifest_name="openbmb-images-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
           host_image_manifest="$RUNNER_TEMP/$manifest_name"
           source infra/production/scripts/release-image-set.sh
           openbmb_load_release_image_set "$RELEASE_ID"
           required_images=("${OPENBMB_REQUIRED_IMAGES[@]}")
-          bash infra/production/scripts/transfer-release-images.sh \
+          OPENBMB_TRANSFER_SSH_LANES=8 \
+            OPENBMB_TRANSFER_CHUNK_BYTES=8388608 \
+            bash infra/production/scripts/transfer-release-images.sh \
             "$RELEASE_ID" "$SOURCE_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             tx4h4g-prod "$host_image_manifest"
           [[ "$(wc -l < "$host_image_manifest")" -eq "${#required_images[@]}" ]]
@@ -450,4 +456,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          for lane in {1..8}; do
+            ssh -O exit "tx4h4g-prod-lane-$lane" >/dev/null 2>&1 || true
+          done
           ssh -O exit tx4h4g-prod >/dev/null 2>&1 || true
