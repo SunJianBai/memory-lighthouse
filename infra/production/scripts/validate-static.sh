@@ -401,6 +401,15 @@ grep -Fq 'if sudo -n test -e "$release_root" || sudo -n test -L "$release_root";
 grep -Fq 'sudo -n test ! -e "$incoming"' "$delivery_workflow"
 grep -Fq 'sudo -n env OPENBMB_DOMAIN=sun227454.online bash' "$delivery_workflow"
 grep -Fq 'test "${docker_free_kib:-0}" -ge 4194304' "$delivery_workflow"
+grep -Fq '"containerd-snapshotter": true' "$delivery_workflow"
+grep -Fq 'io.containerd.snapshotter.v1' "$delivery_workflow"
+grep -Fq "docker image inspect --format '{{.Descriptor.digest}}'" "$delivery_workflow"
+assert_before "$delivery_workflow" \
+  'name: Use stable OCI image identities on the runner' \
+  'name: Build immutable application images'
+assert_before "$delivery_workflow" \
+  'name: Verify stable OCI image identities' \
+  'name: Publish exact release transport images to GHCR'
 grep -Fq 'ConnectTimeout 20' "$delivery_workflow"
 grep -Fq 'ConnectionAttempts 1' "$delivery_workflow"
 grep -Fq 'ControlMaster no' "$delivery_workflow"
