@@ -106,6 +106,7 @@ jobs:
              sudo -n true
              docker version >/dev/null
              docker compose version >/dev/null
+             docker info --format "{{json .DriverStatus}}" | grep -Fq "io.containerd.snapshotter.v1"
              sudo -n test -d /opt/openbmb
              sudo -n test ! -L /opt/openbmb
              test "$(sudo -n stat -c %U:%G /opt/openbmb)" = root:openbmb
@@ -140,6 +141,51 @@ jobs:
              fi")"
           [[ "$already_staged" == true || "$already_staged" == false ]]
           echo "ALREADY_STAGED=$already_staged" >> "$GITHUB_ENV"
+
+      - name: Use stable OCI image identities on the runner
+        if: env.ALREADY_STAGED != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          daemon_config=/etc/docker/daemon.json
+          current_config='{}'
+          if sudo test -f "$daemon_config"; then
+            current_config="$(sudo cat "$daemon_config")"
+          fi
+          updated_config="$(
+            jq -ce '
+              if type != "object" then
+                error("Docker daemon configuration must be a JSON object")
+              elif (.features != null and (.features | type) != "object") then
+                error("Docker daemon features configuration must be a JSON object")
+              else
+                .features = ((.features // {}) + {"containerd-snapshotter": true})
+              end
+            ' <<<"$current_config"
+          )"
+          config_tmp="$(mktemp "$RUNNER_TEMP/openbmb-docker-daemon.XXXXXX.json")"
+          cleanup() {
+            rm -f -- "$config_tmp"
+          }
+          trap cleanup EXIT
+          printf '%s\n' "$updated_config" > "$config_tmp"
+          sudo install -o root -g root -m 0644 "$config_tmp" "$daemon_config"
+          sudo systemctl restart docker
+
+          driver_status=''
+          for attempt in {1..12}; do
+            driver_status="$(docker info --format '{{json .DriverStatus}}' 2>/dev/null || true)"
+            if jq -e \
+              'any(.[]; . == ["driver-type", "io.containerd.snapshotter.v1"])' \
+              <<<"$driver_status" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          jq -e 'any(.[]; . == ["driver-type", "io.containerd.snapshotter.v1"])' \
+            <<<"$driver_status" >/dev/null
+          trap - EXIT
+          cleanup
 
       - name: Build immutable application images
         if: env.ALREADY_STAGED != 'true'
@@ -186,6 +232,26 @@ jobs:
             if [[ "$source_image" != "$release_image" ]]; then
               docker pull "$source_image"
               docker tag "$source_image" "$release_image"
+             fi
+           done
+
+      - name: Verify stable OCI image identities
+        if: env.ALREADY_STAGED != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source infra/production/scripts/release-image-set.sh
+          openbmb_load_release_image_set "$RELEASE_ID"
+          for image_name in "${OPENBMB_REQUIRED_IMAGES[@]}"; do
+            image_id="$(docker image inspect --format '{{.Id}}' "$image_name")"
+            descriptor_digest="$(
+              docker image inspect --format '{{.Descriptor.digest}}' "$image_name"
+            )"
+            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$descriptor_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            if [[ "$image_id" != "$descriptor_digest" ]]; then
+              printf 'unstable cross-host image identity for %s\n' "$image_name" >&2
+              exit 1
             fi
           done
 
