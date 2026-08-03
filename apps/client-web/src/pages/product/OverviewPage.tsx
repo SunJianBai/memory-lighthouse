@@ -110,7 +110,7 @@ export const OverviewPage = () => {
         <ShieldCheck aria-hidden="true" size={28} />
         <div>
           <h2>先完成邮箱验证</h2>
-          <p>为了防止匿名账号创建家庭或激活摄像头设备，服务器要求至少一个已验证邮箱。</p>
+          <p>为了防止匿名账号创建家庭或激活摄像头设备，请先在账号设置中输入邮件里的 6 位验证码。</p>
           <button className="primary-button" type="button" onClick={() => navigate("workspace-settings")}>前往账号设置</button>
         </div>
       </section>

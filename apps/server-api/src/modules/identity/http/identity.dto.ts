@@ -71,6 +71,12 @@ export class EmailVerificationRequestDto {
   email!: string;
 }
 
+export class EmailVerificationConfirmDto extends EmailVerificationRequestDto {
+  @IsString()
+  @Matches(/^\d{6}$/)
+  code!: string;
+}
+
 export class OneTimeTokenConfirmDto {
   @IsString()
   @Length(32, 512)

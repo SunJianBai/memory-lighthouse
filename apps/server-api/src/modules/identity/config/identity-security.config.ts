@@ -139,9 +139,9 @@ export function createIdentitySecurityConfig(
     emailVerificationTtlSeconds: seconds(
       config,
       'AUTH_EMAIL_VERIFICATION_TTL_SECONDS',
-      24 * 60 * 60,
-      15 * 60,
-      48 * 60 * 60,
+      10 * 60,
+      5 * 60,
+      30 * 60,
     ),
     passwordResetTtlSeconds: seconds(
       config,

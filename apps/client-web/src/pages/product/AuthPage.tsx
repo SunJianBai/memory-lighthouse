@@ -13,6 +13,10 @@ import { useEffect, useState, type FormEvent } from "react";
 import { apiClient, readableError } from "../../api/api-client";
 import { navigate } from "../../app/navigation";
 import { useAuth } from "../../auth/auth-context";
+import {
+  isCompleteEmailVerificationCode,
+  normalizeEmailVerificationCode,
+} from "../../auth/email-verification-model";
 import { BrandMark } from "../../components/BrandMark";
 
 type AuthMode =
@@ -30,10 +34,10 @@ type AuthPageProps = {
 
 const modeCopy: Record<AuthMode, { title: string; description: string }> = {
   login: { title: "欢迎回来", description: "登录后进入家属工作区或已激活的陪伴设备模式。" },
-  register: { title: "创建守忆灯塔账号", description: "邮箱验证后才能创建家庭和激活陪伴设备。" },
+  register: { title: "创建守忆灯塔账号", description: "注册后输入邮件中的 6 位验证码，即可完成邮箱验证。" },
   "forgot-password": { title: "重置密码", description: "输入邮箱或用户名，我们会发送一次性重置链接。" },
   "reset-password": { title: "设置新密码", description: "此链接只能使用一次；提交后其他会话将失效。" },
-  "verify-email": { title: "验证邮箱", description: "验证成功后即可创建家庭、添加陪伴对象和激活设备。" },
+  "verify-email": { title: "验证邮箱", description: "输入邮箱和邮件中的 6 位验证码完成验证。" },
 };
 
 export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => {
@@ -43,6 +47,9 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
+  const [registrationCreated, setRegistrationCreated] = useState(false);
+  const [emailVerified, setEmailVerified] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -52,7 +59,18 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
     setError("");
     setSuccess("");
     setPassword("");
+    setVerificationCode("");
+    setRegistrationCreated(false);
+    setEmailVerified(false);
   }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "verify-email") return;
+    const currentEmail = auth.user?.identities.find(
+      (identity) => identity.type === "EMAIL" && !identity.verifiedAt,
+    );
+    if (currentEmail) setEmail((current) => current || currentEmail.value);
+  }, [auth.user, mode]);
 
   const finishAuthentication = () => {
     navigate(returnToInvitation ? "accept-invitation" : "workspace-overview");
@@ -68,13 +86,24 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
         await auth.login(identifier.trim(), password);
         finishAuthentication();
       } else if (mode === "register") {
-        await auth.register({
-          email: email.trim(),
-          username: username.trim() || undefined,
-          displayName: displayName.trim() || undefined,
-          password,
-        });
-        setSuccess("账号已创建。请前往邮箱完成验证；当前仍可进入账号设置。 ");
+        if (!registrationCreated) {
+          await auth.register({
+            email: email.trim(),
+            username: username.trim() || undefined,
+            displayName: displayName.trim() || undefined,
+            password,
+          });
+          setRegistrationCreated(true);
+          setPassword("");
+          setSuccess("账号已创建，6 位验证码已发送到你的邮箱。 ");
+        } else {
+          if (!isCompleteEmailVerificationCode(verificationCode)) {
+            throw new Error("请输入邮件中的 6 位数字验证码");
+          }
+          await auth.confirmEmailVerification(email, verificationCode);
+          setEmailVerified(true);
+          setSuccess("邮箱验证成功，现在可以创建家庭和激活设备。 ");
+        }
       } else if (mode === "forgot-password") {
         await apiClient.request<{ accepted: true }>("/auth/password-resets", {
           method: "POST",
@@ -93,14 +122,12 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
         });
         setSuccess("密码已更新，请使用新密码登录。 ");
       } else {
-        if (!token) throw new Error("验证链接缺少一次性令牌，请重新发送");
-        await apiClient.request("/auth/email-verifications/confirm", {
-          method: "POST",
-          body: { token },
-          authenticated: false,
-          retryAuthentication: false,
-        });
-        if (auth.status === "authenticated") await auth.refreshUser();
+        if (!email.trim()) throw new Error("请输入接收验证码的邮箱");
+        if (!isCompleteEmailVerificationCode(verificationCode)) {
+          throw new Error("请输入邮件中的 6 位数字验证码");
+        }
+        await auth.confirmEmailVerification(email, verificationCode);
+        setEmailVerified(true);
         setSuccess("邮箱验证成功，现在可以创建家庭和激活设备。 ");
       }
     } catch (submitError) {
@@ -110,7 +137,30 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
     }
   };
 
-  const needsPassword = ["login", "register", "reset-password"].includes(mode);
+  const resendVerification = async () => {
+    if (!email.trim()) {
+      setError("请输入接收验证码的邮箱");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setSuccess("");
+    try {
+      await auth.requestEmailVerification(email);
+      setSuccess("新的 6 位验证码已发送，请检查收件箱与垃圾邮件。 ");
+    } catch (sendError) {
+      setError(readableError(sendError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const isVerificationStep =
+    mode === "verify-email" || (mode === "register" && registrationCreated);
+  const needsPassword =
+    mode === "login" || mode === "reset-password" || (mode === "register" && !registrationCreated);
+  const verificationReady =
+    email.trim().length > 0 && isCompleteEmailVerificationCode(verificationCode);
 
   return (
     <main id="main-content" className="auth-page" tabIndex={-1}>
@@ -126,7 +176,7 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
         <ul>
           <li><ShieldCheck aria-hidden="true" size={20} /> 家属远程通话不录音、不转写</li>
           <li><LockKeyhole aria-hidden="true" size={20} /> Web 刷新令牌仅放在 HttpOnly Cookie</li>
-          <li><KeyRound aria-hidden="true" size={20} /> 一次性链接打开后立即从地址栏清除</li>
+          <li><KeyRound aria-hidden="true" size={20} /> 邮箱验证码不写入地址栏或浏览器存储</li>
         </ul>
       </section>
 
@@ -141,7 +191,7 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
         </div>
 
         <form className="stack-form" onSubmit={(event) => void submit(event)}>
-          {mode === "register" && (
+          {mode === "register" && !registrationCreated && (
             <>
               <label htmlFor="register-email">邮箱 <span aria-hidden="true">*</span></label>
               <div className="input-with-icon">
@@ -162,6 +212,59 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
             <>
               <label htmlFor="auth-identifier">邮箱或用户名</label>
               <input id="auth-identifier" autoComplete="username" minLength={3} required value={identifier} onChange={(event) => setIdentifier(event.target.value)} />
+            </>
+          )}
+
+          {isVerificationStep && (
+            <>
+              <label htmlFor="verification-email">接收验证码的邮箱</label>
+              <div className="input-with-icon">
+                <Mail aria-hidden="true" size={19} />
+                <input
+                  id="verification-email"
+                  type="email"
+                  autoComplete="email"
+                  maxLength={320}
+                  required
+                  readOnly={registrationCreated}
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                />
+              </div>
+
+              <label htmlFor="email-verification-code">6 位验证码</label>
+              <div className="input-with-icon verification-code-field">
+                <KeyRound aria-hidden="true" size={19} />
+                <input
+                  id="email-verification-code"
+                  className="verification-code-input"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  pattern="[0-9]{6}"
+                  minLength={6}
+                  maxLength={6}
+                  placeholder="请输入 6 位数字"
+                  required
+                  value={verificationCode}
+                  onChange={(event) =>
+                    setVerificationCode(
+                      normalizeEmailVerificationCode(event.target.value),
+                    )
+                  }
+                />
+              </div>
+              <p className="field-help">验证码仅可使用一次，请以最新收到的邮件为准。</p>
+              {!emailVerified && auth.status === "authenticated" && (
+                <button
+                  className="text-button verification-resend"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void resendVerification()}
+                >
+                  {busy ? "正在发送…" : "没有收到？重新发送验证码"}
+                </button>
+              )}
             </>
           )}
 
@@ -190,8 +293,27 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
           {error && <div className="form-message error" role="alert">{error}</div>}
           {success && <div className="form-message success" role="status">{success}</div>}
 
-          <button className="primary-button full-width" type="submit" disabled={busy || ((mode === "verify-email" || mode === "reset-password") && !token)}>
-            {busy ? "正在提交…" : mode === "login" ? "登录" : mode === "register" ? "创建账号" : mode === "forgot-password" ? "发送重置邮件" : mode === "reset-password" ? "更新密码" : "确认邮箱验证"}
+          <button
+            className="primary-button full-width"
+            type="submit"
+            disabled={
+              busy ||
+              emailVerified ||
+              (mode === "reset-password" && !token) ||
+              (isVerificationStep && !verificationReady)
+            }
+          >
+            {busy
+              ? "正在提交…"
+              : mode === "login"
+                ? "登录"
+                : mode === "register" && !registrationCreated
+                  ? "创建账号"
+                  : mode === "forgot-password"
+                    ? "发送重置邮件"
+                    : mode === "reset-password"
+                      ? "更新密码"
+                      : "验证邮箱"}
             {!busy && <ArrowRight aria-hidden="true" size={19} />}
           </button>
         </form>
@@ -203,11 +325,11 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
               <button type="button" onClick={() => navigate("register")}>注册新账号</button>
             </>
           )}
-          {mode === "register" && <button type="button" onClick={() => navigate("login")}>已有账号，去登录</button>}
+          {mode === "register" && !registrationCreated && <button type="button" onClick={() => navigate("login")}>已有账号，去登录</button>}
           {(["forgot-password", "reset-password", "verify-email"] as AuthMode[]).includes(mode) && (
             <button type="button" onClick={() => navigate("login")}>返回登录</button>
           )}
-          {success && auth.status === "authenticated" && (
+          {success && auth.status === "authenticated" && (!isVerificationStep || emailVerified) && (
             <button type="button" onClick={() => navigate("workspace-overview")}>进入家属工作区</button>
           )}
         </div>

@@ -3328,6 +3328,8 @@ body small,
 .input-with-icon { position: relative; }
 .input-with-icon svg { position: absolute; top: 13px; left: 12px; color: var(--color-muted-foreground); }
 .input-with-icon input { padding-left: 42px; }
+.verification-code-input { font-variant-numeric: tabular-nums; letter-spacing: 0.18em; }
+.verification-resend { justify-self: start; min-height: 40px; padding-left: 0; }
 .password-field { position: relative; }
 .password-field input { padding-right: 52px; }
 .password-field button { position: absolute; top: 1px; right: 1px; width: 44px; height: 44px; border: 0; background: transparent; }
@@ -3676,6 +3678,19 @@ body small,
 .account-details > div { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 12px; border-top: 1px solid var(--color-border); padding: 13px 0; }
 .account-details dt { color: var(--color-muted-foreground); }
 .account-details dd { margin: 0; font-weight: 700; }
+.email-verification-panel { display: grid; gap: 10px; margin-bottom: 14px; }
+.email-verification-panel > label { font-weight: 750; }
+.email-verification-panel > input,
+.email-verification-actions input {
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 11px;
+  padding: 10px 12px;
+  color: var(--color-foreground);
+  background: var(--color-surface);
+}
+.email-verification-actions { display: grid; grid-template-columns: max-content minmax(130px, 1fr) max-content; gap: 10px; align-items: center; }
 .session-list article { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 12px; align-items: center; border-top: 1px solid var(--color-border); padding: 14px 0; }
 .session-list > article > span { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 11px; color: var(--color-primary); background: var(--color-primary-soft); }
 .session-list strong { display: flex; align-items: center; gap: 8px; }
@@ -3778,6 +3793,7 @@ body small,
   .mobile-more-nav > div { position: absolute; right: 0; bottom: 64px; width: 210px; display: grid; gap: 4px; border: 1px solid var(--color-border); border-radius: 14px; padding: 8px; background: var(--color-surface); box-shadow: var(--shadow-md); }
   .mobile-more-nav > div a { min-height: 44px; display: flex; align-items: center; gap: 9px; border-radius: 9px; padding: 8px 10px; color: var(--color-foreground); text-decoration: none; }
   .device-page-grid, .settings-api-grid { grid-template-columns: 1fr; }
+  .email-verification-actions { grid-template-columns: 1fr; }
   .member-invite-layout { grid-template-columns: 1fr; }
   .authority-meta-grid, .authority-capability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .remote-call-layout { grid-template-columns: 1fr; }

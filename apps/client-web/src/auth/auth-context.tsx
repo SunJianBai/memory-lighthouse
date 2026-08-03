@@ -11,6 +11,7 @@ import {
 import { ApiError, apiClient } from "../api/api-client";
 import { clearPersistentIdempotencyNamespace } from "../api/idempotent-command";
 import type { SessionTokenView, UserView } from "../api/types";
+import { emailVerificationConfirmBody } from "./email-verification-model";
 
 type RegisterInput = {
   email: string;
@@ -29,6 +30,7 @@ type AuthContextValue = {
   lockToDeviceMode: () => Promise<void>;
   refreshUser: () => Promise<void>;
   requestEmailVerification: (email: string) => Promise<void>;
+  confirmEmailVerification: (email: string, code: string) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -186,9 +188,25 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
   const requestEmailVerification = useCallback(async (email: string) => {
     await apiClient.request<{ accepted: true }>("/auth/email-verifications", {
       method: "POST",
-      body: { email },
+      body: { email: email.trim() },
     });
   }, []);
+
+  const confirmEmailVerification = useCallback(
+    async (email: string, code: string) => {
+      await apiClient.request<{ verified: true }>(
+        "/auth/email-verifications/confirm",
+        {
+          method: "POST",
+          body: emailVerificationConfirmBody(email, code),
+          authenticated: false,
+          retryAuthentication: false,
+        },
+      );
+      if (status === "authenticated") await loadMe();
+    },
+    [loadMe, status],
+  );
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -201,12 +219,14 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
       lockToDeviceMode,
       refreshUser,
       requestEmailVerification,
+      confirmEmailVerification,
     }),
     [
       login,
       lockToDeviceMode,
       logout,
       logoutAll,
+      confirmEmailVerification,
       refreshUser,
       register,
       requestEmailVerification,

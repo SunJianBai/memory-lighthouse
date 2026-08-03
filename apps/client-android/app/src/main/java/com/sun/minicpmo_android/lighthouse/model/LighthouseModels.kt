@@ -481,6 +481,7 @@ data class LighthouseUiState(
     val signedIn: Boolean = false,
     val companionDeviceLocked: Boolean = false,
     val user: UserView? = null,
+    val emailVerificationPromptVisible: Boolean = false,
     val households: List<HouseholdView> = emptyList(),
     val householdMembers: List<HouseholdMemberView> = emptyList(),
     val selectedHouseholdId: String? = null,

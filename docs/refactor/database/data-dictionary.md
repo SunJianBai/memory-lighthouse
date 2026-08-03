@@ -69,7 +69,7 @@
 
 ### `one_time_tokens`
 
-用于邮箱验证、重置密码和更换邮箱：`purpose`、`user_id`、`identity_id`、`token_hash`、`expires_at`、`consumed_at`、`attempt_count`。
+用于邮箱验证、重置密码和更换邮箱：`purpose`、`user_id`、`identity_id`、`token_hash`、`expires_at`、`consumed_at`、`attempt_count`。邮箱验证原文是 6 位数字码，但表中只保存绑定 `identity_id` 与本条令牌 ID 的 HMAC 摘要；相同验证码可安全地出现在不同账号或不同批次中。重置密码继续使用独立高熵令牌。新码签发、成功确认或连续 5 次错误都会结束旧码生命周期，无需保存验证码明文。
 
 ### `roles`、`permissions`、`role_permissions`
 

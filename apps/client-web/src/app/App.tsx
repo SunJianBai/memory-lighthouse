@@ -115,7 +115,8 @@ export const App = ({ sensitiveAction }: { sensitiveAction: SensitiveFragmentAct
   if (route === "home") return <WelcomePage />;
 
   const sensitiveToken = sensitiveAction?.token;
-  if (route === "verify-email") return <AuthPage mode="verify-email" token={sensitiveAction?.kind === "verify-email" ? sensitiveToken : undefined} />;
+  if (route === "verify-email" && auth.status === "bootstrapping") return <LoadingScreen />;
+  if (route === "verify-email") return <AuthPage mode="verify-email" />;
   if (route === "reset-password") return <AuthPage mode="reset-password" token={sensitiveAction?.kind === "reset-password" ? sensitiveToken : undefined} />;
   if (route === "forgot-password") return <AuthPage mode="forgot-password" />;
   if (route === "register") return <AuthPage mode="register" />;

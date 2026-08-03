@@ -12,6 +12,10 @@ import { useCallback, useEffect, useState } from "react";
 import { apiClient, readableError } from "../../api/api-client";
 import type { SessionView } from "../../api/types";
 import { useAuth } from "../../auth/auth-context";
+import {
+  isCompleteEmailVerificationCode,
+  normalizeEmailVerificationCode,
+} from "../../auth/email-verification-model";
 
 export const AccountSettingsPage = () => {
   const auth = useAuth();
@@ -19,8 +23,11 @@ export const AccountSettingsPage = () => {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [verificationError, setVerificationError] = useState("");
   const [message, setMessage] = useState("");
   const email = auth.user?.identities.find((identity) => identity.type === "EMAIL");
+  const [verificationEmail, setVerificationEmail] = useState(email?.value ?? "");
+  const [verificationCode, setVerificationCode] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -35,16 +42,46 @@ export const AccountSettingsPage = () => {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (email?.value) setVerificationEmail(email.value);
+  }, [email?.value]);
 
   const sendVerification = async () => {
-    if (!email) return;
-    setBusy("email");
-    setError("");
+    if (!verificationEmail.trim()) {
+      setVerificationError("请输入需要绑定和验证的邮箱。 ");
+      return;
+    }
+    setBusy("email-send");
+    setVerificationError("");
+    setMessage("");
     try {
-      await auth.requestEmailVerification(email.value);
-      setMessage("验证邮件已发送。打开链接后，一次性令牌会立即从地址栏清除。 ");
+      await auth.requestEmailVerification(verificationEmail);
+      setMessage("6 位验证码已发送，请检查收件箱与垃圾邮件。 ");
     } catch (sendError) {
-      setError(readableError(sendError));
+      setVerificationError(readableError(sendError));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const confirmVerification = async () => {
+    if (!verificationEmail.trim()) {
+      setVerificationError("请输入需要绑定和验证的邮箱。 ");
+      return;
+    }
+    if (!isCompleteEmailVerificationCode(verificationCode)) {
+      setVerificationError("请输入邮件中的 6 位数字验证码。 ");
+      return;
+    }
+    setBusy("email-confirm");
+    setVerificationError("");
+    setMessage("");
+    try {
+      await auth.confirmEmailVerification(verificationEmail, verificationCode);
+      setVerificationCode("");
+      setMessage("邮箱验证成功。 ");
+    } catch (confirmError) {
+      setVerificationError(readableError(confirmError));
     } finally {
       setBusy("");
     }
@@ -84,7 +121,45 @@ export const AccountSettingsPage = () => {
           <div><dt>邮箱</dt><dd>{email?.value ?? "未绑定邮箱"}</dd></div>
           <div><dt>验证状态</dt><dd>{email?.verifiedAt ? `已于 ${new Date(email.verifiedAt).toLocaleString("zh-CN")} 验证` : "待验证"}</dd></div>
         </dl>
-        {!email?.verifiedAt && email && <button className="primary-button" type="button" disabled={busy === "email"} onClick={() => void sendVerification()}><MailCheck aria-hidden="true" size={19} /> {busy === "email" ? "正在发送…" : "发送验证邮件"}</button>}
+        {!email?.verifiedAt && (
+          <div className="email-verification-panel">
+            <label htmlFor="settings-verification-email">需要验证的邮箱</label>
+            <input
+              id="settings-verification-email"
+              type="email"
+              autoComplete="email"
+              maxLength={320}
+              readOnly={Boolean(email)}
+              value={verificationEmail}
+              onChange={(event) => {
+                setVerificationEmail(event.target.value);
+                setVerificationError("");
+              }}
+            />
+            {!email && <p className="field-help">当前账号尚未绑定邮箱，发送验证码时会先绑定此邮箱。</p>}
+            <div className="email-verification-actions">
+              <button className="secondary-button" type="button" disabled={Boolean(busy)} onClick={() => void sendVerification()}><MailCheck aria-hidden="true" size={19} /> {busy === "email-send" ? "正在发送…" : "发送或重发验证码"}</button>
+              <input
+                className="verification-code-input"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                pattern="[0-9]{6}"
+                minLength={6}
+                maxLength={6}
+                aria-label="6 位邮箱验证码"
+                placeholder="6 位验证码"
+                value={verificationCode}
+                onChange={(event) => {
+                  setVerificationCode(normalizeEmailVerificationCode(event.target.value));
+                  setVerificationError("");
+                }}
+              />
+              <button className="primary-button" type="button" disabled={Boolean(busy) || !isCompleteEmailVerificationCode(verificationCode)} onClick={() => void confirmVerification()}>{busy === "email-confirm" ? "正在验证…" : "确认验证码"}</button>
+            </div>
+          </div>
+        )}
+        {verificationError && <div className="form-message error" role="alert">{verificationError}</div>}
         {message && <div className="form-message success" role="status">{message}</div>}
       </section>
 

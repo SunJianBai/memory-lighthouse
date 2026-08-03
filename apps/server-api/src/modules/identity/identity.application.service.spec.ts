@@ -50,8 +50,9 @@ function makeHarness() {
       findUnique: jest.fn(),
       findFirst: jest.fn(),
       create: jest.fn(),
+      updateMany: jest.fn(),
     },
-    user: { findUnique: jest.fn() },
+    user: { findUnique: jest.fn(), updateMany: jest.fn() },
     userSession: {
       findUnique: jest.fn(),
       findMany: jest.fn(),
@@ -60,6 +61,7 @@ function makeHarness() {
     },
     oneTimeToken: {
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       updateMany: jest.fn(),
       create: jest.fn(),
     },
@@ -572,23 +574,156 @@ describe('IdentityApplicationService security paths', () => {
     expect(harness.notification.sendEmailVerification.mock.calls).toHaveLength(
       1,
     );
+    expect(
+      harness.notification.sendEmailVerification.mock.calls[0]?.[0],
+    ).toEqual(
+      expect.objectContaining({
+        email: 'NewAddress@Example.com',
+        code: expect.stringMatching(/^\d{6}$/),
+      }),
+    );
+    const persisted = harness.prisma.oneTimeToken.create.mock.calls[0]?.[0] as {
+      data: { tokenHash: Uint8Array };
+    };
+    const deliveredCode =
+      harness.notification.sendEmailVerification.mock.calls[0]?.[0].code;
+    expect(
+      Buffer.from(persisted.data.tokenHash).toString('utf8'),
+    ).not.toContain(deliveredCode);
   });
 
-  it('rejects an already-consumed one-time token', async () => {
+  it('confirms the latest email code once and activates its pending account', async () => {
     const harness = makeHarness();
-    harness.prisma.oneTimeToken.findUnique.mockResolvedValue({
-      id: 'token-1',
+    harness.prisma.loginIdentity.findUnique.mockResolvedValue({
+      id: 'email-1',
+      userId: 'user-1',
+    });
+    harness.prisma.oneTimeToken.findFirst.mockResolvedValue({
+      id: 'challenge-1',
+      userId: 'user-1',
       purpose: 'EMAIL_VERIFICATION',
       identityId: 'email-1',
-      consumedAt: now,
+      tokenHash: harness.opaqueTokens.hashEmailVerificationCode(
+        'email-1',
+        'challenge-1',
+        '042731',
+      ),
+      attemptCount: 0,
+      consumedAt: null,
+      expiresAt: new Date('2026-08-01T00:10:00.000Z'),
+    });
+    harness.prisma.oneTimeToken.updateMany.mockResolvedValue({ count: 1 });
+    harness.prisma.loginIdentity.updateMany.mockResolvedValue({ count: 1 });
+    harness.prisma.user.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      harness.service.confirmEmailVerification(
+        ' Family@Example.com ',
+        '042731',
+      ),
+    ).resolves.toEqual({ verified: true });
+    expect(harness.prisma.oneTimeToken.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: 'challenge-1',
+        consumedAt: null,
+        attemptCount: { lt: 5 },
+      }),
+      data: { consumedAt: now },
+    });
+    expect(harness.prisma.loginIdentity.updateMany).toHaveBeenCalledWith({
+      where: { id: 'email-1', userId: 'user-1', type: 'EMAIL' },
+      data: { verifiedAt: now },
+    });
+  });
+
+  it('locks the email challenge after its fifth wrong code', async () => {
+    const harness = makeHarness();
+    harness.prisma.loginIdentity.findUnique.mockResolvedValue({
+      id: 'email-1',
+      userId: 'user-1',
+    });
+    harness.prisma.oneTimeToken.findFirst.mockResolvedValue({
+      id: 'challenge-1',
+      userId: 'user-1',
+      purpose: 'EMAIL_VERIFICATION',
+      identityId: 'email-1',
+      tokenHash: harness.opaqueTokens.hashEmailVerificationCode(
+        'email-1',
+        'challenge-1',
+        '042731',
+      ),
+      attemptCount: 4,
+      consumedAt: null,
       expiresAt: new Date('2026-08-01T00:10:00.000Z'),
     });
     harness.prisma.oneTimeToken.updateMany.mockResolvedValue({ count: 1 });
 
     await expect(
-      harness.service.confirmEmailVerification(
-        'already-consumed-token-with-sufficient-entropy',
-      ),
+      harness.service.confirmEmailVerification('family@example.com', '999999'),
     ).rejects.toBeInstanceOf(InvalidOneTimeTokenException);
+    expect(harness.prisma.oneTimeToken.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'challenge-1',
+        consumedAt: null,
+        attemptCount: 4,
+        expiresAt: { gt: now },
+      },
+      data: { attemptCount: { increment: 1 }, consumedAt: now },
+    });
+    expect(harness.prisma.loginIdentity.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('does not accept an email verification code after it was consumed', async () => {
+    const harness = makeHarness();
+    harness.prisma.loginIdentity.findUnique.mockResolvedValue({
+      id: 'email-1',
+      userId: 'user-1',
+    });
+    harness.prisma.oneTimeToken.findFirst.mockResolvedValue({
+      id: 'challenge-1',
+      userId: 'user-1',
+      purpose: 'EMAIL_VERIFICATION',
+      identityId: 'email-1',
+      tokenHash: harness.opaqueTokens.hashEmailVerificationCode(
+        'email-1',
+        'challenge-1',
+        '042731',
+      ),
+      attemptCount: 0,
+      consumedAt: now,
+      expiresAt: new Date('2026-08-01T00:10:00.000Z'),
+    });
+
+    await expect(
+      harness.service.confirmEmailVerification('family@example.com', '042731'),
+    ).rejects.toBeInstanceOf(InvalidOneTimeTokenException);
+    expect(harness.prisma.loginIdentity.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects an email verification code at its exact expiry time', async () => {
+    const harness = makeHarness();
+    harness.prisma.loginIdentity.findUnique.mockResolvedValue({
+      id: 'email-1',
+      userId: 'user-1',
+    });
+    harness.prisma.oneTimeToken.findFirst.mockResolvedValue({
+      id: 'challenge-1',
+      userId: 'user-1',
+      purpose: 'EMAIL_VERIFICATION',
+      identityId: 'email-1',
+      tokenHash: harness.opaqueTokens.hashEmailVerificationCode(
+        'email-1',
+        'challenge-1',
+        '042731',
+      ),
+      attemptCount: 0,
+      consumedAt: null,
+      expiresAt: now,
+    });
+
+    await expect(
+      harness.service.confirmEmailVerification('family@example.com', '042731'),
+    ).rejects.toBeInstanceOf(InvalidOneTimeTokenException);
+    expect(harness.prisma.loginIdentity.updateMany).not.toHaveBeenCalled();
   });
 });

@@ -56,6 +56,8 @@ DELETE /v1/me/sessions/:sessionId
 
 注册请求允许邮箱和用户名至少填一项；创建家庭或激活设备前必须存在已验证邮箱。登录只接收一个 `identifier`，服务器按规范化规则匹配邮箱或用户名，不返回“账号不存在”差异信息。
 
+注册请求包含邮箱时，服务端在账号与登录会话创建成功后自动发送 6 位数字验证码。已登录用户可向 `POST /v1/auth/email-verifications` 提交 `{ "email": "family@example.com" }` 绑定首个邮箱或重新发送；确认接口为公开的 `POST /v1/auth/email-verifications/confirm`，请求体固定为 `{ "email": "family@example.com", "code": "042731" }`。验证码默认 10 分钟有效，新验证码会使同一账号此前未使用的验证码失效，连续错误达到 5 次后失效，成功确认后不可再次使用。接口对不存在邮箱、错误码、过期码和已使用码返回相同的通用错误，数据库只保存与邮箱身份及令牌记录绑定的 HMAC 摘要，不保存验证码原文。密码重置仍使用独立的高熵一次性链接，不与短验证码共用确认契约。
+
 Web 刷新令牌使用 HttpOnly Cookie；Android 在响应体取得经 Keystore 加密保存的刷新令牌。两者均执行轮换和重放检测。
 
 Web 在兑换或恢复 Device Identity 前必须先调用 `device-mode-lock`。该接口按 HttpOnly Refresh Cookie 查找并撤销整个 Web Session family、清除 Cookie，且不要求页面已经持有 Access Token；这样即使认证启动曾因瞬时网络错误进入匿名态，也不能把仍有效的家属 Refresh Cookie 带入陪伴模式。接口失败时客户端不得兑换凭据或加载设备上下文。

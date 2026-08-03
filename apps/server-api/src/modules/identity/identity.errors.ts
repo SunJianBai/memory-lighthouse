@@ -36,7 +36,7 @@ export class InvalidOneTimeTokenException extends BadRequestException {
   constructor() {
     super({
       code: 'INVALID_ONE_TIME_TOKEN',
-      message: '链接无效或已过期，请重新申请',
+      message: '验证码或链接无效、已过期或尝试次数过多，请重新申请',
     });
   }
 }

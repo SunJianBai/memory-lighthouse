@@ -96,8 +96,16 @@ class LighthouseRepository(
     suspend fun requestEmailVerification(email: String) {
         userRequest(
             "POST",
-            "auth/email-verifications",
-            JSONObject().put("email", email.trim()),
+            AuthApiContract.emailVerificationsPath(),
+            AuthApiContract.requestEmailVerificationBody(email),
+        )
+    }
+
+    suspend fun confirmEmailVerification(email: String, code: String) {
+        userRequest(
+            "POST",
+            AuthApiContract.confirmEmailVerificationPath(),
+            AuthApiContract.confirmEmailVerificationBody(email, code),
         )
     }
 
