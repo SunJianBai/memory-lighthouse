@@ -118,6 +118,9 @@ grep -Fq 'mode=uninitialized\|upstream=127.0.0.1:13100' "$script_dir/openbmb-sta
 grep -Fq 'systemctl enable --now openbmb-hybrid-recovery.service' \
   "$script_dir/install-hybrid-control-plane.sh" || \
   fail 'installer does not activate the current-boot recovery barrier'
+grep -Fq '/etc/systemd/system/openbmb.service 0444' \
+  "$script_dir/install-hybrid-control-plane.sh" || \
+  fail 'installer does not provide the runtime-aware stack base unit'
 grep -Fq '"$runtime_mode" switch docker' "$script_dir/openbmb-backup-control" || \
   fail 'hybrid backup does not enter the proven Docker snapshot boundary'
 grep -Fq '"$runtime_mode" switch hybrid' "$script_dir/openbmb-backup-control" || \

@@ -36,6 +36,7 @@ for source in \
   "$script_dir/migrate-from-docker.sh" \
   "$hybrid_dir/../systemd/openbmb-hybrid-recovery.service" \
   "$hybrid_dir/../systemd/caddy-openbmb-hybrid-recovery.conf" \
+  "$hybrid_dir/../systemd/openbmb.service" \
   "$hybrid_dir/../systemd/openbmb-hybrid.conf" \
   "$hybrid_dir/../systemd/openbmb-backup.service" \
   "$hybrid_dir/../systemd/openbmb-backup-hybrid.conf" \
@@ -94,6 +95,8 @@ install_atomic "$hybrid_dir/../systemd/openbmb-hybrid-recovery.service" \
   /etc/systemd/system/openbmb-hybrid-recovery.service 0444
 install_atomic "$hybrid_dir/../systemd/caddy-openbmb-hybrid-recovery.conf" \
   /etc/systemd/system/caddy.service.d/openbmb-hybrid-recovery.conf 0444
+install_atomic "$hybrid_dir/../systemd/openbmb.service" \
+  /etc/systemd/system/openbmb.service 0444
 install_atomic "$hybrid_dir/../systemd/openbmb-hybrid.conf" \
   /etc/systemd/system/openbmb.service.d/hybrid-runtime.conf 0444
 install_atomic "$hybrid_dir/../systemd/openbmb-backup.service" \
