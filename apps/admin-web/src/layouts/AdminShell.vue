@@ -20,8 +20,11 @@ interface NavigationItem {
 const route = useRoute()
 const router = useRouter()
 const mainElement = ref<HTMLElement | null>(null)
+const sidebarElement = ref<HTMLElement | null>(null)
+const mobileMenuButton = ref<HTMLButtonElement | null>(null)
 const mobileNavigationOpen = ref(false)
 const loggingOut = ref(false)
+let mobileNavigationMediaQuery: MediaQueryList | null = null
 
 const navigation = computed<NavigationItem[]>(() => {
   const items: NavigationItem[] = [
@@ -97,12 +100,42 @@ watch(
   }
 )
 
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') mobileNavigationOpen.value = false
+async function openMobileNavigation(): Promise<void> {
+  mobileNavigationOpen.value = true
+  await nextTick()
+  const focusTarget = sidebarElement.value?.querySelector<HTMLElement>('.navigation-item')
+  const fallbackTarget = focusTarget ?? sidebarElement.value
+  fallbackTarget?.focus()
 }
 
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+async function closeMobileNavigation(restoreFocus = true): Promise<void> {
+  mobileNavigationOpen.value = false
+  await nextTick()
+  if (restoreFocus) mobileMenuButton.value?.focus()
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && mobileNavigationOpen.value) {
+    void closeMobileNavigation()
+  }
+}
+
+function onNavigationBreakpointChange(event: MediaQueryListEvent): void {
+  if (!event.matches && mobileNavigationOpen.value) {
+    void closeMobileNavigation(false)
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  mobileNavigationMediaQuery = window.matchMedia('(max-width: 1024px)')
+  mobileNavigationMediaQuery.addEventListener('change', onNavigationBreakpointChange)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  mobileNavigationMediaQuery?.removeEventListener('change', onNavigationBreakpointChange)
+})
 
 async function signOut(): Promise<void> {
   loggingOut.value = true
@@ -123,10 +156,17 @@ async function signOut(): Promise<void> {
       class="navigation-scrim"
       type="button"
       aria-label="关闭导航"
-      @click="mobileNavigationOpen = false"
+      @click="closeMobileNavigation()"
     ></button>
 
-    <aside id="admin-sidebar" class="sidebar" :class="{ 'sidebar--open': mobileNavigationOpen }" aria-label="主管理导航">
+    <aside
+      id="admin-sidebar"
+      ref="sidebarElement"
+      class="sidebar"
+      :class="{ 'sidebar--open': mobileNavigationOpen }"
+      aria-label="主管理导航"
+      tabindex="-1"
+    >
       <div class="brand">
         <span class="brand__mark"><AppIcon name="lighthouse" :size="27" /></span>
         <span>
@@ -158,16 +198,17 @@ async function signOut(): Promise<void> {
       </div>
     </aside>
 
-    <div class="shell-content">
+    <div class="shell-content" :inert="mobileNavigationOpen">
       <header class="topbar">
         <div class="topbar__title">
           <button
+            ref="mobileMenuButton"
             class="icon-button mobile-menu-button"
             type="button"
             :aria-expanded="mobileNavigationOpen"
             aria-controls="admin-sidebar"
             aria-label="打开主导航"
-            @click="mobileNavigationOpen = true"
+            @click="openMobileNavigation()"
           >
             <AppIcon name="menu" />
           </button>
