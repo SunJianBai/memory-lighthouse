@@ -162,7 +162,14 @@ printf 'TZ=Asia/Shanghai\nLIVEKIT_API_SECRET=%s\nREDIS_APP_PASSWORD=BBBBBBBBBBBB
   "$old_secret" >"$env_fixture"
 chmod 0640 -- "$env_fixture"
 before_owner="$(stat -c %u:%g -- "$env_fixture")"
-rotation_output="$(bash "$rotation_script" "$env_fixture" 2>&1)" || fail 'valid LiveKit secret rotation failed'
+# This first case exercises the legacy single-file path. Keep it isolated from
+# a hybrid control plane installed on the host running the fixture; the hybrid
+# transaction has its own explicit fixture immediately below.
+rotation_output="$(
+  OPENBMB_HYBRID_RUNTIME_MODE_BIN="$fixture_root/no-hybrid-runtime-control" \
+  OPENBMB_HYBRID_MODE_STATE="$fixture_root/no-hybrid-runtime-state" \
+    bash "$rotation_script" "$env_fixture" 2>&1
+)" || fail 'valid LiveKit secret rotation failed'
 [[ -z "$rotation_output" ]] || fail 'successful secret rotation emitted output'
 [[ "$(stat -c %a -- "$env_fixture")" == 640 ]] || fail 'secret rotation changed the env mode'
 [[ "$(stat -c %u:%g -- "$env_fixture")" == "$before_owner" ]] || fail 'secret rotation changed env ownership'
