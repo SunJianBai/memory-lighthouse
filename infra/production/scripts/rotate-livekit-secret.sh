@@ -426,7 +426,7 @@ fi
   fail 'committed infrastructure environment metadata changed'
 [[ "$(stat -c %u:%g:%a -- "$native_env")" == "$old_native_metadata" ]] || \
   fail 'committed native API environment metadata changed'
-rollback_required=false
+rollback_required=false # credential-pair-commit-complete
 close_original_descriptors
 
 # Deliberately emit nothing on success. In particular, neither the old nor the

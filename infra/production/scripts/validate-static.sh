@@ -398,7 +398,7 @@ assert_before "$rotation_script" \
   'mv -Tf -- "$temporary_native_env_file" "$native_env"'
 assert_before "$rotation_script" \
   'mv -Tf -- "$temporary_native_env_file" "$native_env"' \
-  'rollback_required=false'
+  'rollback_required=false # credential-pair-commit-complete'
 [[ "$(<"$production_dir/compatibility/security-epoch")" == 1 ]]
 for livekit_config in \
   "$production_dir/../livekit/livekit.yaml" \
