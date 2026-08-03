@@ -1,0 +1,252 @@
+name: API production delivery
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-openbmb-api
+  cancel-in-progress: false
+
+env:
+  CI: "true"
+  NODE_VERSION: "22.19.0"
+  DEPLOY_HOST: 124.220.81.104
+  DEPLOY_USER: ubuntu
+  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  REMOTE_INCOMING_ROOT: /home/ubuntu/.openbmb-api-incoming
+
+jobs:
+  deliver-api:
+    name: Build and atomically promote the native API
+    if: >-
+      vars.PRODUCTION_DEPLOY_ENABLED == 'true' &&
+      vars.PRODUCTION_DELIVERY_MODE == 'hybrid' &&
+      ((github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/main') ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the exact CI-validated source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate immutable source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+      - name: Set up the pinned native runtime version
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          architecture: x64
+          cache: npm
+
+      - name: Pin the package manager and runner architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == x86_64 ]]
+          npm install --global npm@11.4.2
+          [[ "$(npm --version)" == 11.4.2 ]]
+
+      - name: Install the locked server dependency graph
+        run: >-
+          npm ci
+          --workspace @memory-lighthouse/server-api
+          --include-workspace-root
+
+      - name: Build the NestJS server
+        run: npm run build --workspace @memory-lighthouse/server-api
+
+      - name: Prune development-only dependencies
+        run: >-
+          npm prune --omit=dev
+          --workspace @memory-lighthouse/server-api
+          --include-workspace-root
+
+      - name: Verify the complete production dependency closure
+        run: >-
+          npm ls --omit=dev --all
+          --workspace @memory-lighthouse/server-api
+          --include-workspace-root
+
+      - name: Package and verify the native API artifact
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/openbmb-api-artifact"
+          install -d -m 0700 "$artifact_dir"
+          release_id="git-${SOURCE_SHA:0:12}"
+          archive_name="openbmb-native-api-$release_id.tar.gz"
+          archive="$artifact_dir/$archive_name"
+          sidecar="$archive.sha256"
+          bash scripts/hybrid/package-api.sh "$SOURCE_SHA" "$archive" \
+            | tee "$artifact_dir/package.log"
+          archive_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          grep -Fxq "$archive_sha256  $archive_name" "$sidecar"
+          mapfile -t expanded_values < <(sed -n 's/^API_EXPANDED_BYTES=//p' "$artifact_dir/package.log")
+          [[ "${#expanded_values[@]}" -eq 1 && "${expanded_values[0]}" =~ ^[1-9][0-9]*$ ]]
+          expanded_bytes="${expanded_values[0]}"
+          archive_bytes="$(stat -c %s -- "$archive")"
+          [[ "$archive_bytes" =~ ^[1-9][0-9]*$ ]]
+          promotion_required_bytes=$((expanded_bytes + archive_bytes + 1073741824))
+          upload_required_bytes=$((promotion_required_bytes + archive_bytes))
+          remote_directory="$REMOTE_INCOMING_ROOT/$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          {
+            echo "archive=$archive"
+            echo "sidecar=$sidecar"
+            echo "archive_name=$archive_name"
+            echo "archive_sha256=$archive_sha256"
+            echo "release_id=$release_id"
+            echo "remote_directory=$remote_directory"
+            echo "promotion_required_bytes=$promotion_required_bytes"
+            echo "upload_required_bytes=$upload_required_bytes"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Retain exact API artifact evidence
+        if: steps.package.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-api-release-${{ env.SOURCE_SHA }}
+          path: ${{ runner.temp }}/openbmb-api-artifact/
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Configure pinned SSH identity
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY_BASE64: ${{ secrets.TX4H4G_SSH_PRIVATE_KEY_BASE64 }}
+          SSH_KNOWN_HOSTS_BASE64: ${{ secrets.TX4H4G_KNOWN_HOSTS_BASE64 }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SSH_PRIVATE_KEY_BASE64" && -n "$SSH_KNOWN_HOSTS_BASE64" ]]
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s' "$SSH_PRIVATE_KEY_BASE64" | base64 --decode > "$HOME/.ssh/openbmb_api_deploy"
+          printf '%s' "$SSH_KNOWN_HOSTS_BASE64" | base64 --decode > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/openbmb_api_deploy" "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/openbmb_api_deploy" >/dev/null
+          cat > "$HOME/.ssh/config" <<EOF
+          Host tx4h4g-api-prod
+            HostName $DEPLOY_HOST
+            User $DEPLOY_USER
+            IdentityFile ~/.ssh/openbmb_api_deploy
+            IdentitiesOnly yes
+            BatchMode yes
+            ConnectTimeout 20
+            ConnectionAttempts 2
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            GlobalKnownHostsFile /dev/null
+            ControlMaster auto
+            ControlPath ~/.ssh/openbmb-api-%C
+            ControlPersist 10m
+            ProxyCommand none
+            ServerAliveInterval 15
+            ServerAliveCountMax 4
+          EOF
+          chmod 0600 "$HOME/.ssh/config"
+          ssh tx4h4g-api-prod 'true'
+
+      - name: Upload and atomically promote the exact API artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          SIDECAR: ${{ steps.package.outputs.sidecar }}
+          ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
+          ARCHIVE_SHA256: ${{ steps.package.outputs.archive_sha256 }}
+          RELEASE_ID: ${{ steps.package.outputs.release_id }}
+          REMOTE_DIRECTORY: ${{ steps.package.outputs.remote_directory }}
+          PROMOTION_REQUIRED_BYTES: ${{ steps.package.outputs.promotion_required_bytes }}
+          UPLOAD_REQUIRED_BYTES: ${{ steps.package.outputs.upload_required_bytes }}
+        run: |
+          set -euo pipefail
+          [[ -f "$ARCHIVE" && ! -L "$ARCHIVE" ]]
+          [[ -f "$SIDECAR" && ! -L "$SIDECAR" ]]
+          [[ "$ARCHIVE_NAME" == "openbmb-native-api-git-${SOURCE_SHA:0:12}.tar.gz" ]]
+          [[ "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$RELEASE_ID" == "git-${SOURCE_SHA:0:12}" ]]
+          [[ "$PROMOTION_REQUIRED_BYTES" =~ ^[1-9][0-9]*$ ]]
+          [[ "$UPLOAD_REQUIRED_BYTES" =~ ^[1-9][0-9]*$ ]]
+          [[ "$REMOTE_DIRECTORY" =~ ^/home/ubuntu/\.openbmb-api-incoming/[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]
+          [[ "$(sha256sum "$ARCHIVE" | awk '{print $1}')" == "$ARCHIVE_SHA256" ]]
+          grep -Fxq "$ARCHIVE_SHA256  $ARCHIVE_NAME" "$SIDECAR"
+
+          cleanup_remote_directory() {
+            ssh tx4h4g-api-prod bash -s -- \
+              "$REMOTE_INCOMING_ROOT" "$REMOTE_DIRECTORY" "$ARCHIVE_NAME" <<'REMOTE' \
+              >/dev/null 2>&1 || true
+          set -euo pipefail
+          incoming_root="$1"
+          remote_directory="$2"
+          archive_name="$3"
+          [[ "$(dirname -- "$remote_directory")" == "$incoming_root" ]]
+          for path in \
+            "$remote_directory/$archive_name" \
+            "$remote_directory/$archive_name.sha256"; do
+            if [[ -e "$path" || -L "$path" ]]; then
+              [[ -f "$path" && ! -L "$path" ]]
+              rm -f -- "$path"
+            fi
+          done
+          if [[ -e "$remote_directory" || -L "$remote_directory" ]]; then
+            [[ -d "$remote_directory" && ! -L "$remote_directory" ]]
+            rmdir -- "$remote_directory"
+          fi
+          REMOTE
+          }
+          trap cleanup_remote_directory EXIT
+
+          ssh tx4h4g-api-prod bash -s -- \
+            api "$REMOTE_INCOMING_ROOT" "$REMOTE_DIRECTORY" "$UPLOAD_REQUIRED_BYTES" \
+            < scripts/hybrid/prepare-remote-incoming.sh
+          ssh tx4h4g-api-prod sudo -n bash -s -- \
+            upload-preflight api "$UPLOAD_REQUIRED_BYTES" \
+            < scripts/hybrid/remote-promotion-guard.sh
+
+          scp -- "$ARCHIVE" "$SIDECAR" "tx4h4g-api-prod:$REMOTE_DIRECTORY/"
+
+          bash scripts/hybrid/assert-current-main.sh "$SOURCE_SHA"
+          ssh tx4h4g-api-prod sudo -n bash -s -- \
+            api "$SOURCE_SHA" "$REMOTE_DIRECTORY/$ARCHIVE_NAME" \
+            "$REMOTE_DIRECTORY/$ARCHIVE_NAME.sha256" "$ARCHIVE_SHA256" \
+            "$RELEASE_ID" "$PROMOTION_REQUIRED_BYTES" \
+            < scripts/hybrid/remote-promotion-guard.sh
+
+      - name: Remove ephemeral SSH material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "$HOME/.ssh" && ! -L "$HOME/.ssh" ]]; then
+            if [[ -f "$HOME/.ssh/config" && ! -L "$HOME/.ssh/config" ]]; then
+              ssh -O exit tx4h4g-api-prod >/dev/null 2>&1 || true
+            fi
+            rm -f -- \
+              "$HOME/.ssh/openbmb_api_deploy" \
+              "$HOME/.ssh/known_hosts" \
+              "$HOME/.ssh/config"
+          fi

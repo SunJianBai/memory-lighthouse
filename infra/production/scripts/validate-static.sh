@@ -9,6 +9,33 @@ for script in "$script_dir"/*.sh; do
   bash -n "$script"
 done
 printf 'Shell syntax: OK\n'
+
+hybrid_dir="$production_dir/hybrid"
+for hybrid_script in \
+  "$hybrid_dir/api/deploy-native-api.sh" \
+  "$hybrid_dir/api/export-current-container.sh" \
+  "$hybrid_dir/api/install-native-api.sh" \
+  "$hybrid_dir/bootstrap/bootstrap-lib.sh" \
+  "$hybrid_dir/bootstrap/install-hybrid-control-plane.sh" \
+  "$hybrid_dir/bootstrap/migrate-from-docker.sh" \
+  "$hybrid_dir/bootstrap/openbmb-bootstrap-api-cutover" \
+  "$hybrid_dir/bootstrap/openbmb-hybrid-health" \
+  "$hybrid_dir/bootstrap/openbmb-runtime-mode" \
+  "$hybrid_dir/bootstrap/openbmb-switch-api-upstream" \
+  "$hybrid_dir/web/install-web-release.sh" \
+  "$hybrid_dir/web/openbmb-web-release" \
+  "$project_root/scripts/hybrid/assert-current-main.sh" \
+  "$project_root/scripts/hybrid/package-api.sh" \
+  "$project_root/scripts/hybrid/package-web.sh" \
+  "$project_root/scripts/hybrid/prepare-remote-incoming.sh" \
+  "$project_root/scripts/hybrid/remote-promotion-guard.sh"; do
+  bash -n "$hybrid_script"
+done
+bash "$hybrid_dir/api/test.sh"
+bash "$hybrid_dir/bootstrap/test-runtime-mode.sh"
+bash "$hybrid_dir/web/test-web-release.sh"
+printf 'Hybrid delivery contracts: OK\n'
+
 bash "$script_dir/test-security-state.sh"
 bash "$script_dir/audit-security-migration-recovery.sh" --self-test
 bash "$script_dir/test-clamav-watchdog.sh"
@@ -48,6 +75,7 @@ stack_service="$production_dir/systemd/openbmb.service"
 clamav_watchdog_service="$production_dir/systemd/openbmb-clamav-watchdog.service"
 clamav_watchdog_timer="$production_dir/systemd/openbmb-clamav-watchdog.timer"
 rollback_script="$script_dir/rollback-release.sh"
+rotation_script="$script_dir/rotate-livekit-secret.sh"
 delivery_workflow="$project_root/.github/workflows/production-delivery.yml"
 production_compose="$production_dir/compose.production.yml"
 release_image_set="$script_dir/release-image-set.sh"
@@ -189,6 +217,32 @@ assert_before "$rollback_script" \
 assert_before "$rollback_script" \
   'mv -Tf -- "$restore_temporary_link" "$application_link"' \
   'sync -f -- "$application_state_directory"'
+grep -Fq 'operation_lock="${OPENBMB_OPERATION_LOCK:-/run/lock/openbmb-operation.lock}"' \
+  "$rollback_script"
+grep -Fq '(umask 077; set -o noclobber; : >"$operation_lock")' \
+  "$rollback_script"
+grep -Fq 'exec 9<>"$operation_lock"' "$rollback_script"
+! grep -Fq 'exec flock' "$rollback_script"
+grep -Fq 'OPENBMB_OPERATION_LOCK_FD=9' "$rollback_script"
+grep -Fq 'stat -Lc %d:%i -- "/proc/$$/fd/$inherited_fd"' "$rollback_script"
+grep -Fq 'stat -Lc %d:%i -- "$operation_lock"' "$rollback_script"
+grep -Fq 'flock -n "$inherited_fd"' "$rollback_script"
+grep -Fq 'runtime_status="$("$runtime_mode_bin" status)"' \
+  "$rollback_script"
+grep -Fq -- '-e "$runtime_mode_state" || -L "$runtime_mode_state"' "$rollback_script"
+grep -Fq 'hybrid runtime control exists but is unsafe' "$rollback_script"
+grep -Fq 'runtime_modes[0]}" == docker' "$rollback_script"
+grep -Fq 'runtime_upstreams[0]}" == 127.0.0.1:13100' "$rollback_script"
+grep -Fq 'runtime_pending[0]}" == no' "$rollback_script"
+assert_before "$rollback_script" \
+  'flock --exclusive --wait 0 --conflict-exit-code 75 9' \
+  'runtime_status="$("$runtime_mode_bin" status)"'
+assert_before "$rollback_script" \
+  'runtime_status="$("$runtime_mode_bin" status)"' \
+  'bash "$current_stack/infra/production/scripts/clamav-watchdog.sh"'
+assert_before "$rollback_script" \
+  'runtime_status="$("$runtime_mode_bin" status)"' \
+  'application_link_mutation_started=true'
 awk '
   $0 == "  if [[ \"$application_pointer_safe\" == true ]]; then" {
     found_safe_branch = 1
@@ -308,8 +362,43 @@ for legacy_authority_contract in \
   grep -Fq "$legacy_authority_contract" \
     "$script_dir/audit-security-migration-recovery.sh"
 done
-grep -Fq 'assert_container_stopped openbmb-api' "$script_dir/rotate-livekit-secret.sh"
-grep -Fq 'assert_container_stopped openbmb-livekit' "$script_dir/rotate-livekit-secret.sh"
+grep -Fq 'assert_container_stopped openbmb-api' "$rotation_script"
+grep -Fq 'assert_container_stopped openbmb-livekit' "$rotation_script"
+grep -Fxq 'take_operation_lock' "$rotation_script"
+grep -Fq 'OPENBMB_OPERATION_LOCK_FD' "$rotation_script"
+grep -Fq 'stat -Lc %d:%i -- "$descriptor"' "$rotation_script"
+grep -Fq 'stat -Lc %d:%i -- "$operation_lock"' "$rotation_script"
+grep -Fq -- '--conflict-exit-code 75 "$inherited_fd"' "$rotation_script"
+grep -Fq -- '--conflict-exit-code 75 "$operation_lock_fd"' "$rotation_script"
+! grep -Eq 'exec [0-9]+>"?\$operation_lock' "$rotation_script"
+grep -Fq "mode_lines[0]}\" == docker" "$rotation_script"
+grep -Fq -- '-e "$runtime_state" || -L "$runtime_state"' "$rotation_script"
+grep -Fq "fail 'LiveKit secret rotation requires pending=no'" "$rotation_script"
+grep -Fq '[[ "$upstream" == 127.0.0.1:13100 ]]' "$rotation_script"
+grep -Fq 'assert_native_unit_inactive openbmb-native-api@blue.service' "$rotation_script"
+grep -Fq 'assert_native_unit_inactive openbmb-native-api@green.service' "$rotation_script"
+grep -Fq -- '--property=LoadState --value "$unit"' "$rotation_script"
+grep -Fq '[[ "$load_state" == loaded ]]' "$rotation_script"
+grep -Fq -- '--property=UnitFileState --value "$unit"' "$rotation_script"
+grep -Fq '[[ "$unit_file_state" == disabled ]]' "$rotation_script"
+grep -Fq '"$("$node_bin" --version)" == v22.19.0' "$rotation_script"
+grep -Fq '"$node_bin" "$native_env_renderer" \' "$rotation_script"
+grep -Fq -- '--infra "$temporary_env_file"' "$rotation_script"
+grep -Fq '"$expected_uid:$native_gid:640"' "$rotation_script"
+grep -Fq 'restore_from_descriptor "$old_infra_fd" "$infra_env"' "$rotation_script"
+grep -Fq 'restore_from_descriptor "$old_native_fd" "$native_env"' "$rotation_script"
+assert_before "$rotation_script" \
+  '"$node_bin" "$native_env_renderer" \' \
+  'rollback_required=true'
+assert_before "$rotation_script" \
+  'rollback_required=true' \
+  'mv --no-target-directory --force -- "$temporary_env_file" "$infra_env"'
+assert_before "$rotation_script" \
+  'mv --no-target-directory --force -- "$temporary_env_file" "$infra_env"' \
+  'mv -Tf -- "$temporary_native_env_file" "$native_env"'
+assert_before "$rotation_script" \
+  'mv -Tf -- "$temporary_native_env_file" "$native_env"' \
+  'rollback_required=false'
 [[ "$(<"$production_dir/compatibility/security-epoch")" == 1 ]]
 for livekit_config in \
   "$production_dir/../livekit/livekit.yaml" \

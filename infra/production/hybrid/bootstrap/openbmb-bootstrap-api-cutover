@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+runtime_mode="${OPENBMB_RUNTIME_MODE_BIN:-/usr/local/sbin/openbmb-runtime-mode}"
+upstream_helper="${OPENBMB_API_UPSTREAM_HELPER:-/usr/local/libexec/openbmb-switch-api-upstream}"
+
+[[ "$(id -u)" -eq "${OPENBMB_EXPECTED_UID:-0}" ]] || {
+  printf 'BOOTSTRAP API CUTOVER: must run as root\n' >&2
+  exit 1
+}
+[[ -x "$runtime_mode" && ! -L "$runtime_mode" ]] || {
+  printf 'BOOTSTRAP API CUTOVER: runtime mode adapter is unavailable\n' >&2
+  exit 1
+}
+[[ -x "$upstream_helper" && ! -L "$upstream_helper" ]] || {
+  printf 'BOOTSTRAP API CUTOVER: upstream helper is unavailable\n' >&2
+  exit 1
+}
+
+case "${1:-}" in
+  current)
+    [[ $# -eq 1 ]] || exit 2
+    "$upstream_helper" current
+    ;;
+  switch)
+    [[ $# -eq 5 && "$2" == --expected-upstream && "$4" == --target-upstream ]] || exit 2
+    if [[ "$5" == 127.0.0.1:13100 ]]; then
+      # This path is invoked by the native deployer's rollback while it still
+      # owns its private lock. Runtime recovery must not recursively enter the
+      # native deployer; that caller will restore its own pointers afterwards.
+      OPENBMB_SKIP_NATIVE_RECOVER=true "$runtime_mode" recover
+      [[ "$($upstream_helper current)" == 127.0.0.1:13100 ]]
+    else
+      "$runtime_mode" bootstrap-cutover \
+        --expected-upstream "$3" --target-upstream "$5"
+    fi
+    ;;
+  *)
+    printf 'usage: %s current | switch --expected-upstream OLD --target-upstream NEW\n' \
+      "${BASH_SOURCE[0]}" >&2
+    exit 2
+    ;;
+esac

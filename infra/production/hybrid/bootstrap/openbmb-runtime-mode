@@ -1,0 +1,749 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+bootstrap_lib="${OPENBMB_BOOTSTRAP_LIB:-/usr/local/libexec/openbmb-hybrid/bootstrap-lib.sh}"
+if [[ ! -f "$bootstrap_lib" && -f "$script_dir/bootstrap-lib.sh" ]]; then
+  bootstrap_lib="$script_dir/bootstrap-lib.sh"
+fi
+# shellcheck source=bootstrap-lib.sh
+source "$bootstrap_lib"
+
+state_root="${OPENBMB_HYBRID_MODE_STATE:-/var/lib/openbmb/hybrid-runtime}"
+journal="$state_root/transition.pending"
+mode_file="$state_root/mode"
+docker_config_root="$state_root/configs/docker"
+hybrid_config_root="$state_root/configs/hybrid"
+operation_lock="${OPENBMB_OPERATION_LOCK:-/run/lock/openbmb-operation.lock}"
+flock_bin="${OPENBMB_FLOCK_BIN:-flock}"
+
+caddy_file="${OPENBMB_CADDY_FILE:-/etc/caddy/Caddyfile}"
+caddy_env="${OPENBMB_CADDY_ENV_FILE:-/etc/caddy/openbmb.env}"
+caddy_group="${OPENBMB_CADDY_GROUP:-caddy}"
+caddy_bin="${OPENBMB_CADDY_BIN:-caddy}"
+systemctl_bin="${OPENBMB_SYSTEMCTL_BIN:-systemctl}"
+docker_bin="${OPENBMB_DOCKER_BIN:-docker}"
+curl_bin="${OPENBMB_CURL_BIN:-curl}"
+upstream_helper="${OPENBMB_API_UPSTREAM_HELPER:-/usr/local/libexec/openbmb-switch-api-upstream}"
+native_deploy="${OPENBMB_NATIVE_API_DEPLOY:-/usr/local/sbin/openbmb-deploy-native-api}"
+native_pending="${OPENBMB_NATIVE_API_PENDING:-/opt/openbmb/hybrid/native-api.pending}"
+current_stack="${OPENBMB_CURRENT_LINK:-/opt/openbmb/current}"
+current_api="${OPENBMB_CURRENT_API_LINK:-/opt/openbmb/current-api}"
+current_web="${OPENBMB_CURRENT_WEB_LINK:-/opt/openbmb/current-web}"
+api_releases="${OPENBMB_NATIVE_API_RELEASES_ROOT:-/opt/openbmb/hybrid/api-releases}"
+api_slots="${OPENBMB_NATIVE_API_SLOTS_ROOT:-/opt/openbmb/hybrid/api-slots}"
+web_releases="${OPENBMB_WEB_RELEASES_ROOT:-/opt/openbmb/hybrid/web-releases}"
+domain="${OPENBMB_DOMAIN:-sun227454.online}"
+boot_recovery=false
+skip_native_recover="${OPENBMB_SKIP_NATIVE_RECOVER:-false}"
+
+journal_operation=''
+journal_phase=''
+journal_previous_mode=''
+journal_target_mode=''
+journal_previous_upstream=''
+journal_target_upstream='none'
+journal_cleanup_native='false'
+
+log() { printf 'HYBRID MODE: %s\n' "$*"; }
+fail() { printf 'HYBRID MODE: %s\n' "$*" >&2; exit 1; }
+
+ensure_state() {
+  install -d -o "$hybrid_expected_uid" -g "${OPENBMB_EXPECTED_GID:-0}" -m 0700 \
+    "$state_root" "$state_root/configs" "$docker_config_root" "$hybrid_config_root"
+  hybrid_assert_root_directory "$state_root"
+  hybrid_assert_root_directory "$docker_config_root"
+  hybrid_assert_root_directory "$hybrid_config_root"
+}
+
+take_operation_lock() {
+  case "${OPENBMB_OPERATION_LOCK_HELD:-false}" in
+    true)
+      hybrid_prepare_lock_file "$operation_lock"
+      hybrid_assert_inherited_lock "$operation_lock" \
+        "${OPENBMB_OPERATION_LOCK_FD:-}" "$flock_bin" || \
+        fail 'could not verify the inherited production operation lock'
+      export OPENBMB_OPERATION_LOCK="$operation_lock"
+      return
+      ;;
+    false) ;;
+    *) fail 'OPENBMB_OPERATION_LOCK_HELD must be true or false' ;;
+  esac
+  hybrid_prepare_lock_file "$operation_lock"
+  exec 9<>"$operation_lock"
+  "$flock_bin" --exclusive --wait "${OPENBMB_OPERATION_LOCK_WAIT_SECONDS:-120}" \
+    --conflict-exit-code 75 9 || fail "could not acquire $operation_lock"
+  export OPENBMB_OPERATION_LOCK_HELD=true
+  export OPENBMB_OPERATION_LOCK="$operation_lock"
+  export OPENBMB_OPERATION_LOCK_FD=9
+}
+
+read_mode() {
+  local -a lines=()
+  [[ -f "$mode_file" && ! -L "$mode_file" ]] || { printf 'uninitialized\n'; return; }
+  hybrid_assert_secure_file "$mode_file"
+  mapfile -t lines <"$mode_file"
+  [[ "${#lines[@]}" -eq 1 && "${lines[0]}" =~ ^(docker|hybrid)$ ]] || fail 'runtime mode file is invalid'
+  printf '%s\n' "${lines[0]}"
+}
+
+write_mode() {
+  [[ "$1" =~ ^(docker|hybrid)$ ]] || fail "invalid runtime mode: $1"
+  hybrid_write_scalar "$mode_file" 0600 "${OPENBMB_EXPECTED_GID:-0}" "$1"
+}
+
+write_journal() {
+  local phase="$1" temporary
+  [[ "$journal_operation" =~ ^(migrate|switch-hybrid|switch-docker)$ ]] || fail 'invalid journal operation'
+  [[ "$phase" =~ ^(prepared|candidate-ready|docker-api-stopped|caddy-staged|routed|cleanup|committed|recovering)$ ]] || \
+    fail "invalid journal phase: $phase"
+  [[ "$journal_previous_mode" =~ ^(docker|hybrid)$ && "$journal_target_mode" =~ ^(docker|hybrid)$ ]] || \
+    fail 'invalid journal modes'
+  [[ "$journal_previous_upstream" =~ ^127\.0\.0\.1:1310[0-2]$ ]] || fail 'invalid previous upstream'
+  [[ "$journal_target_upstream" == none || "$journal_target_upstream" =~ ^127\.0\.0\.1:1310[12]$ ]] || \
+    fail 'invalid target upstream'
+  [[ "$journal_cleanup_native" =~ ^(true|false)$ ]] || fail 'invalid cleanup-native flag'
+  temporary="$(mktemp -- "$state_root/.transition.XXXXXX")"
+  {
+    printf 'version=1\n'
+    printf 'operation=%s\n' "$journal_operation"
+    printf 'phase=%s\n' "$phase"
+    printf 'previous_mode=%s\n' "$journal_previous_mode"
+    printf 'target_mode=%s\n' "$journal_target_mode"
+    printf 'previous_upstream=%s\n' "$journal_previous_upstream"
+    printf 'target_upstream=%s\n' "$journal_target_upstream"
+    printf 'cleanup_native=%s\n' "$journal_cleanup_native"
+  } >"$temporary"
+  chown "$hybrid_expected_uid:${OPENBMB_EXPECTED_GID:-0}" -- "$temporary"
+  chmod 0600 -- "$temporary"
+  hybrid_atomic_commit_file "$temporary" "$journal"
+  journal_phase="$phase"
+}
+
+load_journal() {
+  local key value
+  local version=''
+  local -A seen=()
+  hybrid_assert_secure_file "$journal"
+  journal_operation=''; journal_phase=''; journal_previous_mode=''; journal_target_mode=''
+  journal_previous_upstream=''; journal_target_upstream=''; journal_cleanup_native=''
+  while IFS='=' read -r key value; do
+    [[ -n "$key" && -n "$value" && "$value" != *$'\n'* ]] || fail 'journal has an empty value'
+    [[ -z "${seen[$key]:-}" ]] || fail "journal key is duplicated: $key"
+    seen[$key]=1
+    case "$key" in
+      version) version="$value" ;;
+      operation) journal_operation="$value" ;;
+      phase) journal_phase="$value" ;;
+      previous_mode) journal_previous_mode="$value" ;;
+      target_mode) journal_target_mode="$value" ;;
+      previous_upstream) journal_previous_upstream="$value" ;;
+      target_upstream) journal_target_upstream="$value" ;;
+      cleanup_native) journal_cleanup_native="$value" ;;
+      *) fail "journal has an unknown key: $key" ;;
+    esac
+  done <"$journal"
+  [[ "$version" == 1 ]] || fail 'journal version is invalid'
+  [[ "$journal_operation" =~ ^(migrate|switch-hybrid|switch-docker)$ ]] || fail 'journal operation is invalid'
+  [[ "$journal_phase" =~ ^(prepared|candidate-ready|docker-api-stopped|caddy-staged|routed|cleanup|committed|recovering)$ ]] || \
+    fail 'journal phase is invalid'
+  [[ "$journal_previous_mode" =~ ^(docker|hybrid)$ && "$journal_target_mode" =~ ^(docker|hybrid)$ ]] || \
+    fail 'journal modes are invalid'
+  [[ "$journal_previous_upstream" =~ ^127\.0\.0\.1:1310[0-2]$ ]] || fail 'journal previous upstream is invalid'
+  [[ "$journal_target_upstream" == none || "$journal_target_upstream" =~ ^127\.0\.0\.1:1310[12]$ ]] || \
+    fail 'journal target upstream is invalid'
+  [[ "$journal_cleanup_native" =~ ^(true|false)$ ]] || fail 'journal cleanup flag is invalid'
+}
+
+clear_journal() {
+  [[ ! -e "$journal" && ! -L "$journal" ]] || hybrid_atomic_remove "$journal"
+}
+
+read_upstream_from_env() {
+  local file="$1"
+  local -a values=()
+  mapfile -t values < <(sed -n 's/^OPENBMB_API_UPSTREAM=//p' "$file")
+  [[ "${#values[@]}" -eq 1 && "${values[0]}" =~ ^127\.0\.0\.1:1310[0-2]$ ]] || \
+    fail "invalid OPENBMB_API_UPSTREAM in $file"
+  printf '%s\n' "${values[0]}"
+}
+
+write_env_upstream() {
+  local source="$1" destination="$2" target="$3" temporary replaced
+  [[ "$target" =~ ^127\.0\.0\.1:1310[0-2]$ ]] || fail "invalid upstream: $target"
+  hybrid_assert_secure_file "$source"
+  temporary="$(mktemp -- "$state_root/.openbmb-env.XXXXXX")"
+  if ! awk -v target="$target" '
+    BEGIN { replaced = 0 }
+    /^OPENBMB_API_UPSTREAM=/ {
+      if (replaced) exit 90
+      print "OPENBMB_API_UPSTREAM=" target
+      replaced = 1
+      next
+    }
+    { print }
+    END { if (!replaced) exit 91 }
+  ' "$source" >"$temporary"; then
+    rm -f -- "$temporary"
+    fail 'could not create the target Caddy environment'
+  fi
+  chown "$hybrid_expected_uid:${OPENBMB_EXPECTED_GID:-0}" -- "$temporary"
+  chmod 0600 -- "$temporary"
+  hybrid_atomic_commit_file "$temporary" "$destination"
+}
+
+snapshot_active_config() {
+  local mode="$1" destination
+  [[ "$mode" =~ ^(docker|hybrid)$ ]] || fail 'invalid snapshot mode'
+  destination="$state_root/configs/$mode"
+  hybrid_assert_secure_file "$caddy_file"
+  hybrid_assert_secure_file "$caddy_env"
+  hybrid_pin_file "$caddy_file" "$destination/Caddyfile" 0600 "${OPENBMB_EXPECTED_GID:-0}"
+  hybrid_pin_file "$caddy_env" "$destination/openbmb.env" 0600 "${OPENBMB_EXPECTED_GID:-0}"
+}
+
+install_active_config() {
+  local mode="$1" upstream="${2:-}" source_root env_source temporary
+  source_root="$state_root/configs/$mode"
+  hybrid_assert_secure_file "$source_root/Caddyfile"
+  hybrid_assert_secure_file "$source_root/openbmb.env"
+  env_source="$source_root/openbmb.env"
+  if [[ -n "$upstream" ]]; then
+    temporary="$state_root/.activate-openbmb.env"
+    write_env_upstream "$env_source" "$temporary" "$upstream"
+    env_source="$temporary"
+  fi
+  hybrid_pin_file "$source_root/Caddyfile" "$caddy_file" 0644 "${OPENBMB_EXPECTED_GID:-0}"
+  hybrid_pin_file "$env_source" "$caddy_env" 0640 "$caddy_group"
+  [[ "$env_source" != "$state_root/.activate-openbmb.env" ]] || hybrid_atomic_remove "$env_source"
+}
+
+validate_caddy() {
+  "$caddy_bin" validate --config "$caddy_file" --adapter caddyfile --envfile "$caddy_env" >/dev/null
+}
+
+caddy_is_active() {
+  "$systemctl_bin" is-active --quiet caddy
+}
+
+assert_runtime_barriers_active() {
+  "$systemctl_bin" is-active --quiet openbmb.service && \
+    "$systemctl_bin" is-active --quiet openbmb-hybrid-recovery.service
+}
+
+start_caddy_with_active_barriers() {
+  assert_runtime_barriers_active || {
+    log 'Caddy cannot be started while a required runtime barrier is inactive'
+    return 1
+  }
+  "$systemctl_bin" start caddy
+}
+
+reload_or_start_caddy() {
+  validate_caddy || return 1
+  if caddy_is_active; then
+    "$systemctl_bin" reload caddy
+  elif [[ "$boot_recovery" == false ]]; then
+    start_caddy_with_active_barriers
+  fi
+}
+
+curl_ok() {
+  "$curl_bin" --fail --silent --show-error --connect-timeout 2 --max-time 6 \
+    "$1" --output /dev/null
+}
+
+retry_url() {
+  local url="$1" attempts="${OPENBMB_HEALTH_ATTEMPTS:-20}"
+  for _attempt in $(seq 1 "$attempts"); do
+    curl_ok "$url" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+health_public() {
+  [[ "$boot_recovery" == true ]] && return 0
+  retry_url "https://$domain/openBMB/" && \
+    retry_url "https://$domain/openBMB/admin/" && \
+    retry_url "https://$domain/openBMB/api/v1/health/ready"
+}
+
+health_docker_direct() {
+  [[ "$($docker_bin inspect --format '{{.State.Running}}' openbmb-api 2>/dev/null || true)" == true ]] || return 1
+  [[ "$($docker_bin inspect --format '{{.State.Health.Status}}' openbmb-api 2>/dev/null || true)" == healthy ]] || return 1
+  retry_url 'http://127.0.0.1:13100/openBMB/api/v1/health/live' && \
+    retry_url 'http://127.0.0.1:13100/openBMB/api/v1/health/ready'
+}
+
+health_native_direct() {
+  local upstream="$1"
+  [[ "$upstream" =~ ^127\.0\.0\.1:1310[12]$ ]] || return 1
+  retry_url "http://$upstream/openBMB/api/v1/health/live" && \
+    retry_url "http://$upstream/openBMB/api/v1/health/ready"
+}
+
+compose_application() {
+  local -a services=("$@")
+  local compose_script="${OPENBMB_COMPOSE_SCRIPT:-$current_stack/infra/production/scripts/compose.sh}"
+  [[ -f "$compose_script" && ! -L "$compose_script" ]] || return 1
+  OPENBMB_INFRA_ENV_FILE="${OPENBMB_INFRA_ENV_FILE:-/etc/openbmb/infra.env}" \
+    OPENBMB_API_ENV_FILE="${OPENBMB_API_ENV_FILE:-/etc/openbmb/api.env}" \
+    bash "$compose_script" up -d --pull never --no-build --no-deps "${services[@]}"
+}
+
+stop_docker_api() {
+  "$docker_bin" stop --time 30 openbmb-api >/dev/null 2>&1 || true
+  [[ "$($docker_bin inspect --format '{{.State.Running}}' openbmb-api 2>/dev/null || true)" != true ]]
+}
+
+active_native_upstream() {
+  local current_target slot slot_target found=''
+  [[ -L "$current_api" ]] || return 1
+  current_target="$(readlink -f -- "$current_api")"
+  [[ "$(dirname -- "$current_target")" == "$(readlink -f -- "$api_releases")" ]] || return 1
+  for slot in blue green; do
+    [[ -L "$api_slots/$slot" ]] || continue
+    slot_target="$(readlink -f -- "$api_slots/$slot")"
+    if [[ "$slot_target" == "$current_target" ]]; then
+      [[ -z "$found" ]] || return 1
+      found="$slot"
+    fi
+  done
+  case "$found" in
+    blue) printf '127.0.0.1:13101\n' ;;
+    green) printf '127.0.0.1:13102\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+start_native_upstream() {
+  local upstream="$1" slot
+  case "$upstream" in
+    127.0.0.1:13101) slot=blue ;;
+    127.0.0.1:13102) slot=green ;;
+    *) return 1 ;;
+  esac
+  "$systemctl_bin" enable --now "openbmb-native-api@${slot}.service" >/dev/null
+  assert_native_unit_state "openbmb-native-api@${slot}.service" active enabled || return 1
+  health_native_direct "$upstream"
+}
+
+assert_native_unit_state() {
+  local unit="$1" expected_active="$2" expected_unit_file="$3"
+  local load_state active_state unit_file_state
+  load_state="$("$systemctl_bin" show --property=LoadState --value "$unit")" || return 1
+  active_state="$("$systemctl_bin" show --property=ActiveState --value "$unit")" || return 1
+  unit_file_state="$("$systemctl_bin" show --property=UnitFileState --value "$unit")" || return 1
+  [[ "$load_state" == loaded && "$active_state" == "$expected_active" && \
+     "$unit_file_state" == "$expected_unit_file" ]]
+}
+
+quiesce_native_unit() {
+  local unit="$1"
+  "$systemctl_bin" disable --now "$unit" >/dev/null 2>&1 || return 1
+  assert_native_unit_state "$unit" inactive disabled
+}
+
+stop_native_units() {
+  local slot status=0 unit
+  for slot in blue green; do
+    unit="openbmb-native-api@${slot}.service"
+    if ! quiesce_native_unit "$unit"; then
+      log "could not prove $unit is inactive and disabled"
+      status=1
+    fi
+  done
+  return "$status"
+}
+
+remove_initial_native_links() {
+  local link target
+  for link in "$current_api" "$api_slots/blue" "$api_slots/green"; do
+    if [[ -L "$link" ]]; then
+      target="$(readlink -f -- "$link")"
+      if [[ "$(dirname -- "$target")" == "$(readlink -f -- "$api_releases")" ]]; then
+        rm -f -- "$link"
+        hybrid_fsync_directory "$(dirname -- "$link")"
+      else
+        log "refusing to remove escaped native link $link"
+        return 1
+      fi
+    elif [[ -e "$link" ]]; then
+      log "native pointer is not a symlink: $link"
+      return 1
+    fi
+  done
+}
+
+restore_docker_mode() {
+  local status=0 caddy_ready=false docker_ready=false native_recovered=false
+  log 'restoring Docker application mode'
+  # A committed native journal can only be completed while its target upstream
+  # is still authoritative. Finish that narrow case before restoring the old
+  # Caddy environment; ordinary/pre-commit rollback is deliberately deferred
+  # until Docker is healthy on 13100.
+  if [[ "$skip_native_recover" != true && -f "$native_pending" && ! -L "$native_pending" ]] && \
+     grep -Fxq 'phase=committed' "$native_pending"; then
+    if OPENBMB_NATIVE_API_BOOT_RECOVERY="$boot_recovery" \
+      "$native_deploy" recover >/dev/null 2>&1; then
+      native_recovered=true
+    else
+      status=1
+    fi
+  fi
+  if install_active_config docker && validate_caddy; then
+    if caddy_is_active; then
+      if "$systemctl_bin" reload caddy; then caddy_ready=true; fi
+    elif [[ "$boot_recovery" == true ]]; then
+      caddy_ready=true
+    elif start_caddy_with_active_barriers; then
+      caddy_ready=true
+    fi
+  else
+    status=1
+  fi
+  if [[ "$caddy_ready" != true ]]; then
+    log 'Caddy Docker configuration did not activate; stopping Caddy to release 13100'
+    "$systemctl_bin" stop caddy >/dev/null 2>&1 || true
+  fi
+
+  compose_application api client-web admin-web || status=1
+  if health_docker_direct; then docker_ready=true; else status=1; fi
+
+  # The old endpoint now exists, so the native deployer's normal pre-commit
+  # recovery can safely prove 13100 instead of failing against an empty port.
+  if [[ "$skip_native_recover" != true && "$native_recovered" != true ]]; then
+    OPENBMB_NATIVE_API_BOOT_RECOVERY="$boot_recovery" \
+      "$native_deploy" recover >/dev/null 2>&1 || status=1
+  fi
+
+  if [[ "$docker_ready" == true && "$caddy_ready" != true && "$boot_recovery" == false ]]; then
+    if validate_caddy && start_caddy_with_active_barriers; then caddy_ready=true; else status=1; fi
+  fi
+  if [[ "$docker_ready" == true && "$caddy_ready" == true ]]; then
+    health_public || status=1
+  fi
+  if [[ "$docker_ready" == true ]]; then
+    if stop_native_units; then
+      if [[ "$journal_cleanup_native" == true ]]; then remove_initial_native_links || status=1; fi
+    else
+      status=1
+    fi
+  fi
+  if [[ "$status" -eq 0 ]]; then
+    write_mode docker
+  fi
+  return "$status"
+}
+
+restore_hybrid_mode() {
+  local status=0 upstream="$journal_previous_upstream"
+  log "restoring hybrid application mode through $upstream"
+  install_active_config hybrid "$upstream" || status=1
+  if [[ "$status" -eq 0 ]]; then validate_caddy || status=1; fi
+  if [[ "$status" -eq 0 ]]; then start_native_upstream "$upstream" || status=1; fi
+  [[ "$status" -eq 0 ]] || return "$status"
+  # The stable hybrid listener owns 13100, so the Docker API must be stopped
+  # before the saved hybrid Caddy configuration is loaded.
+  stop_docker_api || status=1
+  reload_or_start_caddy || status=1
+  health_native_direct "$upstream" || status=1
+  if [[ "$status" -eq 0 ]]; then health_public || status=1; fi
+  if [[ "$status" -eq 0 ]]; then
+    "$docker_bin" stop --time 15 openbmb-client-web openbmb-admin-web >/dev/null 2>&1 || true
+    write_mode hybrid
+  fi
+  return "$status"
+}
+
+recover_transition() {
+  local status=0 current_mode
+  [[ -e "$journal" || -L "$journal" ]] || { log 'no runtime transition is pending'; return 0; }
+  load_journal
+  current_mode="$(read_mode)"
+  if [[ "$journal_phase" == committed && "$current_mode" == "$journal_target_mode" ]]; then
+    case "$current_mode" in
+      docker) health_docker_direct || status=1 ;;
+      hybrid) health_native_direct "$journal_target_upstream" || status=1 ;;
+    esac
+    if [[ "$status" -eq 0 ]]; then clear_journal; log "completed committed $current_mode transition"; return 0; fi
+  fi
+
+  write_journal recovering
+  case "$journal_previous_mode" in
+    docker) restore_docker_mode || status=1 ;;
+    hybrid) restore_hybrid_mode || status=1 ;;
+  esac
+  if [[ "$status" -eq 0 ]]; then
+    clear_journal
+    log "rolled back interrupted transition to $journal_previous_mode"
+  else
+    log "recovery is incomplete; durable evidence remains at $journal"
+  fi
+  return "$status"
+}
+
+recover_all() {
+  local mode upstream selected_slot inactive_slot
+  if [[ -e "$journal" || -L "$journal" ]]; then
+    recover_transition
+    return
+  fi
+  if [[ -e "$native_pending" || -L "$native_pending" ]]; then
+    OPENBMB_NATIVE_API_BOOT_RECOVERY="$boot_recovery" \
+    "$native_deploy" recover
+    return
+  fi
+  mode="$(read_mode)"
+  upstream="$($upstream_helper current)"
+  case "$mode" in
+    uninitialized|docker)
+      [[ "$upstream" == 127.0.0.1:13100 ]] || \
+        fail 'settled Docker mode is not routed to 127.0.0.1:13100'
+      health_docker_direct || fail 'settled Docker API is not healthy'
+      stop_native_units || fail 'settled Docker mode has a native API unit that is not quiescent'
+      ;;
+    hybrid)
+      [[ "$upstream" =~ ^127\.0\.0\.1:1310[12]$ ]] || \
+        fail 'settled hybrid mode has no managed native upstream'
+      [[ "$(active_native_upstream)" == "$upstream" ]] || \
+        fail 'settled hybrid pointers disagree with the authoritative Caddy upstream'
+      start_native_upstream "$upstream" || fail 'settled hybrid native API is not healthy and enabled'
+      case "$upstream" in
+        127.0.0.1:13101) selected_slot=blue; inactive_slot=green ;;
+        127.0.0.1:13102) selected_slot=green; inactive_slot=blue ;;
+      esac
+      quiesce_native_unit "openbmb-native-api@${inactive_slot}.service" || \
+        fail "inactive native API slot is not quiescent: $inactive_slot"
+      assert_native_unit_state "openbmb-native-api@${selected_slot}.service" active enabled || \
+        fail "selected native API slot is not active and enabled: $selected_slot"
+      ;;
+    *) fail 'runtime mode is not initialized safely' ;;
+  esac
+  log "settled $mode runtime is directly healthy"
+}
+
+begin_transition() {
+  local operation="$1" previous="$2" target="$3" previous_upstream="$4" cleanup="$5"
+  [[ ! -e "$journal" && ! -L "$journal" ]] || fail "recover the existing transition first: $journal"
+  journal_operation="$operation"
+  journal_previous_mode="$previous"
+  journal_target_mode="$target"
+  journal_previous_upstream="$previous_upstream"
+  journal_target_upstream=none
+  journal_cleanup_native="$cleanup"
+  write_journal prepared
+}
+
+bootstrap_cutover() {
+  local expected="$1" target="$2" status=0
+  load_journal
+  [[ "$journal_operation" == migrate && "$journal_previous_mode" == docker && "$journal_target_mode" == hybrid ]] || \
+    fail 'bootstrap cutover has no matching migration journal'
+  [[ "$expected" == "$journal_previous_upstream" && "$expected" == 127.0.0.1:13100 ]] || \
+    fail 'bootstrap cutover expected upstream is inconsistent'
+  [[ "$target" =~ ^127\.0\.0\.1:1310[12]$ ]] || fail 'bootstrap target must be a native slot'
+  journal_target_upstream="$target"
+  write_journal candidate-ready
+  stop_docker_api || status=1
+  write_journal docker-api-stopped
+  if [[ "$status" -eq 0 ]]; then
+    # Keep the old env in place so the real helper can compare-and-swap 13100
+    # to the healthy native target while loading the already-staged Caddyfile.
+    hybrid_pin_file "$hybrid_config_root/Caddyfile" "$caddy_file" 0644 "${OPENBMB_EXPECTED_GID:-0}" || status=1
+  fi
+  write_journal caddy-staged
+  if [[ "$status" -eq 0 ]]; then
+    "$upstream_helper" switch --expected-upstream "$expected" --target-upstream "$target" || status=1
+  fi
+  if [[ "$status" -eq 0 ]]; then
+    snapshot_active_config hybrid
+    write_journal routed
+    return 0
+  fi
+  skip_native_recover=true
+  recover_transition || true
+  return 1
+}
+
+bootstrap_commit() {
+  load_journal
+  [[ "$journal_operation" == migrate && "$journal_target_mode" == hybrid && \
+     "$journal_target_upstream" =~ ^127\.0\.0\.1:1310[12]$ ]] || fail 'no bootstrap cutover can be committed'
+  [[ "$journal_phase" == routed ]] || fail 'bootstrap cutover is not durably routed'
+  [[ "$(read_mode)" == docker ]] || fail 'bootstrap previous mode changed unexpectedly'
+  [[ "$($upstream_helper current)" == "$journal_target_upstream" ]] || \
+    fail 'bootstrap target is not the authoritative Caddy upstream'
+  health_native_direct "$journal_target_upstream" || fail 'native target is not healthy'
+  health_public || fail 'public hybrid route is not healthy'
+  write_journal cleanup
+  write_mode hybrid
+  write_journal committed
+  clear_journal
+  log "bootstrap committed hybrid mode through $journal_target_upstream"
+}
+
+switch_to_docker() {
+  local upstream
+  [[ "$(read_mode)" == hybrid ]] || fail 'runtime is not in hybrid mode'
+  [[ ! -e "$native_pending" && ! -L "$native_pending" ]] || \
+    fail "recover the interrupted native API deployment first: $native_pending"
+  upstream="$($upstream_helper current)"
+  [[ "$upstream" =~ ^127\.0\.0\.1:1310[12]$ ]] || fail 'active hybrid upstream is invalid'
+  health_native_direct "$upstream" || fail 'active native API is not healthy before Docker fallback'
+  snapshot_active_config hybrid
+  begin_transition switch-docker hybrid docker "$upstream" false
+  trap transition_exit EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  compose_application client-web admin-web
+  install_active_config docker
+  reload_or_start_caddy
+  write_journal caddy-staged
+  compose_application api client-web admin-web
+  health_docker_direct
+  health_public
+  write_journal routed
+  stop_native_units
+  write_mode docker
+  write_journal committed
+  clear_journal
+  trap - EXIT HUP INT TERM
+  log 'runtime switched to Docker application mode'
+}
+
+switch_to_hybrid() {
+  local upstream
+  [[ "$(read_mode)" == docker ]] || fail 'runtime is not in Docker mode'
+  [[ ! -e "$native_pending" && ! -L "$native_pending" ]] || \
+    fail "recover the interrupted native API deployment first: $native_pending"
+  # A slow Docker release may advance the schema or security floor while the
+  # retained native release remains old. Never re-enter hybrid mode until the
+  # API module proves the active native artifact is still compatible.
+  "$native_deploy" compatibility >/dev/null
+  snapshot_active_config docker
+  upstream="$(active_native_upstream)" || fail 'current-api does not identify exactly one native slot'
+  begin_transition switch-hybrid docker hybrid 127.0.0.1:13100 false
+  journal_target_upstream="$upstream"
+  write_journal prepared
+  trap transition_exit EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  start_native_upstream "$upstream"
+  write_journal candidate-ready
+  stop_docker_api
+  write_journal docker-api-stopped
+  install_active_config hybrid "$upstream"
+  reload_or_start_caddy
+  write_journal routed
+  health_native_direct "$upstream"
+  health_public
+  "$docker_bin" stop --time 15 openbmb-client-web openbmb-admin-web >/dev/null 2>&1 || true
+  "$docker_bin" rm openbmb-api openbmb-client-web openbmb-admin-web >/dev/null 2>&1 || true
+  write_mode hybrid
+  write_journal committed
+  clear_journal
+  trap - EXIT HUP INT TERM
+  log "runtime switched to hybrid mode through $upstream"
+}
+
+transition_exit() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  if [[ -e "$journal" || -L "$journal" ]]; then recover_transition || true; fi
+  exit "$status"
+}
+
+status_command() {
+  local mode upstream='unknown' pending=no
+  mode="$(read_mode)"
+  if [[ -e "$journal" || -L "$journal" || -e "$native_pending" || -L "$native_pending" ]]; then
+    pending=yes
+  fi
+  if [[ -f "$caddy_env" && ! -L "$caddy_env" ]]; then upstream="$(read_upstream_from_env "$caddy_env")"; fi
+  printf 'mode=%s\nupstream=%s\npending=%s\n' "$mode" "$upstream" "$pending"
+}
+
+ensure_current_mode() {
+  local mode="$1" upstream
+  [[ ! -e "$journal" && ! -L "$journal" && ! -e "$native_pending" && ! -L "$native_pending" ]] || \
+    fail 'recover pending runtime or native API work before checking the current mode'
+  case "$mode" in
+    docker)
+      upstream="$($upstream_helper current)"
+      [[ "$upstream" == 127.0.0.1:13100 ]] || \
+        fail 'Docker mode is recorded but Caddy is not routed to 13100'
+      health_docker_direct && health_public || fail 'Docker mode is recorded but is not healthy'
+      ;;
+    hybrid)
+      upstream="$($upstream_helper current)"
+      [[ "$upstream" =~ ^127\.0\.0\.1:1310[12]$ ]] || fail 'hybrid mode has no native upstream'
+      health_native_direct "$upstream" && health_public || fail 'hybrid mode is recorded but is not healthy'
+      ;;
+  esac
+  log "runtime is already healthy in $mode mode"
+}
+
+main() {
+  local command="${1:-}" target="${2:-}"
+  if [[ "$command" == recover && "${2:-}" == --boot ]]; then boot_recovery=true; fi
+  hybrid_require_root || exit 1
+  take_operation_lock
+  # All persistent state creation belongs inside the same public production
+  # operation lock used by deploy and rollback workflows.
+  ensure_state
+  if [[ "$boot_recovery" == false && \
+        "$command" =~ ^(begin-migration|bootstrap-cutover|bootstrap-commit|switch|recover)$ ]]; then
+    assert_runtime_barriers_active || \
+      fail 'online runtime changes require active stack and recovery barriers'
+  fi
+  case "$command" in
+    initialize-docker)
+      [[ $# -eq 1 ]] || fail 'initialize-docker takes no arguments'
+      [[ "$(read_mode)" == uninitialized ]] || fail 'runtime mode is already initialized'
+      snapshot_active_config docker
+      write_mode docker
+      ;;
+    begin-migration)
+      [[ $# -eq 1 ]] || fail 'begin-migration takes no arguments'
+      [[ "$(read_mode)" == docker ]] || fail 'migration requires Docker mode'
+      [[ ! -e "$native_pending" && ! -L "$native_pending" ]] || \
+        fail "recover the interrupted native API deployment first: $native_pending"
+      begin_transition migrate docker hybrid 127.0.0.1:13100 true
+      ;;
+    bootstrap-cutover)
+      [[ $# -eq 5 && "$2" == --expected-upstream && "$4" == --target-upstream ]] || \
+        fail 'usage: bootstrap-cutover --expected-upstream OLD --target-upstream NEW'
+      bootstrap_cutover "$3" "$5"
+      ;;
+    bootstrap-commit)
+      [[ $# -eq 1 ]] || fail 'bootstrap-commit takes no arguments'
+      bootstrap_commit
+      ;;
+    switch)
+      [[ $# -eq 2 && "$target" =~ ^(docker|hybrid)$ ]] || fail 'usage: openbmb-runtime-mode switch docker|hybrid'
+      if [[ "$(read_mode)" == "$target" ]]; then
+        ensure_current_mode "$target"
+      else
+        case "$target" in docker) switch_to_docker ;; hybrid) switch_to_hybrid ;; esac
+      fi
+      ;;
+    recover)
+      if [[ "${2:-}" == --boot ]]; then boot_recovery=true; shift; fi
+      [[ $# -eq 1 ]] || fail 'usage: openbmb-runtime-mode recover [--boot]'
+      recover_all
+      ;;
+    status)
+      [[ $# -eq 1 ]] || fail 'status takes no arguments'
+      status_command
+      ;;
+    *) fail 'usage: openbmb-runtime-mode initialize-docker|begin-migration|bootstrap-cutover|bootstrap-commit|switch|recover|status' ;;
+  esac
+}
+
+main "$@"

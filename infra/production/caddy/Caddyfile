@@ -3,6 +3,21 @@
 	admin 127.0.0.1:2019
 }
 
+# LiveKit webhooks keep using this stable loopback address while the API
+# implementation can move between container and host runtimes. Access logging is
+# deliberately not enabled on this listener because webhook/API URLs may carry
+# sensitive identifiers.
+{$OPENBMB_API_STABLE_BIND:http://127.0.0.1:13100} {
+	bind 127.0.0.1
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		Cache-Control "no-store"
+		Referrer-Policy "no-referrer"
+	}
+	reverse_proxy {$OPENBMB_API_UPSTREAM:127.0.0.1:13101}
+}
+
 {$OPENBMB_DOMAIN:sun227454.online} {
 	log {
 		output file {$CADDY_ACCESS_LOG:/var/log/caddy/openbmb-access.log} {
@@ -79,7 +94,7 @@
 				Cache-Control "no-store"
 				Referrer-Policy "no-referrer"
 			}
-			reverse_proxy {$OPENBMB_API_UPSTREAM:127.0.0.1:13100}
+			reverse_proxy {$OPENBMB_API_UPSTREAM:127.0.0.1:13101}
 		}
 
 		@openbmbAdmin path /openBMB/admin/*
@@ -89,16 +104,25 @@
 				Referrer-Policy "no-referrer"
 				Permissions-Policy "camera=(), microphone=(), geolocation=()"
 			}
-			reverse_proxy {$OPENBMB_ADMIN_UPSTREAM:127.0.0.1:14174}
+			root * /opt/openbmb/current-web/site
+			try_files {path} /openBMB/admin/index.html
+			file_server
 		}
 
 		@openbmbClient path /openBMB/*
 		handle @openbmbClient {
 			header {
+				# SPA entrypoints and fallback HTML must never outlive the
+				# release pointer they came from. Applying no-store to this
+				# small static surface favors rollback correctness over a
+				# second cache policy that could accidentally cover HTML.
+				Cache-Control "no-store"
 				Referrer-Policy "strict-origin-when-cross-origin"
 				Permissions-Policy "camera=(self), microphone=(self), geolocation=()"
 			}
-			reverse_proxy {$OPENBMB_CLIENT_UPSTREAM:127.0.0.1:14173}
+			root * /opt/openbmb/current-web/site
+			try_files {path} /openBMB/index.html
+			file_server
 		}
 
 		# CampusHub remains the fallback for every non-OpenBMB path.

@@ -1,0 +1,894 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 027
+
+readonly EX_USAGE=64
+readonly EX_DATAERR=65
+readonly EX_UNAVAILABLE=69
+readonly EX_TEMPFAIL=75
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+test_mode="${OPENBMB_WEB_TEST_MODE:-false}"
+
+case "$test_mode" in
+  true)
+    openbmb_root="${OPENBMB_WEB_ROOT:?OPENBMB_WEB_ROOT is required in test mode}"
+    incoming_root="${OPENBMB_WEB_INCOMING_ROOT:?OPENBMB_WEB_INCOMING_ROOT is required in test mode}"
+    state_root="${OPENBMB_WEB_STATE_ROOT:?OPENBMB_WEB_STATE_ROOT is required in test mode}"
+    lock_root="${OPENBMB_WEB_LOCK_ROOT:?OPENBMB_WEB_LOCK_ROOT is required in test mode}"
+    lock_file="$lock_root/operation.lock"
+    archive_guard="${OPENBMB_WEB_ARCHIVE_GUARD:-$script_dir/archive_guard.py}"
+    gc_grace_seconds="${OPENBMB_WEB_GC_GRACE_SECONDS:-86400}"
+    ;;
+  false)
+    [[ "$EUID" -eq 0 ]] || {
+      printf 'openbmb-web-release must run as root\n' >&2
+      exit "$EX_UNAVAILABLE"
+    }
+    readonly openbmb_root=/opt/openbmb
+    readonly incoming_root=/home/ubuntu/.openbmb-web-incoming
+    readonly state_root=/var/lib/openbmb/web-release
+    readonly lock_file="${OPENBMB_OPERATION_LOCK:-/run/lock/openbmb-operation.lock}"
+    readonly archive_guard=/usr/local/libexec/openbmb-web-release/archive_guard.py
+    readonly gc_grace_seconds=86400
+    # Do not let a preserved caller environment weaken production resource caps.
+    export OPENBMB_WEB_MAX_MEMBERS=100000
+    export OPENBMB_WEB_MAX_EXPANDED_BYTES=1073741824
+    ;;
+  *)
+    printf 'OPENBMB_WEB_TEST_MODE must be true or false\n' >&2
+    exit "$EX_USAGE"
+    ;;
+esac
+
+readonly releases_root="$openbmb_root/hybrid/web-releases"
+readonly current_pointer="$openbmb_root/current-web"
+readonly previous_pointer="$openbmb_root/previous-web"
+readonly staging_root="$state_root/staging"
+readonly promotions_root="$state_root/promotions"
+readonly gc_candidates_root="$state_root/gc-candidates"
+readonly transition_journal="$state_root/transition.pending"
+readonly max_archive_bytes=$((512 * 1024 * 1024))
+
+work_dir=""
+release_temp=""
+rollback_active=false
+journal_operation=""
+journal_phase=""
+journal_old_current=""
+journal_old_previous=""
+journal_target_release=""
+journal_source_sha=""
+journal_archive_sha=""
+journal_promotion_id=""
+
+die() {
+  local status="$1"
+  shift
+  printf '%s\n' "$*" >&2
+  exit "$status"
+}
+
+require_absolute_path() {
+  local path="$1"
+  [[ "$path" == /* && "$path" != *$'\n'* && "$path" != *$'\r'* ]] ||
+    die "$EX_USAGE" "path must be absolute and single-line: $path"
+}
+
+mode_has_group_or_world_write() {
+  local mode="$1"
+  (( (8#$mode & 8#022) != 0 ))
+}
+
+validate_trusted_file() {
+  local path="$1"
+  [[ -f "$path" && ! -L "$path" ]] ||
+    die "$EX_UNAVAILABLE" "trusted implementation file is missing or linked: $path"
+  [[ "$(stat -c %u -- "$path")" == 0 ]] ||
+    die "$EX_UNAVAILABLE" "trusted implementation file is not owned by root: $path"
+  local mode
+  mode="$(stat -c %a -- "$path")"
+  ! mode_has_group_or_world_write "$mode" ||
+    die "$EX_UNAVAILABLE" "trusted implementation file is writable outside root: $path"
+}
+
+validate_real_directory() {
+  local path="$1"
+  local expected_mode="$2"
+  [[ -d "$path" && ! -L "$path" ]] ||
+    die "$EX_UNAVAILABLE" "required directory is missing or linked: $path"
+  if [[ "$test_mode" == false ]]; then
+    [[ "$(stat -c %u -- "$path")" == 0 ]] ||
+      die "$EX_UNAVAILABLE" "directory must be root-owned: $path"
+  fi
+  [[ "$(stat -c %a -- "$path")" == "$expected_mode" ]] ||
+    die "$EX_UNAVAILABLE" "directory must have mode $expected_mode: $path"
+}
+
+create_managed_directory() {
+  local path="$1"
+  local mode="$2"
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    mkdir -- "$path"
+    chmod "$mode" -- "$path"
+    if [[ "$test_mode" == false ]]; then
+      chown root:root -- "$path"
+    fi
+  fi
+  validate_real_directory "$path" "$mode"
+}
+
+bootstrap_layout() {
+  local require_incoming="${1:-true}"
+  [[ "$require_incoming" =~ ^(true|false)$ ]] ||
+    die "$EX_USAGE" "bootstrap incoming requirement must be true or false"
+  require_absolute_path "$openbmb_root"
+  require_absolute_path "$incoming_root"
+  require_absolute_path "$state_root"
+  require_absolute_path "$lock_file"
+  require_absolute_path "$archive_guard"
+
+  if [[ "$test_mode" == false ]]; then
+    validate_trusted_file "$0"
+    validate_trusted_file "$archive_guard"
+    [[ -d "$openbmb_root" && ! -L "$openbmb_root" ]] ||
+      die "$EX_UNAVAILABLE" "$openbmb_root must be a real directory"
+    [[ "$(stat -c %u -- "$openbmb_root")" == 0 ]] ||
+      die "$EX_UNAVAILABLE" "$openbmb_root must be root-owned"
+    local root_mode
+    root_mode="$(stat -c %a -- "$openbmb_root")"
+    ! mode_has_group_or_world_write "$root_mode" ||
+      die "$EX_UNAVAILABLE" "$openbmb_root must not be group/world writable"
+  else
+    create_managed_directory "$openbmb_root" 755
+  fi
+
+  create_managed_directory "$openbmb_root/hybrid" 755
+  create_managed_directory "$releases_root" 755
+  create_managed_directory "$state_root" 700
+  create_managed_directory "$staging_root" 700
+  create_managed_directory "$promotions_root" 700
+  create_managed_directory "$gc_candidates_root" 700
+  if [[ "$test_mode" == true ]]; then
+    create_managed_directory "$lock_root" 700
+  else
+    local lock_parent lock_parent_mode
+    lock_parent="$(dirname -- "$lock_file")"
+    [[ -d "$lock_parent" && ! -L "$lock_parent" && "$(stat -c %u -- "$lock_parent")" == 0 ]] ||
+      die "$EX_UNAVAILABLE" "operation-lock parent is unsafe"
+    lock_parent_mode="$((8#$(stat -c %a -- "$lock_parent")))"
+    (( (lock_parent_mode & 8#022) == 0 || (lock_parent_mode & 8#1000) != 0 )) ||
+      die "$EX_UNAVAILABLE" "writable operation-lock parent must be sticky"
+  fi
+
+  if [[ "$require_incoming" == true ]]; then
+    [[ -d "$incoming_root" && ! -L "$incoming_root" ]] ||
+      die "$EX_UNAVAILABLE" "incoming directory is missing or linked: $incoming_root"
+    [[ "$(stat -c %a -- "$incoming_root")" == 700 ]] ||
+      die "$EX_UNAVAILABLE" "incoming directory must have mode 0700"
+    if [[ "$test_mode" == false ]]; then
+      local ubuntu_uid
+      ubuntu_uid="$(id -u ubuntu)" || die "$EX_UNAVAILABLE" "ubuntu account is missing"
+      [[ "$(stat -c %u -- "$incoming_root")" == "$ubuntu_uid" ]] ||
+        die "$EX_UNAVAILABLE" "incoming directory must be owned by ubuntu"
+    fi
+  fi
+}
+
+acquire_operation_lock() {
+  if [[ ! -e "$lock_file" && ! -L "$lock_file" ]]; then
+    (umask 077; set -o noclobber; : >"$lock_file") 2>/dev/null || true
+    [[ "$test_mode" == true ]] || chown root:root -- "$lock_file"
+    chmod 600 -- "$lock_file"
+  fi
+  [[ -f "$lock_file" && ! -L "$lock_file" ]] ||
+    die "$EX_UNAVAILABLE" "operation lock is not a regular file"
+  if [[ "$test_mode" == false ]]; then
+    [[ "$(stat -c %u -- "$lock_file")" == 0 ]] ||
+      die "$EX_UNAVAILABLE" "operation lock must be root-owned"
+    ! mode_has_group_or_world_write "$(stat -c %a -- "$lock_file")" ||
+      die "$EX_UNAVAILABLE" "operation lock must not be writable outside root"
+  fi
+  case "${OPENBMB_OPERATION_LOCK_HELD:-false}" in
+    true)
+      local inherited_fd="${OPENBMB_OPERATION_LOCK_FD:-}" descriptor
+      [[ "$inherited_fd" =~ ^([3-9]|[1-9][0-9]+)$ ]] ||
+        die "$EX_UNAVAILABLE" "inherited operation-lock descriptor is missing"
+      descriptor="/proc/$$/fd/$inherited_fd"
+      [[ -e "$descriptor" && "$(stat -Lc %d:%i -- "$descriptor")" == \
+        "$(stat -Lc %d:%i -- "$lock_file")" ]] ||
+        die "$EX_UNAVAILABLE" "inherited descriptor does not reference the production operation lock"
+      flock --exclusive --nonblock "$inherited_fd" ||
+        die "$EX_TEMPFAIL" "inherited production operation lock is not held"
+      ;;
+    false)
+      exec 9<>"$lock_file"
+      flock --exclusive --nonblock 9 ||
+        die "$EX_TEMPFAIL" "another production operation is already running"
+      export OPENBMB_OPERATION_LOCK_HELD=true
+      export OPENBMB_OPERATION_LOCK="$lock_file"
+      export OPENBMB_OPERATION_LOCK_FD=9
+      ;;
+    *) die "$EX_USAGE" "OPENBMB_OPERATION_LOCK_HELD must be true or false" ;;
+  esac
+}
+
+fsync_path() {
+  python3 "$archive_guard" fsync "$1"
+}
+
+journal_release_value() {
+  if [[ -n "$1" ]]; then printf '%s\n' "$1"; else printf 'none\n'; fi
+}
+
+validate_journal_state() {
+  [[ "$journal_operation" =~ ^(promote|revert)$ ]] ||
+    die "$EX_DATAERR" "Web transition journal operation is invalid"
+  [[ "$journal_phase" =~ ^(prepared|current-switched|health-passed|previous-switched|record-written)$ ]] ||
+    die "$EX_DATAERR" "Web transition journal phase is invalid"
+  [[ -z "$journal_old_current" || "$journal_old_current" =~ ^web-[0-9a-f]{40}-[0-9a-f]{16}$ ]] ||
+    die "$EX_DATAERR" "Web transition journal old current is invalid"
+  [[ -z "$journal_old_previous" || "$journal_old_previous" =~ ^web-[0-9a-f]{40}-[0-9a-f]{16}$ ]] ||
+    die "$EX_DATAERR" "Web transition journal old previous is invalid"
+  [[ "$journal_target_release" =~ ^web-[0-9a-f]{40}-[0-9a-f]{16}$ ]] ||
+    die "$EX_DATAERR" "Web transition journal target is invalid"
+  [[ "$journal_source_sha" =~ ^[0-9a-f]{40}$ ]] ||
+    die "$EX_DATAERR" "Web transition journal source SHA is invalid"
+  [[ "$journal_archive_sha" =~ ^[0-9a-f]{64}$ ]] ||
+    die "$EX_DATAERR" "Web transition journal archive SHA is invalid"
+  [[ "$journal_promotion_id" =~ ^promotion-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] ||
+    die "$EX_DATAERR" "Web transition journal promotion ID is invalid"
+}
+
+write_transition_journal() {
+  journal_phase="$1"
+  validate_journal_state
+  if [[ -e "$transition_journal" || -L "$transition_journal" ]]; then
+    [[ -f "$transition_journal" && ! -L "$transition_journal" ]] ||
+      die "$EX_DATAERR" "Web transition journal is not a regular file"
+  fi
+  local temporary
+  temporary="$(mktemp "$state_root/.transition.XXXXXX")"
+  printf '%s\n' \
+    'version=1' \
+    "operation=$journal_operation" \
+    "phase=$journal_phase" \
+    "old_current=$(journal_release_value "$journal_old_current")" \
+    "old_previous=$(journal_release_value "$journal_old_previous")" \
+    "target_release=$journal_target_release" \
+    "source_sha=$journal_source_sha" \
+    "archive_sha256=$journal_archive_sha" \
+    "promotion_id=$journal_promotion_id" >"$temporary"
+  chmod 600 -- "$temporary"
+  [[ "$test_mode" == true ]] || chown root:root -- "$temporary"
+  fsync_path "$temporary"
+  mv -Tf -- "$temporary" "$transition_journal"
+  fsync_path "$state_root"
+}
+
+load_transition_journal() {
+  [[ -f "$transition_journal" && ! -L "$transition_journal" ]] ||
+    die "$EX_DATAERR" "Web transition journal is missing or linked"
+  if [[ "$test_mode" == false ]]; then
+    [[ "$(stat -c %u:%g:%a -- "$transition_journal")" == 0:0:600 ]] ||
+      die "$EX_DATAERR" "Web transition journal permissions are unsafe"
+  else
+    [[ "$(stat -c %a -- "$transition_journal")" == 600 ]] ||
+      die "$EX_DATAERR" "Web transition journal test permissions are unsafe"
+  fi
+  local -a lines=()
+  mapfile -t lines <"$transition_journal"
+  [[ "${#lines[@]}" -eq 9 && "${lines[0]}" == version=1 && \
+     "${lines[1]}" == operation=* && "${lines[2]}" == phase=* && \
+     "${lines[3]}" == old_current=* && "${lines[4]}" == old_previous=* && \
+     "${lines[5]}" == target_release=* && "${lines[6]}" == source_sha=* && \
+     "${lines[7]}" == archive_sha256=* && "${lines[8]}" == promotion_id=* ]] ||
+    die "$EX_DATAERR" "Web transition journal has an unexpected shape"
+  journal_operation="${lines[1]#operation=}"
+  journal_phase="${lines[2]#phase=}"
+  journal_old_current="${lines[3]#old_current=}"
+  journal_old_previous="${lines[4]#old_previous=}"
+  [[ "$journal_old_current" != none ]] || journal_old_current=""
+  [[ "$journal_old_previous" != none ]] || journal_old_previous=""
+  journal_target_release="${lines[5]#target_release=}"
+  journal_source_sha="${lines[6]#source_sha=}"
+  journal_archive_sha="${lines[7]#archive_sha256=}"
+  journal_promotion_id="${lines[8]#promotion_id=}"
+  validate_journal_state
+}
+
+clear_transition_journal() {
+  if [[ -e "$transition_journal" || -L "$transition_journal" ]]; then
+    [[ -f "$transition_journal" && ! -L "$transition_journal" ]] ||
+      die "$EX_DATAERR" "refusing to clear an unsafe Web transition journal"
+    rm -f -- "$transition_journal"
+    fsync_path "$state_root"
+  fi
+}
+
+maybe_crash_for_test() {
+  local phase="$1"
+  [[ "$test_mode" == true ]] || return 0
+  if [[ "${OPENBMB_WEB_TEST_CRASH_PHASE:-}" == "$phase" ]]; then
+    kill -KILL "$$"
+  fi
+}
+
+safe_remove_tree() {
+  local path="$1"
+  local allowed_parent="$2"
+  [[ -d "$path" && ! -L "$path" ]] || return 0
+  local parent physical
+  parent="$(dirname -- "$path")"
+  physical="$(realpath -e -- "$path")"
+  [[ "$parent" == "$allowed_parent" && "$physical" == "$allowed_parent/$(basename -- "$path")" ]] ||
+    die "$EX_DATAERR" "refusing to remove a tree outside its exact parent: $path"
+  find "$path" -type l -print -quit | grep -q . &&
+    die "$EX_DATAERR" "refusing to remove a tree containing a link: $path"
+  chmod -R u+w -- "$path" 2>/dev/null || true
+  rm -rf -- "$path"
+}
+
+cleanup_stale_scratch() {
+  local root pattern candidate base expected_uid stale_minutes cleaned=0
+  stale_minutes=$(( (gc_grace_seconds + 59) / 60 ))
+  (( stale_minutes > 0 )) || stale_minutes=1
+  if [[ "$test_mode" == false ]]; then expected_uid=0; else expected_uid="$(id -u)"; fi
+  while IFS='|' read -r root pattern; do
+    while IFS= read -r -d '' candidate; do
+      (( cleaned < 8 )) || return 0
+      base="$(basename -- "$candidate")"
+      [[ "$base" =~ $pattern ]] || continue
+      [[ -d "$candidate" && ! -L "$candidate" && \
+         "$(stat -c %u -- "$candidate")" == "$expected_uid" ]] || continue
+      safe_remove_tree "$candidate" "$root"
+      cleaned=$((cleaned + 1))
+    done < <(find "$root" -mindepth 1 -maxdepth 1 -type d \
+      -mmin "+$stale_minutes" -print0)
+  done <<EOF
+$staging_root|^promote\.[A-Za-z0-9]{6}$
+$releases_root|^\.incoming\.[A-Za-z0-9]{6}$
+EOF
+}
+
+resolve_pointer() {
+  local pointer="$1"
+  if [[ ! -e "$pointer" && ! -L "$pointer" ]]; then
+    return 0
+  fi
+  [[ -L "$pointer" ]] || die "$EX_DATAERR" "release pointer is not a symlink: $pointer"
+  local target release
+  target="$(readlink -- "$pointer")"
+  [[ "$target" =~ ^hybrid/web-releases/(web-[0-9a-f]{40}-[0-9a-f]{16})$ ]] ||
+    die "$EX_DATAERR" "release pointer has an unsafe target: $pointer -> $target"
+  release="${BASH_REMATCH[1]}"
+  [[ -d "$releases_root/$release" && ! -L "$releases_root/$release" ]] ||
+    die "$EX_DATAERR" "release pointer is dangling: $pointer"
+  printf '%s\n' "$release"
+}
+
+atomic_set_pointer() {
+  local pointer="$1"
+  local release="$2"
+  [[ "$release" =~ ^web-[0-9a-f]{40}-[0-9a-f]{16}$ ]] ||
+    die "$EX_DATAERR" "invalid release target: $release"
+  [[ -d "$releases_root/$release" && ! -L "$releases_root/$release" ]] ||
+    die "$EX_DATAERR" "release target does not exist: $release"
+  if [[ -e "$pointer" || -L "$pointer" ]]; then
+    [[ -L "$pointer" ]] || die "$EX_DATAERR" "refusing to replace a non-symlink pointer"
+  fi
+  local temporary="$openbmb_root/.$(basename -- "$pointer").new.$$.$RANDOM"
+  [[ ! -e "$temporary" && ! -L "$temporary" ]] || die "$EX_TEMPFAIL" "pointer temp collision"
+  ln -s -- "hybrid/web-releases/$release" "$temporary"
+  mv -Tf -- "$temporary" "$pointer"
+  fsync_path "$openbmb_root"
+}
+
+atomic_clear_pointer() {
+  local pointer="$1"
+  if [[ -e "$pointer" || -L "$pointer" ]]; then
+    [[ -L "$pointer" ]] || die "$EX_DATAERR" "refusing to remove a non-symlink pointer"
+    rm -f -- "$pointer"
+    fsync_path "$openbmb_root"
+  fi
+}
+
+restore_pointer() {
+  local pointer="$1"
+  local release="$2"
+  if [[ -n "$release" ]]; then
+    atomic_set_pointer "$pointer" "$release"
+  else
+    atomic_clear_pointer "$pointer"
+  fi
+}
+
+run_health_checks() {
+  if [[ "$test_mode" == true ]]; then
+    local local_hook="${OPENBMB_WEB_LOCAL_HEALTH_HOOK:?local health hook is required in test mode}"
+    local public_hook="${OPENBMB_WEB_PUBLIC_HEALTH_HOOK:?public health hook is required in test mode}"
+    require_absolute_path "$local_hook"
+    require_absolute_path "$public_hook"
+    [[ -x "$local_hook" && -f "$local_hook" && ! -L "$local_hook" ]] ||
+      die "$EX_UNAVAILABLE" "invalid local health hook"
+    [[ -x "$public_hook" && -f "$public_hook" && ! -L "$public_hook" ]] ||
+      die "$EX_UNAVAILABLE" "invalid public health hook"
+    "$local_hook"
+    "$public_hook"
+    return
+  fi
+
+  local domain=sun227454.online
+  local common=(
+    --fail --silent --show-error --location
+    --connect-timeout 5 --max-time 15
+    --retry 2 --retry-delay 1 --retry-connrefused --retry-all-errors
+    --proto '=https'
+  )
+  curl "${common[@]}" --resolve "$domain:443:127.0.0.1" \
+    "https://$domain/openBMB/" --output /dev/null
+  curl "${common[@]}" --resolve "$domain:443:127.0.0.1" \
+    "https://$domain/openBMB/admin/" --output /dev/null
+  curl "${common[@]}" "https://$domain/openBMB/" --output /dev/null
+  curl "${common[@]}" "https://$domain/openBMB/admin/" --output /dev/null
+}
+
+verify_caddy_read_access() {
+  local release="$1"
+  local client_index="$releases_root/$release/site/openBMB/index.html"
+  local admin_index="$releases_root/$release/site/openBMB/admin/index.html"
+  [[ -r "$client_index" && -r "$admin_index" ]] ||
+    die "$EX_DATAERR" "release SPA entrypoints are not readable"
+  if [[ "$test_mode" == false ]]; then
+    command -v runuser >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "runuser is required"
+    id caddy >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "caddy account is missing"
+    runuser -u caddy -- test -r "$client_index" ||
+      die "$EX_DATAERR" "caddy cannot read the client entrypoint"
+    runuser -u caddy -- test -r "$admin_index" ||
+      die "$EX_DATAERR" "caddy cannot read the admin entrypoint"
+  fi
+}
+
+verify_immutable_release() {
+  local release="$1"
+  local directory="$releases_root/$release"
+  [[ -d "$directory" && ! -L "$directory" ]] || return 1
+  find "$directory" -type l -print -quit | grep -q . && return 1
+  find "$directory" -perm /022 -print -quit | grep -q . && return 1
+  [[ -f "$directory/.openbmb-web-release" && ! -L "$directory/.openbmb-web-release" ]] || return 1
+  if [[ "$test_mode" == false ]]; then
+    ! find "$directory" ! -user root -print -quit | grep -q . || return 1
+  fi
+  (
+    cd "$directory"
+    sha256sum --check --strict --quiet SHA256SUMS
+  ) || return 1
+  verify_caddy_read_access "$release"
+}
+
+metadata_value() {
+  local release="$1"
+  local key="$2"
+  awk -F= -v wanted="$key" '$1 == wanted { sub(/^[^=]*=/, ""); print; exit }' \
+    "$releases_root/$release/.openbmb-web-release"
+}
+
+new_promotion_id() {
+  local timestamp promotion_id destination
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  promotion_id="promotion-$timestamp-$$-$RANDOM"
+  destination="$promotions_root/$promotion_id.record"
+  [[ ! -e "$destination" && ! -L "$destination" ]] ||
+    die "$EX_TEMPFAIL" "promotion record ID collision"
+  printf '%s\n' "$promotion_id"
+}
+
+write_promotion_record() {
+  local promotion_id="$1"
+  local operation="$2"
+  local previous="$3"
+  local promoted="$4"
+  local source_sha="$5"
+  local archive_sha="$6"
+  local timestamp temporary destination
+  [[ "$promotion_id" =~ ^promotion-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+$ ]] ||
+    die "$EX_DATAERR" "promotion record ID is invalid"
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  destination="$promotions_root/$promotion_id.record"
+  [[ ! -e "$destination" && ! -L "$destination" ]] ||
+    die "$EX_TEMPFAIL" "promotion record ID collision"
+  temporary="$(mktemp "$promotions_root/.record.XXXXXX")"
+  printf '%s\n' \
+    "promotion_id=$promotion_id" \
+    "operation=$operation" \
+    "previous_release=$previous" \
+    "promoted_release=$promoted" \
+    "source_sha=$source_sha" \
+    "archive_sha256=$archive_sha" \
+    "created_utc=$timestamp" > "$temporary"
+  chmod 600 -- "$temporary"
+  [[ "$test_mode" == true ]] || chown root:root -- "$temporary"
+  fsync_path "$temporary"
+  mv -T -- "$temporary" "$destination"
+  fsync_path "$promotions_root"
+  printf '%s\n' "$promotion_id"
+}
+
+promotion_record_matches_journal() {
+  local record="$promotions_root/$journal_promotion_id.record"
+  [[ -e "$record" || -L "$record" ]] || return 1
+  [[ -f "$record" && ! -L "$record" ]] ||
+    die "$EX_DATAERR" "journal promotion record is not a regular file"
+  if [[ "$test_mode" == false ]]; then
+    [[ "$(stat -c %u:%g:%a -- "$record")" == 0:0:600 ]] ||
+      die "$EX_DATAERR" "journal promotion record permissions are unsafe"
+  else
+    [[ "$(stat -c %a -- "$record")" == 600 ]] ||
+      die "$EX_DATAERR" "journal promotion record test permissions are unsafe"
+  fi
+  local -a lines=()
+  mapfile -t lines <"$record"
+  [[ "${#lines[@]}" -eq 7 && \
+     "${lines[0]}" == "promotion_id=$journal_promotion_id" && \
+     "${lines[1]}" == "operation=$journal_operation" && \
+     "${lines[2]}" == "previous_release=$journal_old_current" && \
+     "${lines[3]}" == "promoted_release=$journal_target_release" && \
+     "${lines[4]}" == "source_sha=$journal_source_sha" && \
+     "${lines[5]}" == "archive_sha256=$journal_archive_sha" && \
+     "${lines[6]}" =~ ^created_utc=[0-9]{8}T[0-9]{6}Z$ ]] ||
+    die "$EX_DATAERR" "journal promotion record does not match the transition"
+}
+
+recover_pending_transition() {
+  load_transition_journal
+  local current previous expected_previous
+  expected_previous="$journal_old_current"
+
+  if promotion_record_matches_journal; then
+    [[ "$journal_phase" =~ ^(previous-switched|record-written)$ ]] ||
+      die "$EX_DATAERR" "promotion record exists before the journal reached its commit boundary"
+    verify_immutable_release "$journal_target_release" ||
+      die "$EX_DATAERR" "committed Web transition target is not immutable"
+    current="$(resolve_pointer "$current_pointer")"
+    previous="$(resolve_pointer "$previous_pointer")"
+    [[ "$current" == "$journal_target_release" && "$previous" == "$expected_previous" ]] ||
+      die "$EX_DATAERR" "committed Web transition pointers do not match its durable record"
+    clear_transition_journal
+    rollback_active=false
+    printf 'recovery=committed\nrelease=%s\npromotion_id=%s\n' \
+      "$journal_target_release" "$journal_promotion_id"
+  else
+    [[ "$journal_phase" != record-written ]] ||
+      die "$EX_DATAERR" "record-written Web transition lost its durable promotion record"
+    if [[ -n "$journal_old_current" ]]; then
+      verify_immutable_release "$journal_old_current" ||
+        die "$EX_DATAERR" "Web recovery old current release is not immutable"
+    fi
+    if [[ -n "$journal_old_previous" ]]; then
+      verify_immutable_release "$journal_old_previous" ||
+        die "$EX_DATAERR" "Web recovery old previous release is not immutable"
+    fi
+    restore_pointer "$current_pointer" "$journal_old_current"
+    restore_pointer "$previous_pointer" "$journal_old_previous"
+    current="$(resolve_pointer "$current_pointer")"
+    previous="$(resolve_pointer "$previous_pointer")"
+    [[ "$current" == "$journal_old_current" && "$previous" == "$journal_old_previous" ]] ||
+      die "$EX_DATAERR" "Web recovery could not restore both old pointers"
+    clear_transition_journal
+    rollback_active=false
+    printf 'recovery=rolled-back\nrelease=%s\n' "$journal_old_current"
+  fi
+
+  if ! cleanup_unreachable_releases; then
+    printf 'WARNING: unreachable Web release cleanup was skipped after recovery.\n' >&2
+  fi
+}
+
+recover_if_pending() {
+  if [[ -e "$transition_journal" || -L "$transition_journal" ]]; then
+    recover_pending_transition
+    return
+  fi
+  printf 'recovery=not-needed\n'
+}
+
+cleanup_unreachable_releases() {
+  local current previous now release directory marker marker_value marker_mtime physical
+  current="$(resolve_pointer "$current_pointer")"
+  previous="$(resolve_pointer "$previous_pointer")"
+  now="$(date +%s)"
+  shopt -s nullglob
+  local directories=("$releases_root"/web-*)
+  shopt -u nullglob
+  for directory in "${directories[@]}"; do
+    [[ -d "$directory" && ! -L "$directory" ]] || continue
+    release="$(basename -- "$directory")"
+    [[ "$release" =~ ^web-[0-9a-f]{40}-[0-9a-f]{16}$ ]] || continue
+    marker="$gc_candidates_root/$release"
+    if [[ "$release" == "$current" || "$release" == "$previous" ]]; then
+      if [[ -e "$marker" || -L "$marker" ]]; then
+        [[ -f "$marker" && ! -L "$marker" ]] || return 1
+        rm -f -- "$marker"
+      fi
+      continue
+    fi
+
+    if [[ -f "$marker" && ! -L "$marker" ]]; then
+      marker_value="$(<"$marker")"
+      [[ "$marker_value" == "$release" ]] || return 1
+      marker_mtime="$(stat -c %Y -- "$marker")"
+      if (( now - marker_mtime >= gc_grace_seconds )); then
+        # Re-read both operational references immediately before deletion.
+        current="$(resolve_pointer "$current_pointer")"
+        previous="$(resolve_pointer "$previous_pointer")"
+        [[ "$release" != "$current" && "$release" != "$previous" ]] || continue
+        physical="$(realpath -e -- "$directory")"
+        [[ "$physical" == "$releases_root/$release" ]] || return 1
+        if [[ "$test_mode" == false ]]; then
+          ! find "$directory" ! -user root -print -quit | grep -q . || return 1
+        fi
+        safe_remove_tree "$directory" "$releases_root"
+        rm -f -- "$marker"
+      fi
+    elif [[ -e "$marker" || -L "$marker" ]]; then
+      return 1
+    else
+      printf '%s\n' "$release" > "$marker"
+      chmod 600 -- "$marker"
+      [[ "$test_mode" == true ]] || chown root:root -- "$marker"
+      fsync_path "$marker"
+    fi
+  done
+  fsync_path "$gc_candidates_root"
+  fsync_path "$releases_root"
+}
+
+on_exit() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  set +e
+  if [[ "$rollback_active" == true ]]; then
+    printf 'Web health/promotion failed; recovering its durable transition.\n' >&2
+    if (recover_pending_transition >&2); then
+      local_current="$(resolve_pointer "$current_pointer")"
+      if [[ -n "$journal_old_current" && "$local_current" == "$journal_old_current" ]]; then
+        run_health_checks || printf 'WARNING: restored Web release also failed health checks.\n' >&2
+      fi
+    else
+      printf 'WARNING: durable Web transition recovery failed; journal retained.\n' >&2
+    fi
+  fi
+  if [[ -n "$release_temp" ]]; then
+    safe_remove_tree "$release_temp" "$releases_root" || true
+  fi
+  if [[ -n "$work_dir" ]]; then
+    safe_remove_tree "$work_dir" "$staging_root" || true
+  fi
+  exit "$status"
+}
+trap on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+switch_release() {
+  local target="$1"
+  local operation="$2"
+  local source_sha="$3"
+  local archive_sha="$4"
+  local previous_current previous_rollback promotion_id
+  previous_current="$(resolve_pointer "$current_pointer")"
+  previous_rollback="$(resolve_pointer "$previous_pointer")"
+
+  if [[ "$target" == "$previous_current" ]]; then
+    run_health_checks
+    printf 'status=unchanged\nrelease=%s\n' "$target"
+    return
+  fi
+
+  verify_immutable_release "$target" || die "$EX_DATAERR" "target release is not immutable"
+  [[ ! -e "$transition_journal" && ! -L "$transition_journal" ]] ||
+    die "$EX_TEMPFAIL" "recover the existing Web transition before switching"
+  promotion_id="$(new_promotion_id)"
+  journal_operation="$operation"
+  journal_old_current="$previous_current"
+  journal_old_previous="$previous_rollback"
+  journal_target_release="$target"
+  journal_source_sha="$source_sha"
+  journal_archive_sha="$archive_sha"
+  journal_promotion_id="$promotion_id"
+  write_transition_journal prepared
+  rollback_active=true
+  maybe_crash_for_test prepared
+
+  atomic_set_pointer "$current_pointer" "$target"
+  write_transition_journal current-switched
+  maybe_crash_for_test current-switched
+  run_health_checks
+  write_transition_journal health-passed
+  maybe_crash_for_test health-passed
+
+  if [[ -n "$previous_current" ]]; then
+    atomic_set_pointer "$previous_pointer" "$previous_current"
+  else
+    atomic_clear_pointer "$previous_pointer"
+  fi
+  write_transition_journal previous-switched
+  maybe_crash_for_test previous-switched
+  write_promotion_record "$promotion_id" \
+    "$operation" "$previous_current" "$target" "$source_sha" "$archive_sha" >/dev/null
+  write_transition_journal record-written
+  maybe_crash_for_test record-written
+  clear_transition_journal
+  rollback_active=false
+
+  if ! cleanup_unreachable_releases; then
+    printf 'WARNING: unreachable Web release cleanup was skipped after a safety check failed.\n' >&2
+  fi
+  printf 'status=promoted\npromotion_id=%s\nrelease=%s\nprevious_release=%s\n' \
+    "$promotion_id" "$target" "$previous_current"
+}
+
+promote_release() {
+  [[ $# -eq 3 ]] ||
+    die "$EX_USAGE" "usage: openbmb-web-release promote <commit40> <archive-abs-path> <sha256>"
+  local source_sha="${1,,}"
+  local source_archive="$2"
+  local expected_sha="${3,,}"
+  [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || die "$EX_USAGE" "commit must be a full 40-hex SHA"
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || die "$EX_USAGE" "archive SHA256 must be 64 hex characters"
+  require_absolute_path "$source_archive"
+
+  local archive_name source_parent
+  archive_name="$(basename -- "$source_archive")"
+  source_parent="$(dirname -- "$source_archive")"
+  [[ "$source_parent" == "$incoming_root" ]] ||
+    die "$EX_USAGE" "archive must be a direct child of $incoming_root"
+  [[ "$source_archive" == "$incoming_root/$archive_name" ]] ||
+    die "$EX_USAGE" "archive path must be canonical"
+  [[ "$archive_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.zst$ ]] ||
+    die "$EX_USAGE" "archive filename is not allowed"
+  [[ -f "$source_archive" && ! -L "$source_archive" ]] ||
+    die "$EX_DATAERR" "archive must be a direct regular file, not a symlink"
+  [[ "$(stat -c %F -- "$source_archive")" == 'regular file' ]] ||
+    die "$EX_DATAERR" "archive is not a regular file"
+  local archive_size
+  archive_size="$(stat -c %s -- "$source_archive")"
+  (( archive_size > 0 && archive_size <= max_archive_bytes )) ||
+    die "$EX_DATAERR" "archive size is outside the permitted range"
+
+  work_dir="$(mktemp -d "$staging_root/promote.XXXXXX")"
+  chmod 700 -- "$work_dir"
+  [[ "$test_mode" == true ]] || chown root:root -- "$work_dir"
+  local staged_archive="$work_dir/release.tar.zst"
+  cp --reflink=never --sparse=never --no-preserve=all -- "$source_archive" "$staged_archive"
+  chmod 400 -- "$staged_archive"
+  [[ "$test_mode" == true ]] || chown root:root -- "$staged_archive"
+  fsync_path "$staged_archive"
+  fsync_path "$work_dir"
+
+  local actual_sha
+  actual_sha="$(sha256sum -- "$staged_archive")"
+  actual_sha="${actual_sha%% *}"
+  [[ "$actual_sha" == "$expected_sha" ]] ||
+    die "$EX_DATAERR" "copied archive SHA256 does not match the signed intent"
+  zstd -q -t -- "$staged_archive"
+  zstd -q -d -c -- "$staged_archive" | python3 "$archive_guard" inspect
+
+  local release="web-$source_sha-${expected_sha:0:16}"
+  local destination="$releases_root/$release"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    verify_immutable_release "$release" || die "$EX_DATAERR" "existing release is not immutable"
+    [[ "$(metadata_value "$release" source_sha)" == "$source_sha" ]] ||
+      die "$EX_DATAERR" "existing release source SHA mismatch"
+    [[ "$(metadata_value "$release" archive_sha256)" == "$expected_sha" ]] ||
+      die "$EX_DATAERR" "existing release archive SHA mismatch"
+  else
+    release_temp="$(mktemp -d "$releases_root/.incoming.XXXXXX")"
+    chmod 700 -- "$release_temp"
+    [[ "$test_mode" == true ]] || chown root:root -- "$release_temp"
+    zstd -q -d -c -- "$staged_archive" | python3 "$archive_guard" extract "$release_temp"
+    printf 'source_sha=%s\narchive_sha256=%s\ncreated_utc=%s\n' \
+      "$source_sha" "$expected_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$release_temp/.openbmb-web-release"
+    chmod 444 -- "$release_temp/.openbmb-web-release"
+    if [[ "$test_mode" == false ]]; then
+      chown -R root:root -- "$release_temp"
+    fi
+    fsync_path "$release_temp/.openbmb-web-release"
+    chmod 555 -- "$release_temp"
+    fsync_path "$release_temp"
+    mv -T -- "$release_temp" "$destination"
+    release_temp=""
+    fsync_path "$releases_root"
+    verify_immutable_release "$release" || die "$EX_DATAERR" "new release failed immutable verification"
+  fi
+
+  switch_release "$release" promote "$source_sha" "$expected_sha"
+}
+
+resolve_revert_target() {
+  local requested="$1"
+  [[ "$requested" =~ ^[A-Za-z0-9._-]+$ ]] || die "$EX_USAGE" "invalid revert target"
+  if [[ "$requested" =~ ^web-[0-9a-f]{40}-[0-9a-f]{16}$ ]]; then
+    [[ -d "$releases_root/$requested" && ! -L "$releases_root/$requested" ]] ||
+      die "$EX_DATAERR" "requested Web release is not retained"
+    printf '%s\n' "$requested"
+    return
+  fi
+
+  local record="$promotions_root/$requested.record"
+  [[ -f "$record" && ! -L "$record" ]] || die "$EX_DATAERR" "promotion record not found"
+  if [[ "$test_mode" == false ]]; then
+    [[ "$(stat -c %u:%g:%a -- "$record")" == 0:0:600 ]] ||
+      die "$EX_DATAERR" "promotion record permissions are unsafe"
+  fi
+  local previous
+  previous="$(awk -F= '$1 == "previous_release" { sub(/^[^=]*=/, ""); print; exit }' "$record")"
+  [[ "$previous" =~ ^web-[0-9a-f]{40}-[0-9a-f]{16}$ ]] ||
+    die "$EX_DATAERR" "promotion has no retained predecessor"
+  [[ -d "$releases_root/$previous" && ! -L "$releases_root/$previous" ]] ||
+    die "$EX_DATAERR" "promotion predecessor is no longer retained"
+  printf '%s\n' "$previous"
+}
+
+revert_release() {
+  [[ $# -eq 1 ]] ||
+    die "$EX_USAGE" "usage: openbmb-web-release revert <promotion-id-or-release>"
+  local target source_sha archive_sha
+  target="$(resolve_revert_target "$1")"
+  verify_immutable_release "$target" || die "$EX_DATAERR" "revert target is not immutable"
+  source_sha="$(metadata_value "$target" source_sha)"
+  archive_sha="$(metadata_value "$target" archive_sha256)"
+  [[ "$source_sha" =~ ^[0-9a-f]{40}$ && "$archive_sha" =~ ^[0-9a-f]{64}$ ]] ||
+    die "$EX_DATAERR" "revert target metadata is invalid"
+  switch_release "$target" revert "$source_sha" "$archive_sha"
+}
+
+show_status() {
+  [[ $# -eq 0 ]] || die "$EX_USAGE" "usage: openbmb-web-release status"
+  local current previous
+  current="$(resolve_pointer "$current_pointer")"
+  previous="$(resolve_pointer "$previous_pointer")"
+  printf 'current_release=%s\nprevious_release=%s\n' "$current" "$previous"
+  if [[ -n "$current" ]]; then
+    printf 'source_sha=%s\narchive_sha256=%s\n' \
+      "$(metadata_value "$current" source_sha)" \
+      "$(metadata_value "$current" archive_sha256)"
+  fi
+}
+
+main() {
+  [[ $# -ge 1 ]] ||
+    die "$EX_USAGE" "usage: openbmb-web-release {promote|revert|recover|status} ..."
+  local command="$1"
+  shift
+  [[ "$command" =~ ^(promote|revert|recover|status)$ ]] ||
+    die "$EX_USAGE" "unknown command: $command"
+  command -v flock >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "flock is required"
+  command -v python3 >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "python3 is required"
+  command -v realpath >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "realpath is required"
+  command -v sha256sum >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "sha256sum is required"
+  if [[ "$command" == recover ]]; then bootstrap_layout false; else bootstrap_layout true; fi
+  acquire_operation_lock
+  if [[ "$command" == recover ]]; then
+    [[ $# -eq 0 ]] || die "$EX_USAGE" "usage: openbmb-web-release recover"
+    recover_if_pending
+    cleanup_stale_scratch
+    return
+  fi
+  if [[ -e "$transition_journal" || -L "$transition_journal" ]]; then
+    recover_pending_transition >&2
+  fi
+  cleanup_stale_scratch
+  case "$command" in
+    promote)
+      command -v zstd >/dev/null 2>&1 || die "$EX_UNAVAILABLE" "zstd is required"
+      promote_release "$@"
+      ;;
+    revert) revert_release "$@" ;;
+    status) show_status "$@" ;;
+  esac
+}
+
+main "$@"

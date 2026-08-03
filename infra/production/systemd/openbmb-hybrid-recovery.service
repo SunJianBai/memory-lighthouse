@@ -1,0 +1,22 @@
+[Unit]
+Description=Recover interrupted OpenBMB hybrid runtime, native API, and Web transitions
+Documentation=file:/var/lib/openbmb/hybrid-runtime/transition.pending file:/opt/openbmb/hybrid/native-api.pending file:/var/lib/openbmb/web-release/transition.pending
+After=local-fs.target docker.service openbmb.service
+Requires=docker.service openbmb.service
+Before=caddy.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/openbmb-runtime-mode recover --boot
+ExecStart=/usr/local/sbin/openbmb-web-release recover
+TimeoutStartSec=600
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/etc/caddy /opt/openbmb /run/lock /var/lib/openbmb
+
+[Install]
+WantedBy=multi-user.target

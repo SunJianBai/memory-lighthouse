@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 027
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+bootstrap_lib="${OPENBMB_BOOTSTRAP_LIB:-/usr/local/libexec/openbmb-hybrid/bootstrap-lib.sh}"
+if [[ ! -f "$bootstrap_lib" && -f "$script_dir/bootstrap-lib.sh" ]]; then
+  bootstrap_lib="$script_dir/bootstrap-lib.sh"
+fi
+# shellcheck source=bootstrap-lib.sh
+source "$bootstrap_lib"
+
+operation_lock="${OPENBMB_OPERATION_LOCK:-/run/lock/openbmb-operation.lock}"
+flock_bin="${OPENBMB_FLOCK_BIN:-flock}"
+runtime_mode="${OPENBMB_RUNTIME_MODE_BIN:-/usr/local/sbin/openbmb-runtime-mode}"
+current_stack="${OPENBMB_CURRENT_LINK:-/opt/openbmb/current}"
+current_app="${OPENBMB_CURRENT_APP_LINK:-/opt/openbmb/current-app}"
+releases_root="${OPENBMB_STACK_RELEASES_ROOT:-/opt/openbmb/releases}"
+docker_bin="${OPENBMB_DOCKER_BIN:-docker}"
+
+fail() {
+  printf 'HYBRID STACK: %s\n' "$*" >&2
+  exit 1
+}
+
+take_operation_lock() {
+  local inherited_fd
+  hybrid_prepare_lock_file "$operation_lock" || exit 1
+  case "${OPENBMB_OPERATION_LOCK_HELD:-false}" in
+    false)
+      exec 9<>"$operation_lock"
+      "$flock_bin" --exclusive --wait 120 --conflict-exit-code 75 9 || \
+        fail 'could not acquire the production operation lock'
+      export OPENBMB_OPERATION_LOCK_HELD=true
+      export OPENBMB_OPERATION_LOCK="$operation_lock"
+      export OPENBMB_OPERATION_LOCK_FD=9
+      ;;
+    true)
+      inherited_fd="${OPENBMB_OPERATION_LOCK_FD:-}"
+      hybrid_assert_inherited_lock "$operation_lock" "$inherited_fd" "$flock_bin" || exit 1
+      ;;
+    *) fail 'OPENBMB_OPERATION_LOCK_HELD must be true or false' ;;
+  esac
+}
+
+assert_active_release() {
+  local stack_target app_target compose_script service_control security_epoch unsafe
+  [[ -L "$current_stack" && -L "$current_app" ]] || fail 'current release pointers are missing'
+  stack_target="$(readlink -f -- "$current_stack")"
+  app_target="$(readlink -f -- "$current_app")"
+  [[ "$(dirname -- "$stack_target")" == "$releases_root" && \
+     "$(dirname -- "$app_target")" == "$releases_root" ]] || \
+    fail 'current release pointers escaped the immutable release root'
+  for managed in "$stack_target" "$app_target"; do
+    [[ -d "$managed" && ! -L "$managed" && "$(stat -c %u -- "$managed")" == "$hybrid_expected_uid" ]] || \
+      fail "unsafe immutable release: $managed"
+    unsafe="$(find "$managed" -maxdepth 0 -perm /0022 -print -quit)"
+    [[ -z "$unsafe" ]] || fail "immutable release is writable by group/other: $managed"
+  done
+  compose_script="$stack_target/infra/production/scripts/compose.sh"
+  service_control="$stack_target/infra/production/scripts/service-control.sh"
+  security_epoch="$stack_target/infra/production/scripts/security-epoch.sh"
+  for managed in "$compose_script" "$service_control" "$security_epoch"; do
+    hybrid_assert_secure_file "$managed" || exit 1
+  done
+  bash "$security_epoch" assert-start "$app_target"
+}
+
+read_runtime_status() {
+  local -a lines=()
+  mapfile -t lines < <("$runtime_mode" status)
+  [[ "${#lines[@]}" -eq 3 ]] || fail 'runtime status is ambiguous'
+  [[ "${lines[0]}" =~ ^mode=(uninitialized|docker|hybrid)$ ]] || fail 'runtime mode is invalid'
+  [[ "${lines[1]}" =~ ^upstream=127\.0\.0\.1:1310[0-2]$ ]] || fail 'runtime upstream is invalid'
+  [[ "${lines[2]}" =~ ^pending=(yes|no)$ ]] || fail 'runtime pending state is invalid'
+  observed_mode="${lines[0]#mode=}"
+  observed_upstream="${lines[1]#upstream=}"
+  observed_pending="${lines[2]#pending=}"
+}
+
+settled_mode() {
+  [[ "$observed_pending" == no ]] || fail 'runtime or native recovery is pending'
+  case "mode=$observed_mode|upstream=$observed_upstream" in
+    mode=uninitialized\|upstream=127.0.0.1:13100|mode=docker\|upstream=127.0.0.1:13100)
+      printf 'docker\n'
+      ;;
+    mode=hybrid\|upstream=127.0.0.1:13101|mode=hybrid\|upstream=127.0.0.1:13102)
+      printf 'hybrid\n'
+      ;;
+    *) fail 'runtime mode and Caddy upstream disagree' ;;
+  esac
+}
+
+run_release_script() {
+  local relative="$1"
+  shift
+  OPENBMB_INFRA_ENV_FILE="${OPENBMB_INFRA_ENV_FILE:-/etc/openbmb/infra.env}" \
+    OPENBMB_API_ENV_FILE="${OPENBMB_API_ENV_FILE:-/etc/openbmb/api.env}" \
+    bash "$current_stack/$relative" "$@"
+}
+
+quiesce_docker_application() {
+  local container
+  for container in openbmb-api openbmb-client-web openbmb-admin-web; do
+    if "$docker_bin" inspect "$container" >/dev/null 2>&1; then
+      "$docker_bin" stop --time 30 "$container" >/dev/null
+      "$docker_bin" rm "$container" >/dev/null
+    fi
+    if "$docker_bin" inspect "$container" >/dev/null 2>&1; then
+      fail "Docker application container survived hybrid quiescence: $container"
+    fi
+  done
+}
+
+ensure_hybrid_infrastructure() {
+  run_release_script infra/production/scripts/compose.sh up -d --pull never --no-build \
+    mysql redis redis-livekit minio clamav livekit minio-init
+  run_release_script infra/production/scripts/clamav-watchdog.sh
+  wait_infrastructure_health
+}
+
+wait_infrastructure_health() {
+  local container state unhealthy attempt
+  local attempts="${OPENBMB_INFRA_HEALTH_ATTEMPTS:-120}"
+  local interval="${OPENBMB_INFRA_HEALTH_INTERVAL_SECONDS:-2}"
+  [[ "$attempts" =~ ^[1-9][0-9]{0,3}$ && "$interval" =~ ^[0-9]{1,2}$ ]] || \
+    fail 'infrastructure health retry settings are invalid'
+  for attempt in $(seq 1 "$attempts"); do
+    unhealthy=''
+    for container in openbmb-mysql openbmb-redis openbmb-redis-livekit openbmb-minio openbmb-clamav openbmb-livekit; do
+      state="$("$docker_bin" inspect --format '{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+        "$container" 2>/dev/null || true)"
+      if [[ "$state" != true\|healthy ]]; then unhealthy+=" $container=$state"; fi
+    done
+    [[ -n "$unhealthy" ]] || return 0
+    if [[ "$attempt" -lt "$attempts" ]]; then sleep "$interval"; fi
+  done
+  fail "hybrid infrastructure did not become healthy:$unhealthy"
+}
+
+main() {
+  local command="${1:-}" mode
+  local observed_mode='' observed_upstream='' observed_pending=''
+  [[ $# -eq 1 && "$command" =~ ^(start|reload|stop)$ ]] || \
+    fail 'usage: openbmb-stack-control start|reload|stop'
+  hybrid_require_root || exit 1
+  take_operation_lock
+  [[ -x "$runtime_mode" && ! -L "$runtime_mode" ]] || fail 'runtime-mode control is unavailable'
+  assert_active_release
+  read_runtime_status
+  if [[ "$observed_pending" == yes ]]; then
+    case "$command" in
+      start|reload)
+        # Recovery owns the application side of an interrupted transition.
+        # This earlier boot unit starts only its stateful prerequisites and
+        # deliberately leaves Docker/native application processes untouched.
+        ensure_hybrid_infrastructure
+        ;;
+      stop)
+        run_release_script infra/production/scripts/compose.sh stop --timeout 30 livekit
+        ;;
+    esac
+    return
+  fi
+  mode="$(settled_mode)"
+  case "$mode:$command" in
+    docker:start|docker:reload|docker:stop)
+      run_release_script infra/production/scripts/service-control.sh "$command"
+      ;;
+    hybrid:start|hybrid:reload)
+      ensure_hybrid_infrastructure
+      quiesce_docker_application
+      ;;
+    hybrid:stop)
+      quiesce_docker_application
+      run_release_script infra/production/scripts/compose.sh stop --timeout 30 livekit
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

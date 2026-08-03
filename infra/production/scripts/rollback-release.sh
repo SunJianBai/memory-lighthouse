@@ -2,15 +2,82 @@
 set -Eeuo pipefail
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+operation_lock="${OPENBMB_OPERATION_LOCK:-/run/lock/openbmb-operation.lock}"
+
+prepare_operation_lock() {
+  local parent mode
+  [[ "$operation_lock" == /* && "$operation_lock" != / && "$operation_lock" != *$'\n'* ]] || return 1
+  parent="$(dirname -- "$operation_lock")"
+  [[ -d "$parent" && ! -L "$parent" && "$(stat -c %u -- "$parent")" == 0 ]] || return 1
+  mode="$((8#$(stat -c %a -- "$parent")))"
+  (( (mode & 8#0022) == 0 || (mode & 8#1000) != 0 )) || return 1
+  if [[ ! -e "$operation_lock" && ! -L "$operation_lock" ]]; then
+    (umask 077; set -o noclobber; : >"$operation_lock") 2>/dev/null || true
+  fi
+  [[ -f "$operation_lock" && ! -L "$operation_lock" && \
+     "$(stat -c %u -- "$operation_lock")" == 0 ]] || return 1
+  [[ -z "$(find "$operation_lock" -maxdepth 0 -perm /0022 -print -quit)" ]] || return 1
+}
+
+prepare_operation_lock || {
+  printf 'production operation lock is unsafe\n' >&2
+  exit 1
+}
 case "${OPENBMB_OPERATION_LOCK_HELD:-false}" in
   false)
-    exec flock --exclusive --wait 0 --conflict-exit-code 75 \
-      /run/lock/openbmb-operation.lock \
-      env OPENBMB_OPERATION_LOCK_HELD=true bash "$script_dir/rollback-release.sh" "$@"
+    exec 9<>"$operation_lock"
+    flock --exclusive --wait 0 --conflict-exit-code 75 9 || exit 75
+    export OPENBMB_OPERATION_LOCK_HELD=true
+    export OPENBMB_OPERATION_LOCK="$operation_lock"
+    export OPENBMB_OPERATION_LOCK_FD=9
     ;;
-  true) ;;
+  true)
+    inherited_fd="${OPENBMB_OPERATION_LOCK_FD:-}"
+    [[ "$inherited_fd" =~ ^([3-9]|[1-9][0-9]+)$ && -e "/proc/$$/fd/$inherited_fd" ]] || {
+      printf 'inherited production operation-lock descriptor is missing\n' >&2
+      exit 1
+    }
+    [[ "$(stat -Lc %d:%i -- "/proc/$$/fd/$inherited_fd")" == \
+       "$(stat -Lc %d:%i -- "$operation_lock")" ]] || {
+      printf 'inherited descriptor does not reference the production operation lock\n' >&2
+      exit 1
+    }
+    flock -n "$inherited_fd" || {
+      printf 'inherited production operation lock is not held\n' >&2
+      exit 1
+    }
+    ;;
   *) printf 'OPENBMB_OPERATION_LOCK_HELD must be true or false\n' >&2; exit 1 ;;
 esac
+
+# Once the hybrid control plane exists, application rollback is permitted only
+# after its durable adapter has completed the explicit fallback to Docker.
+# The inherited descriptor lets the status check reuse this same lock. Any
+# path-shaped evidence of an installed adapter fails closed if it is corrupt.
+runtime_mode_bin=/usr/local/sbin/openbmb-runtime-mode
+runtime_mode_state=/var/lib/openbmb/hybrid-runtime
+if [[ -e "$runtime_mode_bin" || -L "$runtime_mode_bin" || \
+      -e "$runtime_mode_state" || -L "$runtime_mode_state" ]]; then
+  [[ -f "$runtime_mode_bin" && ! -L "$runtime_mode_bin" && -x "$runtime_mode_bin" && \
+     "$(stat -c %u -- "$runtime_mode_bin")" == 0 && \
+     -z "$(find "$runtime_mode_bin" -maxdepth 0 -perm /0022 -print -quit)" ]] || {
+    printf 'hybrid runtime control exists but is unsafe\n' >&2
+    exit 1
+  }
+  runtime_status="$("$runtime_mode_bin" status)" || {
+    printf 'could not read the hybrid runtime mode before application rollback\n' >&2
+    exit 1
+  }
+  mapfile -t runtime_modes < <(sed -n 's/^mode=//p' <<<"$runtime_status")
+  mapfile -t runtime_upstreams < <(sed -n 's/^upstream=//p' <<<"$runtime_status")
+  mapfile -t runtime_pending < <(sed -n 's/^pending=//p' <<<"$runtime_status")
+  [[ "${#runtime_modes[@]}" -eq 1 && "${runtime_modes[0]}" == docker && \
+     "${#runtime_upstreams[@]}" -eq 1 && "${runtime_upstreams[0]}" == 127.0.0.1:13100 && \
+     "${#runtime_pending[@]}" -eq 1 && "${runtime_pending[0]}" == no ]] || {
+    printf 'application rollback requires settled Docker runtime mode on upstream 13100\n' >&2
+    exit 1
+  }
+fi
 
 if [[ $# -ne 1 ]]; then
   printf 'usage: %s <release-id>\n' "${BASH_SOURCE[0]}" >&2

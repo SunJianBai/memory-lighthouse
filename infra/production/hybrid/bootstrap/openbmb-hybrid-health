@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+mode="${1:---local}"
+domain="${OPENBMB_DOMAIN:-sun227454.online}"
+current_web="${OPENBMB_CURRENT_WEB_LINK:-/opt/openbmb/current-web}"
+current_api="${OPENBMB_CURRENT_API_LINK:-/opt/openbmb/current-api}"
+web_releases="${OPENBMB_WEB_RELEASES_ROOT:-/opt/openbmb/hybrid/web-releases}"
+api_releases="${OPENBMB_NATIVE_API_RELEASES_ROOT:-/opt/openbmb/hybrid/api-releases}"
+upstream_helper="${OPENBMB_API_UPSTREAM_HELPER:-/usr/local/libexec/openbmb-switch-api-upstream}"
+current_stack="${OPENBMB_CURRENT_LINK:-/opt/openbmb/current}"
+
+retry() {
+  local description="$1"
+  shift
+  local attempt
+
+  for attempt in $(seq 1 20); do
+    if "$@"; then
+      printf 'HEALTHY: %s\n' "$description"
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'UNHEALTHY: %s\n' "$description" >&2
+  return 1
+}
+
+assert_release_link() {
+  local link="$1"
+  local root="$2"
+  local target
+
+  [[ -L "$link" ]] || return 1
+  target="$(readlink -f -- "$link")"
+  [[ "$(dirname -- "$target")" == "$(readlink -f -- "$root")" ]]
+}
+
+curl_quiet() {
+  curl --fail --silent --show-error --connect-timeout 3 --max-time 8 \
+    "$@" --output /dev/null
+}
+
+clamav_ready() {
+  [[ -L "$current_stack" ]] || return 1
+  bash "$current_stack/infra/production/scripts/verify-clamav.sh" --once \
+    >/dev/null 2>&1
+}
+
+case "$mode" in
+  --local)
+    assert_release_link "$current_web" "$web_releases" || {
+      printf 'UNHEALTHY: current-web escaped its release root\n' >&2
+      exit 1
+    }
+    assert_release_link "$current_api" "$api_releases" || {
+      printf 'UNHEALTHY: current-api escaped its release root\n' >&2
+      exit 1
+    }
+    [[ -x "$upstream_helper" && ! -L "$upstream_helper" ]] || {
+      printf 'UNHEALTHY: API upstream helper is missing\n' >&2
+      exit 1
+    }
+    active_upstream="$($upstream_helper current)"
+    [[ "$active_upstream" =~ ^127\.0\.0\.1:1310[12]$ ]] || {
+      printf 'UNHEALTHY: API upstream is not a native slot\n' >&2
+      exit 1
+    }
+
+    retry 'client through local Caddy' curl_quiet \
+      --resolve "$domain:443:127.0.0.1" "https://$domain/openBMB/"
+    retry 'admin through local Caddy' curl_quiet \
+      --resolve "$domain:443:127.0.0.1" "https://$domain/openBMB/admin/"
+    retry 'stable API liveness' curl_quiet \
+      'http://127.0.0.1:13100/openBMB/api/v1/health/live'
+    retry 'stable API readiness' curl_quiet \
+      'http://127.0.0.1:13100/openBMB/api/v1/health/ready'
+    retry 'active-slot API liveness' curl_quiet \
+      "http://$active_upstream/openBMB/api/v1/health/live"
+    retry 'active-slot API readiness' curl_quiet \
+      "http://$active_upstream/openBMB/api/v1/health/ready"
+    retry 'ClamAV PING and INSTREAM' clamav_ready
+    retry 'LiveKit signal' curl_quiet 'http://127.0.0.1:17880/'
+    retry 'MinIO health' curl_quiet 'http://127.0.0.1:19000/minio/health/live'
+    ;;
+  --public)
+    retry 'CampusHub fallback' curl_quiet "https://$domain/"
+    retry 'OpenBMB client' curl_quiet "https://$domain/openBMB/"
+    retry 'OpenBMB admin' curl_quiet "https://$domain/openBMB/admin/"
+    retry 'OpenBMB API readiness' curl_quiet \
+      "https://$domain/openBMB/api/v1/health/ready"
+    retry 'LiveKit TLS signal' curl_quiet "https://$domain/openBMB/rtc-health"
+    retry 'private S3 endpoint' curl_quiet \
+      "https://$domain/openBMB/object-storage-health"
+    ;;
+  *)
+    printf 'usage: %s [--local|--public]\n' "${BASH_SOURCE[0]}" >&2
+    exit 2
+    ;;
+esac

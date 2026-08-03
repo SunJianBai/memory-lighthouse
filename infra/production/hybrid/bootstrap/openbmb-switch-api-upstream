@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+bootstrap_lib="${OPENBMB_BOOTSTRAP_LIB:-/usr/local/libexec/openbmb-hybrid/bootstrap-lib.sh}"
+if [[ ! -f "$bootstrap_lib" && -f "$script_dir/bootstrap-lib.sh" ]]; then
+  bootstrap_lib="$script_dir/bootstrap-lib.sh"
+fi
+# shellcheck source=bootstrap-lib.sh
+source "$bootstrap_lib"
+
+env_file="${OPENBMB_CADDY_ENV_FILE:-/etc/caddy/openbmb.env}"
+caddy_file="${OPENBMB_CADDY_FILE:-/etc/caddy/Caddyfile}"
+lock_file="${OPENBMB_CADDY_SWITCH_LOCK:-/run/lock/openbmb-caddy-switch.lock}"
+health_base="${OPENBMB_STABLE_API_URL:-http://127.0.0.1:13100/openBMB/api/v1/health}"
+temporary_env=''
+backup_env=''
+
+fail() {
+  printf 'OPENBMB API UPSTREAM: %s\n' "$*" >&2
+  exit 1
+}
+
+cleanup() {
+  [[ -z "$temporary_env" ]] || rm -f -- "$temporary_env"
+  [[ -z "$backup_env" ]] || rm -f -- "$backup_env"
+}
+trap cleanup EXIT
+
+[[ "$(id -u)" -eq 0 ]] || fail 'must run as root'
+[[ "$env_file" == /* && "$caddy_file" == /* && "$lock_file" == /* ]] || \
+  fail 'managed paths must be absolute'
+[[ -f "$env_file" && ! -L "$env_file" ]] || fail "invalid Caddy environment file: $env_file"
+[[ -f "$caddy_file" && ! -L "$caddy_file" ]] || fail "invalid Caddy configuration: $caddy_file"
+[[ "$(stat -c %u -- "$env_file")" -eq 0 ]] || fail 'Caddy environment file must be root-owned'
+[[ "$(stat -c %u -- "$caddy_file")" -eq 0 ]] || fail 'Caddy configuration must be root-owned'
+if find "$env_file" -maxdepth 0 -perm /0022 -print -quit | grep -q .; then
+  fail 'Caddy environment file must not be writable by group or other users'
+fi
+if find "$caddy_file" -maxdepth 0 -perm /0022 -print -quit | grep -q .; then
+  fail 'Caddy configuration must not be writable by group or other users'
+fi
+
+read_upstream() {
+  local -a values=()
+
+  mapfile -t values < <(sed -n 's/^OPENBMB_API_UPSTREAM=//p' "$env_file")
+  [[ "${#values[@]}" -eq 1 ]] || fail 'Caddy environment must contain exactly one OPENBMB_API_UPSTREAM'
+  [[ "${values[0]}" =~ ^127\.0\.0\.1:1310[0-2]$ ]] || fail 'Caddy API upstream is outside the managed loopback slots'
+  printf '%s\n' "${values[0]}"
+}
+
+validate_upstream() {
+  [[ "$1" =~ ^127\.0\.0\.1:1310[0-2]$ ]] || fail "invalid managed upstream: $1"
+}
+
+validate_caddy() {
+  caddy validate --config "$caddy_file" --adapter caddyfile --envfile "$env_file" >/dev/null
+}
+
+reload_caddy() {
+  systemctl reload caddy
+}
+
+wait_for_stable_api() {
+  local endpoint
+  local attempt
+  local healthy
+
+  for endpoint in live ready; do
+    healthy=false
+    for attempt in $(seq 1 20); do
+      if curl --fail --silent --show-error \
+        --connect-timeout 2 --max-time 5 \
+        "$health_base/$endpoint" --output /dev/null; then
+        healthy=true
+        break
+      fi
+      sleep 1
+    done
+    [[ "$healthy" == true ]] || {
+      printf 'stable API %s check did not recover\n' "$endpoint" >&2
+      return 1
+    }
+  done
+}
+
+write_upstream() {
+  local target="$1"
+  local env_dir
+
+  env_dir="$(dirname -- "$env_file")"
+  temporary_env="$(mktemp -- "$env_dir/.openbmb.env.XXXXXX")"
+  awk -v target="$target" '
+    BEGIN { replaced = 0 }
+    /^OPENBMB_API_UPSTREAM=/ {
+      if (replaced) exit 90
+      print "OPENBMB_API_UPSTREAM=" target
+      replaced = 1
+      next
+    }
+    { print }
+    END { if (!replaced) exit 91 }
+  ' "$env_file" >"$temporary_env" || fail 'could not create the replacement Caddy environment'
+  chown --reference="$env_file" "$temporary_env"
+  chmod --reference="$env_file" "$temporary_env"
+  sync -f -- "$temporary_env"
+  mv -Tf -- "$temporary_env" "$env_file"
+  temporary_env=''
+  sync -f -- "$env_dir"
+}
+
+restore_previous() {
+  local env_dir
+
+  [[ -n "$backup_env" && -f "$backup_env" && ! -L "$backup_env" ]] || return 1
+  env_dir="$(dirname -- "$env_file")"
+  mv -Tf -- "$backup_env" "$env_file"
+  backup_env=''
+  sync -f -- "$env_dir"
+  validate_caddy && reload_caddy && wait_for_stable_api
+}
+
+restore_previous_offline() {
+  local env_dir
+
+  [[ -n "$backup_env" && -f "$backup_env" && ! -L "$backup_env" ]] || return 1
+  env_dir="$(dirname -- "$env_file")"
+  mv -Tf -- "$backup_env" "$env_file"
+  backup_env=''
+  sync -f -- "$env_dir"
+  validate_caddy
+}
+
+usage() {
+  printf 'usage: %s current | switch|stage --expected-upstream <127.0.0.1:1310N> --target-upstream <127.0.0.1:1310N>\n' \
+    "${BASH_SOURCE[0]}" >&2
+  exit 2
+}
+
+command_name="${1:-}"
+case "$command_name" in
+  current)
+    [[ $# -eq 1 ]] || usage
+    read_upstream
+    ;;
+  switch|stage)
+    [[ $# -eq 5 && "$2" == --expected-upstream && "$4" == --target-upstream ]] || usage
+    expected="$3"
+    target="$5"
+    validate_upstream "$expected"
+    validate_upstream "$target"
+
+    hybrid_prepare_lock_file "$lock_file"
+    exec 9<>"$lock_file"
+    flock --exclusive --wait 30 9 || fail 'timed out waiting for the Caddy switch lock'
+    current="$(read_upstream)"
+    [[ "$current" == "$expected" ]] || fail "compare-and-swap mismatch: expected $expected, found $current"
+    if [[ "$current" == "$target" ]]; then
+      if [[ "$command_name" == switch ]]; then wait_for_stable_api; fi
+      exit 0
+    fi
+
+    env_dir="$(dirname -- "$env_file")"
+    backup_env="$(mktemp -- "$env_dir/.openbmb.env.rollback.XXXXXX")"
+    cp --preserve=mode,ownership,timestamps -- "$env_file" "$backup_env"
+    write_upstream "$target"
+    if [[ "$command_name" == stage ]]; then
+      if ! validate_caddy; then
+        printf 'Offline target validation failed; restoring the previous Caddy environment.\n' >&2
+        restore_previous_offline || \
+          fail 'offline target failed and the previous Caddy environment could not be restored'
+        fail "offline target upstream did not validate: $target"
+      fi
+      rm -f -- "$backup_env"
+      backup_env=''
+      [[ "$(read_upstream)" == "$target" ]] || fail 'offline staged state did not persist'
+      printf '%s\n' "$target"
+      exit 0
+    fi
+    if ! validate_caddy || ! reload_caddy || ! wait_for_stable_api; then
+      printf 'Target upstream failed; restoring the previous Caddy environment.\n' >&2
+      if ! restore_previous; then
+        fail 'target failed and the previous Caddy configuration could not be restored'
+      fi
+      fail "target upstream did not become healthy: $target"
+    fi
+    rm -f -- "$backup_env"
+    backup_env=''
+    [[ "$(read_upstream)" == "$target" ]] || fail 'post-switch state did not persist'
+    printf '%s\n' "$target"
+    ;;
+  *) usage ;;
+esac

@@ -1,0 +1,205 @@
+name: Web production delivery
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-openbmb-web
+  cancel-in-progress: false
+
+env:
+  CI: "true"
+  NODE_VERSION: "20.19.0"
+  DEPLOY_HOST: 124.220.81.104
+  DEPLOY_USER: ubuntu
+  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  REMOTE_INCOMING_DIRECTORY: /home/ubuntu/.openbmb-web-incoming
+
+jobs:
+  deliver-web:
+    name: Build and atomically promote web assets
+    if: >-
+      vars.PRODUCTION_DEPLOY_ENABLED == 'true' &&
+      vars.PRODUCTION_DELIVERY_MODE == 'hybrid' &&
+      ((github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/main') ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the exact source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate immutable source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build client and admin web applications
+        env:
+          VITE_API_BASE_URL: /openBMB/api/v1
+          VITE_API_BASE: /openBMB/api/v1
+          VITE_DEPLOYMENT_ENVIRONMENT: production
+          VITE_ENABLE_DEVELOPMENT_CONTENT_INSPECTION: "false"
+        run: |
+          npm run build --workspace @memory-lighthouse/client-web
+          npm run build --workspace @memory-lighthouse/admin-web
+
+      - name: Package normalized web artifact
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/openbmb-web-artifact"
+          install -d -m 0700 "$artifact_dir"
+          archive="$artifact_dir/openbmb-web-$SOURCE_SHA.tar.zst"
+          bash scripts/hybrid/package-web.sh "$SOURCE_SHA" "$archive" | tee "$artifact_dir/package.log"
+          archive_sha256="$(sha256sum "$archive" | awk '{ print $1 }')"
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          mapfile -t expanded_values < <(sed -n 's/^WEB_EXPANDED_BYTES=//p' "$artifact_dir/package.log")
+          [[ "${#expanded_values[@]}" -eq 1 && "${expanded_values[0]}" =~ ^[1-9][0-9]*$ ]]
+          expanded_bytes="${expanded_values[0]}"
+          archive_bytes="$(stat -c %s -- "$archive")"
+          [[ "$archive_bytes" =~ ^[1-9][0-9]*$ ]]
+          promotion_required_bytes=$((expanded_bytes + archive_bytes + 1073741824))
+          upload_required_bytes=$((promotion_required_bytes + archive_bytes))
+          remote_archive="$REMOTE_INCOMING_DIRECTORY/openbmb-web-$SOURCE_SHA-$archive_sha256-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.zst"
+          {
+            echo "archive=$archive"
+            echo "archive_sha256=$archive_sha256"
+            echo "remote_archive=$remote_archive"
+            echo "promotion_required_bytes=$promotion_required_bytes"
+            echo "upload_required_bytes=$upload_required_bytes"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Retain exact web artifact evidence
+        if: steps.package.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: web-release-${{ env.SOURCE_SHA }}
+          path: ${{ runner.temp }}/openbmb-web-artifact/
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Configure pinned SSH identity
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY_BASE64: ${{ secrets.TX4H4G_SSH_PRIVATE_KEY_BASE64 }}
+          SSH_KNOWN_HOSTS_BASE64: ${{ secrets.TX4H4G_KNOWN_HOSTS_BASE64 }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SSH_PRIVATE_KEY_BASE64" && -n "$SSH_KNOWN_HOSTS_BASE64" ]]
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s' "$SSH_PRIVATE_KEY_BASE64" | base64 --decode > "$HOME/.ssh/openbmb_web_deploy"
+          printf '%s' "$SSH_KNOWN_HOSTS_BASE64" | base64 --decode > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/openbmb_web_deploy" "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/openbmb_web_deploy" >/dev/null
+          cat > "$HOME/.ssh/config" <<EOF
+          Host tx4h4g-web-prod
+            HostName $DEPLOY_HOST
+            User $DEPLOY_USER
+            IdentityFile ~/.ssh/openbmb_web_deploy
+            IdentitiesOnly yes
+            BatchMode yes
+            ConnectTimeout 20
+            ConnectionAttempts 2
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            GlobalKnownHostsFile /dev/null
+            ControlMaster auto
+            ControlPath ~/.ssh/openbmb-web-%C
+            ControlPersist 10m
+            ProxyCommand none
+            ServerAliveInterval 15
+            ServerAliveCountMax 4
+          EOF
+          chmod 0600 "$HOME/.ssh/config"
+          ssh tx4h4g-web-prod 'true'
+
+      - name: Upload and atomically promote exact web artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          ARCHIVE_SHA256: ${{ steps.package.outputs.archive_sha256 }}
+          REMOTE_ARCHIVE: ${{ steps.package.outputs.remote_archive }}
+          PROMOTION_REQUIRED_BYTES: ${{ steps.package.outputs.promotion_required_bytes }}
+          UPLOAD_REQUIRED_BYTES: ${{ steps.package.outputs.upload_required_bytes }}
+        run: |
+          set -euo pipefail
+          [[ -f "$ARCHIVE" && ! -L "$ARCHIVE" ]]
+          [[ "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$PROMOTION_REQUIRED_BYTES" =~ ^[1-9][0-9]*$ ]]
+          [[ "$UPLOAD_REQUIRED_BYTES" =~ ^[1-9][0-9]*$ ]]
+          [[ "$REMOTE_ARCHIVE" =~ ^/home/ubuntu/\.openbmb-web-incoming/openbmb-web-[0-9a-f]{40}-[0-9a-f]{64}-[0-9]+-[0-9]+\.tar\.zst$ ]]
+          [[ "$(sha256sum "$ARCHIVE" | awk '{ print $1 }')" == "$ARCHIVE_SHA256" ]]
+
+          cleanup_remote_archive() {
+            ssh tx4h4g-web-prod "set -euo pipefail
+              test \"\$(dirname -- '$REMOTE_ARCHIVE')\" = '$REMOTE_INCOMING_DIRECTORY'
+              if test -e '$REMOTE_ARCHIVE' || test -L '$REMOTE_ARCHIVE'; then
+                test -f '$REMOTE_ARCHIVE'
+                test ! -L '$REMOTE_ARCHIVE'
+                rm -f -- '$REMOTE_ARCHIVE'
+              fi" >/dev/null 2>&1 || true
+          }
+          trap cleanup_remote_archive EXIT
+
+          ssh tx4h4g-web-prod bash -s -- \
+            web "$REMOTE_INCOMING_DIRECTORY" "$REMOTE_ARCHIVE" "$UPLOAD_REQUIRED_BYTES" \
+            < scripts/hybrid/prepare-remote-incoming.sh
+          ssh tx4h4g-web-prod sudo -n bash -s -- \
+            upload-preflight web "$UPLOAD_REQUIRED_BYTES" \
+            < scripts/hybrid/remote-promotion-guard.sh
+
+          scp -- "$ARCHIVE" "tx4h4g-web-prod:$REMOTE_ARCHIVE"
+
+          bash scripts/hybrid/assert-current-main.sh "$SOURCE_SHA"
+          ssh tx4h4g-web-prod sudo -n bash -s -- \
+            web "$SOURCE_SHA" "$REMOTE_ARCHIVE" "$ARCHIVE_SHA256" \
+            "$PROMOTION_REQUIRED_BYTES" \
+            < scripts/hybrid/remote-promotion-guard.sh
+
+      - name: Remove ephemeral SSH material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "$HOME/.ssh" && ! -L "$HOME/.ssh" ]]; then
+            if [[ -f "$HOME/.ssh/config" && ! -L "$HOME/.ssh/config" ]]; then
+              ssh -O exit tx4h4g-web-prod >/dev/null 2>&1 || true
+            fi
+            rm -f -- \
+              "$HOME/.ssh/openbmb_web_deploy" \
+              "$HOME/.ssh/known_hosts" \
+              "$HOME/.ssh/config"
+          fi

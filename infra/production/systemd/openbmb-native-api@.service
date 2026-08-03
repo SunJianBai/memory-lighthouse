@@ -1,0 +1,68 @@
+[Unit]
+Description=OpenBMB native NestJS API (%i slot)
+# Docker supplies stateful dependencies. Start/order it with this unit, but do
+# not bind lifecycles: Docker stop/restart must not permanently stop the API.
+After=network-online.target docker.service openbmb.service
+Wants=network-online.target docker.service openbmb.service
+ConditionPathExists=/etc/openbmb/native-api.env
+ConditionPathExists=/etc/openbmb/native-api.hosts
+ConditionPathIsSymbolicLink=/opt/openbmb/hybrid/api-slots/%i
+AssertPathExists=/opt/openbmb/runtime/node-v22.19.0-linux-x64/bin/node
+
+[Service]
+Type=simple
+User=openbmb
+Group=openbmb
+ExecStartPre=/usr/bin/systemctl is-active --quiet docker.service
+ExecStartPre=/usr/bin/systemctl is-active --quiet openbmb.service
+UMask=0027
+WorkingDirectory=/opt/openbmb/hybrid/api-slots/%i/apps/server-api
+ExecStart=/opt/openbmb/runtime/node-v22.19.0-linux-x64/bin/node /usr/local/libexec/openbmb-native-api/launcher.mjs --slot %i --release-link /opt/openbmb/hybrid/api-slots/%i
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=90s
+TimeoutStopSec=35s
+KillSignal=SIGTERM
+KillMode=mixed
+
+# Give this process the same signed-URL hairpin behavior as Docker extra_hosts
+# without modifying the host-wide /etc/hosts. DNS remains available for SMTP
+# and the MiniCPM provider through the ordinary /etc/resolv.conf.
+BindReadOnlyPaths=/etc/openbmb/native-api.hosts:/etc/hosts
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateMounts=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+# A deny-list retains Node/V8 and native-addon compatibility while removing
+# syscall families that a credential-free application worker never needs.
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+
+MemoryMax=448M
+MemorySwapMax=256M
+CPUQuota=80%
+TasksMax=180
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target

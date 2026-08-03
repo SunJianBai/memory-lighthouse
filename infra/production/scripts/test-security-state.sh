@@ -154,6 +154,8 @@ expect_failure 'malformed pending state' \
   bash "$epoch_script" assert-start "$fixture_root/releases/forward-fix"
 rm -f -- "$OPENBMB_STATE_ROOT/security-boundary.pending"
 
+export OPENBMB_OPERATION_LOCK="$fixture_root/openbmb-operation.lock"
+export OPENBMB_ROTATION_EXPECTED_UID="$(id -u)"
 env_fixture="$fixture_root/infra.env"
 old_secret='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 printf 'TZ=Asia/Shanghai\nLIVEKIT_API_SECRET=%s\nREDIS_APP_PASSWORD=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n' \
@@ -168,6 +170,205 @@ rotation_output="$(bash "$rotation_script" "$env_fixture" 2>&1)" || fail 'valid 
 [[ "$(grep -c '^LIVEKIT_API_SECRET=' "$env_fixture")" -eq 1 ]] || fail 'rotation changed the assignment count'
 new_secret="$(sed -n 's/^LIVEKIT_API_SECRET=//p' "$env_fixture")"
 [[ "$new_secret" =~ ^[A-Za-z0-9_-]{64}$ ]] || fail 'replacement LiveKit secret is not canonical base64url'
+
+# Once the hybrid control plane exists, the root-only infrastructure input and
+# the minimized native API environment are one credential transaction. These
+# small executables model the installed fixed runtime, renderer, upstream
+# adapter and systemd state without requiring a host-level installation.
+hybrid_fixture="$fixture_root/hybrid-control"
+hybrid_state="$hybrid_fixture/state"
+hybrid_runtime_control="$hybrid_fixture/openbmb-runtime-mode"
+hybrid_upstream_helper="$hybrid_fixture/openbmb-switch-api-upstream"
+hybrid_systemctl="$hybrid_fixture/systemctl"
+hybrid_node="$hybrid_fixture/node"
+hybrid_renderer="$hybrid_fixture/render-native-env.mjs"
+hybrid_api_env="$hybrid_fixture/api.env"
+hybrid_infra_env="$hybrid_fixture/infra.env"
+hybrid_native_env="$hybrid_fixture/native-api.env"
+hybrid_render_log="$hybrid_fixture/render.log"
+mkdir -p -- "$hybrid_state"
+chmod 0700 -- "$hybrid_fixture" "$hybrid_state"
+printf 'docker\n' >"$hybrid_state/mode"
+chmod 0600 -- "$hybrid_state/mode"
+
+cat >"$hybrid_runtime_control" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat >"$hybrid_upstream_helper" <<'EOF'
+#!/usr/bin/env bash
+[[ "$#" -eq 1 && "$1" == current ]] || exit 2
+printf '%s\n' "${MOCK_UPSTREAM:-127.0.0.1:13100}"
+EOF
+cat >"$hybrid_systemctl" <<'EOF'
+#!/usr/bin/env bash
+[[ "$#" -eq 4 && "$1" == show && "$3" == --value ]] || exit 2
+case "$2" in
+  --property=LoadState)
+    printf '%s\n' "${MOCK_LOAD_STATE:-loaded}"
+    ;;
+  --property=ActiveState)
+    case "$4" in
+      openbmb-native-api@blue.service) printf '%s\n' "${MOCK_BLUE_STATE:-inactive}" ;;
+      openbmb-native-api@green.service) printf '%s\n' "${MOCK_GREEN_STATE:-inactive}" ;;
+      *) exit 3 ;;
+    esac
+    ;;
+  --property=UnitFileState)
+    case "$4" in
+      openbmb-native-api@blue.service) printf '%s\n' "${MOCK_BLUE_UNIT_FILE_STATE:-disabled}" ;;
+      openbmb-native-api@green.service) printf '%s\n' "${MOCK_GREEN_UNIT_FILE_STATE:-disabled}" ;;
+      *) exit 3 ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+cat >"$hybrid_node" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$#" -eq 1 && "$1" == --version ]]; then
+  printf 'v22.19.0\n'
+  exit 0
+fi
+[[ "${1:-}" == "$MOCK_EXPECTED_RENDERER" ]] || exit 80
+shift
+exec "$MOCK_EXPECTED_RENDERER" "$@"
+EOF
+cat >"$hybrid_renderer" <<'EOF'
+#!/usr/bin/env bash
+[[ "$#" -eq 4 && "$1" == --infra && "$3" == --api ]] || exit 2
+[[ -f "$2" && -f "$4" ]] || exit 3
+secret="$(sed -n 's/^LIVEKIT_API_SECRET=//p' "$2")"
+[[ "$secret" =~ ^[A-Za-z0-9_-]{64}$ ]] || exit 4
+: >"$MOCK_RENDER_LOG"
+printf 'HOST=127.0.0.1\nLIVEKIT_API_SECRET=%s\n' "$secret"
+EOF
+chmod 0500 -- \
+  "$hybrid_runtime_control" "$hybrid_upstream_helper" "$hybrid_systemctl" \
+  "$hybrid_node" "$hybrid_renderer"
+
+hybrid_old_secret='CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC'
+printf 'SMTP_HOST=smtp.example.invalid\n' >"$hybrid_api_env"
+printf 'OPENBMB_DOMAIN=example.invalid\nLIVEKIT_API_SECRET=%s\n' \
+  "$hybrid_old_secret" >"$hybrid_infra_env"
+printf 'HOST=127.0.0.1\nLIVEKIT_API_SECRET=%s\n' \
+  "$hybrid_old_secret" >"$hybrid_native_env"
+chmod 0600 -- "$hybrid_api_env" "$hybrid_infra_env"
+chmod 0640 -- "$hybrid_native_env"
+hybrid_infra_metadata="$(stat -c %u:%g:%a -- "$hybrid_infra_env")"
+hybrid_native_metadata="$(stat -c %u:%g:%a -- "$hybrid_native_env")"
+
+run_hybrid_rotation() {
+  env \
+    OPENBMB_ROTATION_EXPECTED_UID="$(id -u)" \
+    OPENBMB_NATIVE_API_GROUP="$(id -gn)" \
+    OPENBMB_HYBRID_RUNTIME_MODE_BIN="$hybrid_runtime_control" \
+    OPENBMB_HYBRID_MODE_STATE="$hybrid_state" \
+    OPENBMB_API_UPSTREAM_HELPER="$hybrid_upstream_helper" \
+    OPENBMB_SYSTEMCTL_BIN="$hybrid_systemctl" \
+    OPENBMB_NATIVE_NODE_BIN="$hybrid_node" \
+    OPENBMB_NATIVE_ENV_RENDERER="$hybrid_renderer" \
+    OPENBMB_API_ENV_FILE="$hybrid_api_env" \
+    OPENBMB_NATIVE_ENV_FILE="$hybrid_native_env" \
+    MOCK_EXPECTED_RENDERER="$hybrid_renderer" \
+    MOCK_RENDER_LOG="$hybrid_render_log" \
+    "$@" bash "$rotation_script" "$hybrid_infra_env"
+}
+
+exec {inherited_rotation_lock_fd}<>"$OPENBMB_OPERATION_LOCK"
+flock --exclusive "$inherited_rotation_lock_fd"
+hybrid_rotation_output="$(run_hybrid_rotation \
+  OPENBMB_OPERATION_LOCK_HELD=true \
+  OPENBMB_OPERATION_LOCK_FD="$inherited_rotation_lock_fd" 2>&1)" || \
+  fail 'hybrid LiveKit secret rotation failed'
+flock --unlock "$inherited_rotation_lock_fd"
+exec {inherited_rotation_lock_fd}>&-
+[[ -z "$hybrid_rotation_output" ]] || fail 'hybrid secret rotation emitted output'
+[[ -f "$hybrid_render_log" ]] || fail 'hybrid secret rotation did not use the installed renderer'
+[[ "$(stat -c %u:%g:%a -- "$hybrid_infra_env")" == "$hybrid_infra_metadata" ]] || \
+  fail 'hybrid rotation changed infrastructure env ownership or mode'
+[[ "$(stat -c %u:%g:%a -- "$hybrid_native_env")" == "$hybrid_native_metadata" ]] || \
+  fail 'hybrid rotation changed native env ownership or mode'
+hybrid_new_infra_secret="$(sed -n 's/^LIVEKIT_API_SECRET=//p' "$hybrid_infra_env")"
+hybrid_new_native_secret="$(sed -n 's/^LIVEKIT_API_SECRET=//p' "$hybrid_native_env")"
+[[ "$hybrid_new_infra_secret" =~ ^[A-Za-z0-9_-]{64}$ ]] || \
+  fail 'hybrid infrastructure secret is not canonical base64url'
+[[ "$hybrid_new_native_secret" == "$hybrid_new_infra_secret" ]] || \
+  fail 'native API environment retained a stale LiveKit secret'
+! grep -Fq -- "$hybrid_old_secret" "$hybrid_native_env" || \
+  fail 'old LiveKit secret survived in the native API environment'
+
+assert_hybrid_precondition_failure() {
+  local description="$1"
+  shift
+  local infra_hash native_hash
+  infra_hash="$(sha256sum "$hybrid_infra_env")"
+  native_hash="$(sha256sum "$hybrid_native_env")"
+  expect_failure "$description" run_hybrid_rotation "$@"
+  [[ "$(sha256sum "$hybrid_infra_env")" == "$infra_hash" ]] || \
+    fail "$description changed the infrastructure env"
+  [[ "$(sha256sum "$hybrid_native_env")" == "$native_hash" ]] || \
+    fail "$description changed the native env"
+}
+
+printf 'hybrid\n' >"$hybrid_state/mode"
+assert_hybrid_precondition_failure 'hybrid rotation outside Docker mode'
+printf 'docker\n' >"$hybrid_state/mode"
+printf 'version=1\n' >"$hybrid_state/transition.pending"
+chmod 0600 -- "$hybrid_state/transition.pending"
+assert_hybrid_precondition_failure 'hybrid rotation with a pending transition'
+rm -f -- "$hybrid_state/transition.pending"
+assert_hybrid_precondition_failure 'hybrid rotation with a native upstream' \
+  MOCK_UPSTREAM=127.0.0.1:13101
+assert_hybrid_precondition_failure 'hybrid rotation with blue active' \
+  MOCK_BLUE_STATE=active
+assert_hybrid_precondition_failure 'hybrid rotation with green active' \
+  MOCK_GREEN_STATE=active
+assert_hybrid_precondition_failure 'hybrid rotation with blue enabled' \
+  MOCK_BLUE_UNIT_FILE_STATE=enabled
+assert_hybrid_precondition_failure 'hybrid rotation with green enabled' \
+  MOCK_GREEN_UNIT_FILE_STATE=enabled
+assert_hybrid_precondition_failure 'hybrid rotation with a missing native unit' \
+  MOCK_LOAD_STATE=not-found
+mv -- "$hybrid_runtime_control" "$hybrid_runtime_control.missing"
+assert_hybrid_precondition_failure 'hybrid rotation with durable state but missing runtime control'
+mv -- "$hybrid_runtime_control.missing" "$hybrid_runtime_control"
+
+# The rotation must participate in the same lock as runtime-mode transitions.
+# A competing holder blocks direct execution, while HELD=true is accepted only
+# when the inherited descriptor names the exact locked inode.
+hybrid_infra_hash_before_lock_failure="$(sha256sum "$hybrid_infra_env")"
+hybrid_native_hash_before_lock_failure="$(sha256sum "$hybrid_native_env")"
+exec {contended_rotation_lock_fd}<>"$OPENBMB_OPERATION_LOCK"
+flock --exclusive "$contended_rotation_lock_fd"
+expect_failure 'hybrid rotation while operation lock is held' \
+  run_hybrid_rotation OPENBMB_OPERATION_LOCK_WAIT_SECONDS=0
+flock --unlock "$contended_rotation_lock_fd"
+exec {contended_rotation_lock_fd}>&-
+exec {wrong_rotation_lock_fd}</dev/null
+expect_failure 'hybrid rotation with a false inherited lock descriptor' \
+  run_hybrid_rotation \
+    OPENBMB_OPERATION_LOCK_HELD=true \
+    OPENBMB_OPERATION_LOCK_FD="$wrong_rotation_lock_fd"
+exec {wrong_rotation_lock_fd}<&-
+[[ "$(sha256sum "$hybrid_infra_env")" == "$hybrid_infra_hash_before_lock_failure" ]] || \
+  fail 'operation-lock rejection changed the infrastructure env'
+[[ "$(sha256sum "$hybrid_native_env")" == "$hybrid_native_hash_before_lock_failure" ]] || \
+  fail 'operation-lock rejection changed the native env'
+
+# A failure after the first rename exercises the transaction rollback: both
+# source files must return byte-for-byte, and the diagnostic must not disclose
+# the credential being restored.
+hybrid_infra_hash_before_failure="$(sha256sum "$hybrid_infra_env")"
+hybrid_native_hash_before_failure="$(sha256sum "$hybrid_native_env")"
+expect_failure 'hybrid rotation after infrastructure commit' \
+  run_hybrid_rotation OPENBMB_ROTATION_TEST_FAILPOINT=after-infra-commit
+[[ "$(sha256sum "$hybrid_infra_env")" == "$hybrid_infra_hash_before_failure" ]] || \
+  fail 'failed hybrid rotation did not restore the infrastructure env'
+[[ "$(sha256sum "$hybrid_native_env")" == "$hybrid_native_hash_before_failure" ]] || \
+  fail 'failed hybrid rotation did not restore the native env'
+! grep -Fq -- "$hybrid_new_infra_secret" "$fixture_root/expected.stderr" || \
+  fail 'failed hybrid rotation logged the LiveKit secret'
 
 assert_invalid_env_unchanged() {
   local name="$1"

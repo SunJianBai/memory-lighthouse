@@ -1,10 +1,6 @@
 name: Production delivery
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -18,20 +14,16 @@ concurrency:
 env:
   DEPLOY_HOST: 124.220.81.104
   DEPLOY_USER: ubuntu
-  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  SOURCE_SHA: ${{ github.sha }}
 
 jobs:
   deliver:
     name: Build, transfer, and safely activate
     if: >-
-      (github.event_name == 'workflow_dispatch' &&
-       github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.head_repository.full_name == github.repository &&
-       vars.PRODUCTION_DEPLOY_ENABLED == 'true')
+      vars.PRODUCTION_DEPLOY_ENABLED == 'true' &&
+      vars.PRODUCTION_DELIVERY_MODE == 'docker-full' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 360
@@ -56,11 +48,6 @@ jobs:
           [[ "$repository_owner_lower" =~ ^[a-z0-9][a-z0-9-]*$ ]]
           echo "RELEASE_ID=$release_id" >> "$GITHUB_ENV"
           echo "DELIVERY_IMAGE=ghcr.io/$repository_owner_lower/memory-lighthouse-delivery" >> "$GITHUB_ENV"
-          if [[ "$GITHUB_EVENT_NAME" == workflow_run ]]; then
-            echo 'ACTIVATE_RELEASE=true' >> "$GITHUB_ENV"
-          else
-            echo 'ACTIVATE_RELEASE=false' >> "$GITHUB_ENV"
-          fi
 
       - name: Configure pinned SSH identity
         shell: bash
@@ -480,8 +467,7 @@ jobs:
           ssh tx4h4g-prod \
             "set -euo pipefail; test \"\$(sudo cat /opt/openbmb/releases/$RELEASE_ID/.openbmb-release-sha)\" = '$SOURCE_SHA'; sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env OPENBMB_API_ENV_FILE=/etc/openbmb/api.env bash /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/verify-release-images.sh"
 
-      - name: Reject stale automatic activation
-        if: env.ACTIVATE_RELEASE == 'true'
+      - name: Reject stale manual activation
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -496,16 +482,61 @@ jobs:
           fi
 
       - name: Activate validated release
-        if: env.ACTIVATE_RELEASE == 'true'
         shell: bash
         run: |
           set -euo pipefail
           bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
-          ssh tx4h4g-prod \
-            "sudo -n OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env OPENBMB_API_ENV_FILE=/etc/openbmb/api.env OPENBMB_SKIP_IMAGE_BUILD=true /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/deploy-release.sh"
+          ssh tx4h4g-prod bash -s -- "$RELEASE_ID" <<'REMOTE'
+          set -euo pipefail
+          release_id="$1"
+          [[ "$release_id" =~ ^git-[0-9a-f]{12}$ ]]
+          runtime_mode=/usr/local/sbin/openbmb-runtime-mode
+          runtime_state=/var/lib/openbmb/hybrid-runtime
+          if sudo -n test -e "$runtime_mode" || sudo -n test -L "$runtime_mode" || \
+             sudo -n test -e "$runtime_state" || sudo -n test -L "$runtime_state"; then
+            sudo -n test -f "$runtime_mode"
+            sudo -n test ! -L "$runtime_mode"
+            sudo -n test -x "$runtime_mode"
+            runtime_status="$(sudo -n "$runtime_mode" status)"
+            runtime_value="$(sed -n 's/^mode=//p' <<<"$runtime_status")"
+            runtime_pending="$(sed -n 's/^pending=//p' <<<"$runtime_status")"
+            [[ "$runtime_pending" == no ]] || {
+              printf 'Refusing Docker activation while a runtime transition is pending.\n' >&2
+              exit 1
+            }
+            case "$runtime_value" in
+              hybrid) sudo -n "$runtime_mode" switch docker ;;
+              docker) ;;
+              *)
+                printf 'Refusing Docker activation from unknown runtime mode: %s\n' \
+                  "$runtime_value" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          sudo -n env \
+            OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env \
+            OPENBMB_API_ENV_FILE=/etc/openbmb/api.env \
+            OPENBMB_SKIP_IMAGE_BUILD=true \
+            "/opt/openbmb/releases/$release_id/infra/production/scripts/deploy-release.sh"
+          if sudo -n test -e "$runtime_mode" || sudo -n test -L "$runtime_mode" || \
+             sudo -n test -e "$runtime_state" || sudo -n test -L "$runtime_state"; then
+            # deploy-release has exited, so the production operation lock is
+            # no longer held. Recover boot jobs that may have failed while a
+            # durable security-boundary transaction was awaiting this resume.
+            sudo -n systemctl reset-failed openbmb.service openbmb-hybrid-recovery.service caddy.service
+            sudo -n systemctl restart openbmb.service
+            sudo -n systemctl restart openbmb-hybrid-recovery.service
+            sudo -n systemctl restart caddy.service
+            sudo -n systemctl is-active --quiet openbmb.service
+            sudo -n systemctl is-active --quiet openbmb-hybrid-recovery.service
+            sudo -n systemctl is-active --quiet caddy.service
+            recovered_status="$(sudo -n "$runtime_mode" status)"
+            [[ "$recovered_status" == $'mode=docker\nupstream=127.0.0.1:13100\npending=no' ]]
+          fi
+          REMOTE
 
       - name: Verify public health after activation
-        if: env.ACTIVATE_RELEASE == 'true'
         shell: bash
         run: |
           set -euo pipefail

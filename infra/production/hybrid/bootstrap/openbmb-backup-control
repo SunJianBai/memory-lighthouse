@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+bootstrap_lib="${OPENBMB_BOOTSTRAP_LIB:-/usr/local/libexec/openbmb-hybrid/bootstrap-lib.sh}"
+if [[ ! -f "$bootstrap_lib" && -f "$script_dir/bootstrap-lib.sh" ]]; then
+  bootstrap_lib="$script_dir/bootstrap-lib.sh"
+fi
+# shellcheck source=bootstrap-lib.sh
+source "$bootstrap_lib"
+
+operation_lock="${OPENBMB_OPERATION_LOCK:-/run/lock/openbmb-operation.lock}"
+flock_bin="${OPENBMB_FLOCK_BIN:-flock}"
+runtime_mode="${OPENBMB_RUNTIME_MODE_BIN:-/usr/local/sbin/openbmb-runtime-mode}"
+current_stack="${OPENBMB_CURRENT_LINK:-/opt/openbmb/current}"
+backup_entry="$current_stack/infra/production/scripts/backup.sh"
+restore_hybrid=false
+
+fail() {
+  printf 'HYBRID BACKUP: %s\n' "$*" >&2
+  exit 1
+}
+
+take_operation_lock() {
+  local inherited_fd
+  hybrid_prepare_lock_file "$operation_lock" || exit 1
+  case "${OPENBMB_OPERATION_LOCK_HELD:-false}" in
+    false)
+      exec 9<>"$operation_lock"
+      "$flock_bin" --exclusive --wait 1800 --conflict-exit-code 75 9 || \
+        fail 'could not acquire the production operation lock'
+      export OPENBMB_OPERATION_LOCK_HELD=true
+      export OPENBMB_OPERATION_LOCK="$operation_lock"
+      export OPENBMB_OPERATION_LOCK_FD=9
+      ;;
+    true)
+      inherited_fd="${OPENBMB_OPERATION_LOCK_FD:-}"
+      hybrid_assert_inherited_lock "$operation_lock" "$inherited_fd" "$flock_bin" || exit 1
+      ;;
+    *) fail 'OPENBMB_OPERATION_LOCK_HELD must be true or false' ;;
+  esac
+}
+
+settled_mode() {
+  local -a lines=()
+  mapfile -t lines < <("$runtime_mode" status)
+  [[ "${#lines[@]}" -eq 3 && "${lines[2]}" == pending=no ]] || \
+    fail 'runtime or native recovery is pending'
+  case "${lines[0]}|${lines[1]}" in
+    mode=uninitialized\|upstream=127.0.0.1:13100|mode=docker\|upstream=127.0.0.1:13100)
+      printf 'docker\n'
+      ;;
+    mode=hybrid\|upstream=127.0.0.1:13101|mode=hybrid\|upstream=127.0.0.1:13102)
+      printf 'hybrid\n'
+      ;;
+    *) fail 'runtime mode and Caddy upstream disagree' ;;
+  esac
+}
+
+restore_initial_mode() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  if [[ "$restore_hybrid" == true ]]; then
+    if ! "$runtime_mode" switch hybrid; then
+      printf 'HYBRID BACKUP: snapshot ended in safe Docker mode; automatic hybrid restoration failed\n' >&2
+      [[ "$status" -ne 0 ]] || status=1
+    fi
+  fi
+  exit "$status"
+}
+
+main() {
+  local initial_mode
+  [[ $# -eq 0 ]] || fail 'openbmb-backup-control takes no arguments'
+  hybrid_require_root || exit 1
+  take_operation_lock
+  [[ -x "$runtime_mode" && ! -L "$runtime_mode" ]] || fail 'runtime-mode control is unavailable'
+  hybrid_assert_secure_file "$backup_entry" || exit 1
+  initial_mode="$(settled_mode)"
+  if [[ "$initial_mode" == hybrid ]]; then
+    "$runtime_mode" switch docker
+    restore_hybrid=true
+  fi
+  trap restore_initial_mode EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  OPENBMB_OPERATION_LOCK_HELD=true \
+  OPENBMB_OPERATION_LOCK="$operation_lock" \
+  OPENBMB_OPERATION_LOCK_FD="${OPENBMB_OPERATION_LOCK_FD:-9}" \
+    bash "$backup_entry"
+}
+
+main "$@"
