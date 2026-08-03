@@ -150,6 +150,8 @@ fun LighthouseRoute(
     val familyActions = remember(viewModel) {
         FamilyUiActions(
             requestEmailVerification = viewModel::requestEmailVerification,
+            confirmEmailVerification = viewModel::confirmEmailVerification,
+            dismissEmailVerificationPrompt = viewModel::dismissEmailVerificationPrompt,
             selectHousehold = viewModel::selectHousehold,
             selectRecipient = viewModel::selectRecipient,
             createHousehold = viewModel::createHousehold,
@@ -783,6 +785,18 @@ private fun FamilyScreen(
     var verificationEmail by rememberSaveable(state.user?.email) {
         mutableStateOf(state.user?.email.orEmpty())
     }
+    var verificationCode by remember(state.emailVerificationPromptVisible, showEmailDialog) {
+        mutableStateOf("")
+    }
+    val emailVerificationDialogVisible =
+        showEmailDialog || state.emailVerificationPromptVisible
+
+    LaunchedEffect(state.user?.emailVerified) {
+        if (state.user?.emailVerified == true) {
+            verificationCode = ""
+            showEmailDialog = false
+        }
+    }
     FamilyManagementContent(
         state = state,
         actions = actions,
@@ -804,32 +818,76 @@ private fun FamilyScreen(
         )
     }
 
-    if (showEmailDialog) {
+    if (emailVerificationDialogVisible) {
         AlertDialog(
-            onDismissRequest = { showEmailDialog = false },
+            onDismissRequest = {
+                verificationCode = ""
+                showEmailDialog = false
+                actions.dismissEmailVerificationPrompt()
+            },
             icon = { Icon(Icons.Rounded.Security, contentDescription = null) },
-            title = { Text("绑定并验证邮箱") },
+            title = { Text("输入邮箱验证码") },
             text = {
-                OutlinedTextField(
-                    value = verificationEmail,
-                    onValueChange = { verificationEmail = it },
-                    label = { Text("邮箱") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        if (state.emailVerificationPromptVisible) {
+                            "请输入发送到该邮箱的 6 位验证码。"
+                        } else {
+                            "先发送验证码，再输入邮件中的 6 位数字。"
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = verificationEmail,
+                        onValueChange = { verificationEmail = it },
+                        label = { Text("邮箱") },
+                        enabled = state.user?.email == null,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = verificationCode,
+                        onValueChange = { value ->
+                            verificationCode = value.filter(Char::isDigit).take(6)
+                        },
+                        label = { Text("6 位验证码") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    TextButton(
+                        onClick = { actions.requestEmailVerification(verificationEmail) },
+                        enabled = !state.busy && verificationEmail.contains('@'),
+                    ) {
+                        Text(
+                            if (state.emailVerificationPromptVisible) "重新发送验证码"
+                            else "发送验证码",
+                        )
+                    }
+                }
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        actions.requestEmailVerification(verificationEmail)
-                        showEmailDialog = false
+                        val codeForRequest = verificationCode
+                        verificationCode = ""
+                        actions.confirmEmailVerification(verificationEmail, codeForRequest)
                     },
-                    enabled = verificationEmail.contains('@') && verificationEmail.length >= 5,
-                ) { Text("发送验证邮件") }
+                    enabled = !state.busy &&
+                        state.emailVerificationPromptVisible &&
+                        verificationEmail.contains('@') &&
+                        verificationCode.length == 6,
+                ) { Text("确认验证码") }
             },
             dismissButton = {
-                TextButton(onClick = { showEmailDialog = false }) { Text("取消") }
+                TextButton(
+                    onClick = {
+                        verificationCode = ""
+                        showEmailDialog = false
+                        actions.dismissEmailVerificationPrompt()
+                    },
+                ) { Text("稍后验证") }
             },
         )
     }

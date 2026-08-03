@@ -27,9 +27,9 @@ import type {
 import { CurrentUser } from './current-user.decorator';
 import {
   ClientTypeDto,
+  EmailVerificationConfirmDto,
   EmailVerificationRequestDto,
   LoginDto,
-  OneTimeTokenConfirmDto,
   PasswordResetConfirmDto,
   PasswordResetRequestDto,
   RefreshDto,
@@ -186,8 +186,8 @@ export class AuthController {
   @Post('email-verifications/confirm')
   @RateLimited(RateLimitPolicy.AUTH_EMAIL_VERIFICATION_CONFIRM)
   @HttpCode(HttpStatus.OK)
-  confirmEmailVerification(@Body() input: OneTimeTokenConfirmDto) {
-    return this.identity.confirmEmailVerification(input.token);
+  confirmEmailVerification(@Body() input: EmailVerificationConfirmDto) {
+    return this.identity.confirmEmailVerification(input.email, input.code);
   }
 
   @Post('password-resets')

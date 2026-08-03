@@ -96,6 +96,8 @@ import java.util.TimeZone
 
 internal class FamilyUiActions(
     val requestEmailVerification: (String?) -> Unit,
+    val confirmEmailVerification: (String, String) -> Unit,
+    val dismissEmailVerificationPrompt: () -> Unit,
     val selectHousehold: (String) -> Unit,
     val selectRecipient: (String) -> Unit,
     val createHousehold: (String, String) -> Unit,
@@ -494,7 +496,7 @@ private fun OverviewSection(
                     icon = Icons.Rounded.Security,
                     title = "请先验证邮箱",
                     body = "创建家庭、激活设备和远程通话前，服务器要求至少一个已验证邮箱。",
-                    actionLabel = "发送验证邮件",
+                    actionLabel = "发送邮箱验证码",
                     onAction = onRequestEmailVerification,
                 )
             }

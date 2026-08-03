@@ -22,11 +22,13 @@ npm run dev:client
 
 - Web access token 只存在于内存；refresh token 由 Server API 写入
   `HttpOnly + SameSite=Strict` Cookie。
-- 邮箱验证、密码重置与家庭邀请的一次性 token 从 URL fragment 读取后，
-  在 React 挂载前立即通过 `history.replaceState` 清除。
+- 邮箱验证使用邮件中的 6 位数字验证码；注册页、独立验证页和账号设置页都不会
+  将验证码写入 URL 或浏览器存储。
+- 密码重置与家庭邀请的一次性 token 从 URL fragment 读取后，在 React 挂载前
+  立即通过 `history.replaceState` 清除。
 - 家庭邀请使用 `POST /household-invitations/accept` 的 JSON 请求正文。
-- 邮件入口与服务端契约一致：`/openBMB/auth/verify-email`、
-  `/openBMB/auth/reset-password`、`/openBMB/invitations/accept`；token 仅在 fragment。
+- 邮箱验证码入口为 `/openBMB/auth/verify-email`；密码重置与家庭邀请入口分别为
+  `/openBMB/auth/reset-password`、`/openBMB/invitations/accept`，其 token 仅在 fragment。
 - 陪伴 Web 使用 IndexedDB 保存 Ed25519 `CryptoKey` 和轮换设备凭据；长期
   credential 从不作为 Bearer Token，业务请求只使用短时 device access token。
 - 设备凭据兑换成功或检测到既有设备凭据时，客户端先撤销并清除当前家属会话，

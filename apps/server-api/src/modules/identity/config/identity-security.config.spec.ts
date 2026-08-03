@@ -17,6 +17,7 @@ describe('createIdentitySecurityConfig', () => {
     expect(config.adminRefreshCookieName).not.toBe(config.refreshCookieName);
     expect(config.adminRefreshCookiePath).toBe('/openBMB/api/v1/admin/auth');
     expect(config.refreshCookiePath).toBe('/openBMB/api/v1/auth');
+    expect(config.emailVerificationTtlSeconds).toBe(10 * 60);
   });
 
   it('requires an independent admin signing secret in production', () => {

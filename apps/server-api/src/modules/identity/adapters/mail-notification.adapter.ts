@@ -29,11 +29,11 @@ export class MailNotificationAdapter implements NotificationPort {
   sendEmailVerification(
     notification: EmailVerificationNotification,
   ): Promise<void> {
-    const link = buildPublicAppLink(
-      this.config.publicAppUrl,
-      '/openBMB/auth/verify-email',
-      notification.token,
-    );
+    if (!/^\d{6}$/.test(notification.code)) {
+      throw new Error(
+        'Email verification code must contain exactly six digits',
+      );
+    }
     const expiresAt = notification.expiresAt.toISOString();
 
     return this.mail.send({
@@ -41,17 +41,12 @@ export class MailNotificationAdapter implements NotificationPort {
       to: notification.email,
       subject: '守忆灯塔邮箱验证',
       text: [
-        '请验证你的守忆灯塔邮箱。',
-        `验证链接：${sanitizePlainText(link)}`,
-        `链接有效期至：${expiresAt}`,
+        '你的守忆灯塔邮箱验证码为：',
+        notification.code,
+        `验证码有效期至：${expiresAt}`,
         '如果这不是你的操作，请忽略此邮件。',
       ].join('\n\n'),
-      html: this.renderActionHtml(
-        '验证邮箱',
-        '请验证你的守忆灯塔邮箱。',
-        link,
-        expiresAt,
-      ),
+      html: this.renderVerificationCodeHtml(notification.code, expiresAt),
     });
   }
 
@@ -93,6 +88,17 @@ export class MailNotificationAdapter implements NotificationPort {
       `<p>${escapeHtml(introduction)}</p>`,
       `<p><a href="${escapeHtml(link)}">${escapeHtml(action)}</a></p>`,
       `<p>链接有效期至：${escapeHtml(expiresAt)}</p>`,
+      '<p>如果这不是你的操作，请忽略此邮件。</p>',
+      '</body></html>',
+    ].join('');
+  }
+
+  private renderVerificationCodeHtml(code: string, expiresAt: string): string {
+    return [
+      '<!doctype html><html lang="zh-CN"><body>',
+      '<p>你的守忆灯塔邮箱验证码为：</p>',
+      `<p><strong style="font-size:28px;letter-spacing:6px">${escapeHtml(code)}</strong></p>`,
+      `<p>验证码有效期至：${escapeHtml(expiresAt)}</p>`,
       '<p>如果这不是你的操作，请忽略此邮件。</p>',
       '</body></html>',
     ].join('');

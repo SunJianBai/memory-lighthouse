@@ -121,7 +121,8 @@ class LighthouseViewModel internal constructor(
             signedIn = true,
             companionDeviceLocked = false,
             user = user,
-            message = "注册成功。创建家庭前请先完成邮箱验证。",
+            emailVerificationPromptVisible = !user.emailVerified,
+            message = "注册成功，6 位邮箱验证码已发送。",
         )
         refreshFamilyData()
         restoreDeviceData()
@@ -135,8 +136,26 @@ class LighthouseViewModel internal constructor(
         repository.requestEmailVerification(email)
         _uiState.value = _uiState.value.copy(
             user = repository.getMe(),
-            message = "验证邮件已发送，请在邮箱中完成验证",
+            emailVerificationPromptVisible = true,
+            message = "6 位邮箱验证码已发送，请查收并输入验证码",
         )
+    }
+
+    fun confirmEmailVerification(emailInput: String, code: String) = action {
+        val email = emailInput.trim().takeIf(String::isNotBlank)
+            ?: _uiState.value.user?.email
+            ?: error("请先填写用于验证的邮箱")
+        repository.confirmEmailVerification(email, code)
+        val user = repository.getMe()
+        _uiState.value = _uiState.value.copy(
+            user = user,
+            emailVerificationPromptVisible = false,
+            message = "邮箱验证成功，现在可以管理家庭和设备",
+        )
+    }
+
+    fun dismissEmailVerificationPrompt() {
+        _uiState.value = _uiState.value.copy(emailVerificationPromptVisible = false)
     }
 
     fun logout() = action {

@@ -101,6 +101,11 @@ interface IssuedOneTimeToken {
   expiresAt: Date;
 }
 
+interface IssuedEmailVerificationCode {
+  code: string;
+  expiresAt: Date;
+}
+
 interface IdentityRecordView {
   type: string;
   value: string;
@@ -169,7 +174,7 @@ export class IdentityApplicationService {
       | {
           session: CreatedSession;
           rawRefreshToken: string;
-          emailVerification?: IssuedOneTimeToken;
+          emailVerification?: IssuedEmailVerificationCode;
         }
       | undefined;
 
@@ -223,7 +228,7 @@ export class IdentityApplicationService {
         });
 
         const emailVerification = email
-          ? await this.issueOneTimeToken(
+          ? await this.issueEmailVerificationCode(
               transaction,
               userId,
               await this.findIdentityId(
@@ -258,7 +263,7 @@ export class IdentityApplicationService {
       await this.deliverQuietly(() =>
         this.notification.sendEmailVerification({
           email: email.value,
-          token: created.emailVerification!.rawToken,
+          code: created.emailVerification!.code,
           expiresAt: created.emailVerification!.expiresAt,
         }),
       );
@@ -521,7 +526,10 @@ export class IdentityApplicationService {
     emailInput: string,
   ): Promise<AcceptedResult> {
     const email = normalizeEmail(emailInput);
-    let delivery: { email: string; issued: IssuedOneTimeToken } | null = null;
+    let delivery: {
+      email: string;
+      issued: IssuedEmailVerificationCode;
+    } | null = null;
 
     try {
       delivery = await this.prisma.$transaction(async (transaction) => {
@@ -561,7 +569,7 @@ export class IdentityApplicationService {
           return null;
         }
 
-        const issued = await this.issueOneTimeToken(
+        const issued = await this.issueEmailVerificationCode(
           transaction,
           userId,
           identity.id,
@@ -583,7 +591,7 @@ export class IdentityApplicationService {
       await this.deliverQuietly(() =>
         this.notification.sendEmailVerification({
           email: delivery.email,
-          token: delivery.issued.rawToken,
+          code: delivery.issued.code,
           expiresAt: delivery.issued.expiresAt,
         }),
       );
@@ -593,22 +601,55 @@ export class IdentityApplicationService {
   }
 
   async confirmEmailVerification(
-    rawToken: string,
+    emailInput: string,
+    code: string,
   ): Promise<{ verified: true }> {
-    const tokenHash = this.opaqueTokens.hashOneTimeToken(rawToken);
-    const token = await this.prisma.oneTimeToken.findUnique({
-      where: { tokenHash },
+    const email = normalizeEmail(emailInput);
+    const identity = await this.prisma.loginIdentity.findUnique({
+      where: {
+        type_normalizedValue: {
+          type: EMAIL_IDENTITY,
+          normalizedValue: email.normalizedValue,
+        },
+      },
+      select: { id: true, userId: true },
     });
+    const token = identity
+      ? await this.prisma.oneTimeToken.findFirst({
+          where: {
+            userId: identity.userId,
+            identityId: identity.id,
+            purpose: EMAIL_VERIFICATION_PURPOSE,
+            consumedAt: null,
+          },
+          orderBy: { createdAt: 'desc' },
+        })
+      : null;
     const now = this.clock.now();
 
     if (
+      !/^\d{6}$/.test(code) ||
+      !identity ||
       !token ||
+      token.userId !== identity.userId ||
+      token.identityId !== identity.id ||
       token.purpose !== EMAIL_VERIFICATION_PURPOSE ||
-      !token.identityId ||
       token.consumedAt ||
-      token.expiresAt <= now
+      token.expiresAt <= now ||
+      token.attemptCount >= 5
     ) {
-      await this.countInvalidOneTimeAttempt(token?.id);
+      throw new InvalidOneTimeTokenException();
+    }
+
+    if (
+      !this.opaqueTokens.matchesEmailVerificationCode(
+        identity.id,
+        token.id,
+        code,
+        token.tokenHash,
+      )
+    ) {
+      await this.recordInvalidEmailVerificationAttempt(token, now);
       throw new InvalidOneTimeTokenException();
     }
 
@@ -616,9 +657,12 @@ export class IdentityApplicationService {
       const consumed = await transaction.oneTimeToken.updateMany({
         where: {
           id: token.id,
+          userId: identity.userId,
+          identityId: identity.id,
           purpose: EMAIL_VERIFICATION_PURPOSE,
           consumedAt: null,
           expiresAt: { gt: now },
+          attemptCount: { lt: 5 },
         },
         data: { consumedAt: now },
       });
@@ -628,8 +672,8 @@ export class IdentityApplicationService {
 
       const verified = await transaction.loginIdentity.updateMany({
         where: {
-          id: token.identityId!,
-          userId: token.userId,
+          id: identity.id,
+          userId: identity.userId,
           type: EMAIL_IDENTITY,
         },
         data: { verifiedAt: now },
@@ -639,7 +683,7 @@ export class IdentityApplicationService {
       }
 
       await transaction.user.updateMany({
-        where: { id: token.userId, status: 'PENDING_VERIFICATION' },
+        where: { id: identity.userId, status: 'PENDING_VERIFICATION' },
         data: { status: 'ACTIVE', version: { increment: 1 } },
       });
     });
@@ -987,6 +1031,40 @@ export class IdentityApplicationService {
     return { rawToken, expiresAt };
   }
 
+  private async issueEmailVerificationCode(
+    transaction: Prisma.TransactionClient,
+    userId: string,
+    identityId: string,
+    purpose: string,
+    ttlSeconds: number,
+    now: Date,
+  ): Promise<IssuedEmailVerificationCode> {
+    const code = this.opaqueTokens.generateEmailVerificationCode();
+    const challengeId = newUlid(now.getTime());
+    const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+
+    await transaction.oneTimeToken.updateMany({
+      where: { userId, purpose, consumedAt: null },
+      data: { consumedAt: now },
+    });
+    await transaction.oneTimeToken.create({
+      data: {
+        id: challengeId,
+        userId,
+        identityId,
+        purpose,
+        tokenHash: this.opaqueTokens.hashEmailVerificationCode(
+          identityId,
+          challengeId,
+          code,
+        ),
+        expiresAt,
+      },
+    });
+
+    return { code, expiresAt };
+  }
+
   private async findIdentityId(
     transaction: Prisma.TransactionClient,
     type: string,
@@ -1121,6 +1199,34 @@ export class IdentityApplicationService {
     await this.prisma.oneTimeToken.updateMany({
       where: { id: tokenId },
       data: { attemptCount: { increment: 1 } },
+    });
+  }
+
+  private async recordInvalidEmailVerificationAttempt(
+    token: {
+      id: string;
+      attemptCount: number;
+      consumedAt: Date | null;
+      expiresAt: Date;
+    },
+    now: Date,
+  ): Promise<void> {
+    if (token.consumedAt || token.expiresAt <= now || token.attemptCount >= 5) {
+      return;
+    }
+
+    const finalAttempt = token.attemptCount === 4;
+    await this.prisma.oneTimeToken.updateMany({
+      where: {
+        id: token.id,
+        consumedAt: null,
+        attemptCount: token.attemptCount,
+        expiresAt: { gt: now },
+      },
+      data: {
+        attemptCount: { increment: 1 },
+        ...(finalAttempt ? { consumedAt: now } : {}),
+      },
     });
   }
 

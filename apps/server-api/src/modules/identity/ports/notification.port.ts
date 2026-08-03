@@ -1,6 +1,6 @@
 export interface EmailVerificationNotification {
   email: string;
-  token: string;
+  code: string;
   expiresAt: Date;
 }
 

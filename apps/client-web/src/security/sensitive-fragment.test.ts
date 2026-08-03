@@ -14,7 +14,6 @@ describe("consumeSensitiveFragment", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it.each([
-    ["/openBMB/auth/verify-email", "verify-email"],
     ["/openBMB/auth/reset-password", "reset-password"],
     ["/openBMB/invitations/accept", "accept-invitation"],
   ] as const)("matches the server mail route %s", (pathname, kind) => {
@@ -28,6 +27,20 @@ describe("consumeSensitiveFragment", () => {
       null,
       "",
       pathname,
+    );
+  });
+
+  it("does not treat a verification code page as a fragment-token action", () => {
+    const replaceState = installWindow(
+      "/openBMB/auth/verify-email",
+      "#token=legacy-email-token",
+    );
+
+    expect(consumeSensitiveFragment()).toBeNull();
+    expect(replaceState).toHaveBeenCalledWith(
+      null,
+      "",
+      "/openBMB/auth/verify-email",
     );
   });
 

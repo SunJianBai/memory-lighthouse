@@ -13,13 +13,13 @@ const config: MailDeliveryConfig = {
 };
 
 describe('MailNotificationAdapter', () => {
-  it('renders an encoded /openBMB email-verification link', async () => {
+  it('renders a six-digit email verification code without a verification link', async () => {
     const delivery = new InMemoryMailDeliveryAdapter(config);
     const adapter = new MailNotificationAdapter(delivery, config);
 
     await adapter.sendEmailVerification({
       email: 'family@example.com',
-      token: 'raw+token/&?',
+      code: '042731',
       expiresAt: new Date('2026-08-02T00:00:00.000Z'),
     });
 
@@ -29,16 +29,10 @@ describe('MailNotificationAdapter', () => {
       to: 'family@example.com',
       subject: '守忆灯塔邮箱验证',
     });
-    expect(mail.text).toContain(
-      'https://sun227454.online/openBMB/auth/verify-email#',
-    );
-    expect(
-      new URLSearchParams(
-        new URL(mail.text.match(/https:\/\/\S+/)?.[0] ?? '').hash.slice(1),
-      ).get('token'),
-    ).toBe('raw+token/&?');
-    expect(mail.html).toContain('/openBMB/auth/verify-email#');
-    expect(mail.html).toContain('%26');
+    expect(mail.text).toContain('042731');
+    expect(mail.html).toContain('042731');
+    expect(mail.text).not.toContain('/openBMB/auth/verify-email');
+    expect(mail.html).not.toContain('/openBMB/auth/verify-email');
   });
 
   it('renders password-reset links on a distinct public route', async () => {

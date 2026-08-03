@@ -134,4 +134,25 @@ describe('AuthController refresh transport', () => {
       }),
     );
   });
+
+  it('confirms an email with its address and six-digit verification code', async () => {
+    const confirmEmailVerification = jest.fn(() =>
+      Promise.resolve({ verified: true as const }),
+    );
+    const identity = {
+      confirmEmailVerification,
+    } as unknown as IdentityApplicationService;
+    const controller = new AuthController(identity, config);
+
+    await expect(
+      controller.confirmEmailVerification({
+        email: 'Family@Example.com',
+        code: '042731',
+      }),
+    ).resolves.toEqual({ verified: true });
+    expect(confirmEmailVerification).toHaveBeenCalledWith(
+      'Family@Example.com',
+      '042731',
+    );
+  });
 });

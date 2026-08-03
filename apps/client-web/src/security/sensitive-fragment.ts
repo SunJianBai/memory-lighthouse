@@ -1,5 +1,5 @@
 export type SensitiveFragmentAction = {
-  kind: "verify-email" | "reset-password" | "accept-invitation";
+  kind: "reset-password" | "accept-invitation";
   token: string;
 };
 
@@ -20,13 +20,11 @@ export const consumeSensitiveFragment = (): SensitiveFragmentAction | null => {
   );
 
   const path = window.location.pathname.toLowerCase();
-  const kind = path.endsWith("/verify-email")
-    ? "verify-email"
-    : path.endsWith("/reset-password")
-      ? "reset-password"
-      : path.endsWith("/invitations/accept") || path.endsWith("/accept-invitation")
-        ? "accept-invitation"
-        : null;
+  const kind = path.endsWith("/reset-password")
+    ? "reset-password"
+    : path.endsWith("/invitations/accept") || path.endsWith("/accept-invitation")
+      ? "accept-invitation"
+      : null;
   if (!kind) return null;
   return { kind, token };
 };

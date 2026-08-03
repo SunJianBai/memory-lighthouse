@@ -1,6 +1,31 @@
 import { RATE_LIMIT_POLICY_DEFINITIONS } from './rate-limit.policy';
 import { RateLimitPolicy } from './rate-limit.types';
 
+describe('email verification code rate limit', () => {
+  it('limits guesses by email and IP/email pair instead of the submitted code', () => {
+    const definitions =
+      RATE_LIMIT_POLICY_DEFINITIONS[
+        RateLimitPolicy.AUTH_EMAIL_VERIFICATION_CONFIRM
+      ];
+
+    expect(definitions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ dimensions: ['ip'] }),
+        expect.objectContaining({ limit: 5, dimensions: ['email'] }),
+        expect.objectContaining({
+          limit: 5,
+          dimensions: ['ip', 'email'],
+        }),
+      ]),
+    );
+    expect(definitions).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ dimensions: ['one-time-token'] }),
+      ]),
+    );
+  });
+});
+
 describe('remote policy update rate limit', () => {
   it('limits password reauthentication across account, session, device, and IP', () => {
     const definitions =

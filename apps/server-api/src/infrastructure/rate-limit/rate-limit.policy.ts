@@ -54,10 +54,16 @@ export const RATE_LIMIT_POLICY_DEFINITIONS: Readonly<
   [RateLimitPolicy.AUTH_EMAIL_VERIFICATION_CONFIRM]: [
     { id: 'ip', limit: 20, windowMs: 15 * MINUTE, dimensions: ['ip'] },
     {
-      id: 'token',
+      id: 'email',
       limit: 5,
-      windowMs: HOUR,
-      dimensions: ['one-time-token'],
+      windowMs: 15 * MINUTE,
+      dimensions: ['email'],
+    },
+    {
+      id: 'ip-email',
+      limit: 5,
+      windowMs: 15 * MINUTE,
+      dimensions: ['ip', 'email'],
     },
   ],
   [RateLimitPolicy.AUTH_PASSWORD_RESET_REQUEST]: [

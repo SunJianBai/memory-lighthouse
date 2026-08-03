@@ -48,8 +48,9 @@ const routesByPath = new Map(
   Object.entries(paths).map(([route, path]) => [path, route as ClientRoute]),
 );
 
-// Keep pre-refactor bookmarks usable while all newly generated links follow
-// the server mail contract above.
+// Keep pre-refactor bookmarks usable while newly generated routes use the
+// canonical paths above. Email verification now uses an entered code rather
+// than a token-bearing mail link.
 routesByPath.set("reset-password", "reset-password");
 routesByPath.set("verify-email", "verify-email");
 routesByPath.set("accept-invitation", "accept-invitation");
