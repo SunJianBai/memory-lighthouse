@@ -44,7 +44,13 @@ function Invoke-CheckedCommandWithInput {
         [string[]] $ArgumentList
     )
 
-    $InputText | & $FilePath @ArgumentList
+    # Windows PowerShell appends CRLF when a scalar string is piped to a native
+    # process. The checked-in helpers use LF, so leave the appended CR on a
+    # Bash comment line instead of creating a standalone `$'\r'` command.
+    $normalizedInput = $InputText.Replace("`r`n", "`n").Replace("`r", "`n")
+    $normalizedInput = $normalizedInput.TrimEnd([char[]]"`r`n")
+    $nativeInput = "$normalizedInput`n# powershell-native-stdin-terminator"
+    $nativeInput | & $FilePath @ArgumentList
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed with exit code $LASTEXITCODE`: $FilePath"
     }
