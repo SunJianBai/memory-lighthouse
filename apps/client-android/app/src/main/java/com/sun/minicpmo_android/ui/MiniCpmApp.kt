@@ -10,7 +10,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -20,8 +19,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -32,7 +33,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -110,7 +110,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -142,18 +141,11 @@ import com.sun.minicpmo_android.MainViewModel
 import com.sun.minicpmo_android.camera.NativeCameraPreview
 import com.sun.minicpmo_android.model.AppUiState
 import com.sun.minicpmo_android.model.ConversationMessage
+import com.sun.minicpmo_android.model.DuplexActivity
 import com.sun.minicpmo_android.model.MessageRole
 import com.sun.minicpmo_android.model.RealtimeMode
 import com.sun.minicpmo_android.model.SessionPhase
 import com.sun.minicpmo_android.model.SessionSettings
-import com.sun.minicpmo_android.ui.theme.MonitorDanger
-import com.sun.minicpmo_android.ui.theme.MonitorInk
-import com.sun.minicpmo_android.ui.theme.MonitorMuted
-import com.sun.minicpmo_android.ui.theme.MonitorOutline
-import com.sun.minicpmo_android.ui.theme.MonitorPaper
-import com.sun.minicpmo_android.ui.theme.MonitorSignal
-import com.sun.minicpmo_android.ui.theme.MonitorSurface
-import com.sun.minicpmo_android.ui.theme.MonitorSurfaceRaised
 import java.util.Locale
 import kotlinx.coroutines.launch
 import kotlin.math.PI
@@ -329,7 +321,7 @@ private fun MiniCpmApp(
     val clearEnabled = state.messages.isNotEmpty() && !state.hasActiveSession
 
     Scaffold(
-        containerColor = MonitorInk,
+        containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         modifier = Modifier.fillMaxSize(),
@@ -448,6 +440,7 @@ private fun AppTopBar(
     onClear: () -> Unit,
     onExit: (() -> Unit)?,
 ) {
+    val statusVisual = sessionStatusVisual(state)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -465,13 +458,16 @@ private fun AppTopBar(
         Surface(
             shape = CircleShape,
             color = Color.Transparent,
-            border = androidx.compose.foundation.BorderStroke(1.dp, MonitorSignal.copy(alpha = 0.65f)),
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp,
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+            ),
             modifier = Modifier.size(38.dp),
         ) {
             Box(contentAlignment = Alignment.Center) {
                 Text(
                     text = "o",
-                    color = MonitorSignal,
+                    color = MaterialTheme.colorScheme.primary,
                     fontSize = 24.sp,
                     fontStyle = FontStyle.Italic,
                     fontWeight = FontWeight.SemiBold,
@@ -483,19 +479,19 @@ private fun AppTopBar(
             Text(
                 text = if (embeddedInLighthouse) "守忆灯塔" else "MiniCPM-o",
                 style = MaterialTheme.typography.titleMedium,
-                color = MonitorPaper,
+                color = MaterialTheme.colorScheme.onBackground,
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 ServiceDot(state.serviceAvailable)
                 Spacer(Modifier.width(6.dp))
                 Text(
                     text = if (embeddedInLighthouse) {
-                        "MiniCPM-o · ${state.statusText}"
+                        "AI 陪伴 · ${statusVisual.label}"
                     } else {
                         state.statusText
                     },
                     style = MaterialTheme.typography.labelMedium,
-                    color = statusColor(state.phase),
+                    color = statusVisual.accentColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.semantics {
@@ -504,12 +500,13 @@ private fun AppTopBar(
                 )
             }
         }
-        IconButton(
-            onClick = onClear,
-            enabled = clearEnabled,
-            modifier = Modifier.size(48.dp),
-        ) {
-            Icon(Icons.Rounded.DeleteOutline, contentDescription = "清空对话")
+        if (clearEnabled) {
+            IconButton(
+                onClick = onClear,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(Icons.Rounded.DeleteOutline, contentDescription = "清空对话")
+            }
         }
         IconButton(
             onClick = onOpenSettings,
@@ -523,11 +520,12 @@ private fun AppTopBar(
 
 @Composable
 private fun ServiceDot(available: Boolean?) {
+    val colorScheme = MaterialTheme.colorScheme
     val color by animateColorAsState(
         targetValue = when (available) {
-            true -> MonitorSignal
-            false -> MonitorDanger
-            null -> MonitorMuted
+            true -> colorScheme.primary
+            false -> colorScheme.error
+            null -> colorScheme.onSurfaceVariant
         },
         label = "service-dot",
     )
@@ -552,11 +550,12 @@ private fun ModeSelector(
     modes: Set<RealtimeMode> = RealtimeMode.entries.toSet(),
     onSelect: (RealtimeMode) -> Unit,
 ) {
+    val colors = MaterialTheme.colorScheme
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MonitorSurface, RoundedCornerShape(18.dp))
-            .border(1.dp, MonitorOutline.copy(alpha = 0.7f), RoundedCornerShape(18.dp))
+            .background(colors.surfaceContainer, RoundedCornerShape(18.dp))
+            .border(1.dp, colors.outlineVariant, RoundedCornerShape(18.dp))
             .padding(4.dp)
             .selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -573,7 +572,7 @@ private fun ModeSelector(
                     .weight(1f)
                     .heightIn(min = 48.dp)
                     .clip(RoundedCornerShape(14.dp))
-                    .background(if (active) MonitorSignal else Color.Transparent)
+                    .background(if (active) colors.primaryContainer else Color.Transparent)
                     .selectable(
                         selected = active,
                         enabled = enabled,
@@ -586,14 +585,16 @@ private fun ModeSelector(
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = if (active) MonitorInk else MonitorMuted,
+                    tint = if (active) colors.onPrimaryContainer else colors.onSurfaceVariant,
                     modifier = Modifier.size(20.dp),
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = mode.label,
                     style = MaterialTheme.typography.labelLarge,
-                    color = if (active) MonitorInk else MonitorMuted,
+                    color = if (active) colors.onPrimaryContainer else colors.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -653,7 +654,8 @@ private fun EmptyChatHero(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp),
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 8.dp, vertical = 24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -662,14 +664,14 @@ private fun EmptyChatHero(
         Text(
             text = "看见、听见，也懂你",
             style = MaterialTheme.typography.displaySmall,
-            color = MonitorPaper,
+            color = MaterialTheme.colorScheme.onBackground,
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(10.dp))
         Text(
             text = "连接 MiniCPM-o 4.5 Realtime API\n开始自然的多模态实时对话",
             style = MaterialTheme.typography.bodyMedium,
-            color = MonitorMuted,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(24.dp))
@@ -682,12 +684,12 @@ private fun EmptyChatHero(
                     onClick = { onSuggestion(text) },
                     label = { Text(text) },
                     colors = AssistChipDefaults.assistChipColors(
-                        containerColor = MonitorSurface,
-                        labelColor = MonitorPaper,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        labelColor = MaterialTheme.colorScheme.onSurface,
                     ),
                     border = AssistChipDefaults.assistChipBorder(
                         enabled = true,
-                        borderColor = MonitorOutline,
+                        borderColor = MaterialTheme.colorScheme.outlineVariant,
                     ),
                 )
             }
@@ -699,15 +701,16 @@ private fun EmptyChatHero(
 private fun MessageBubble(message: ConversationMessage) {
     val isUser = message.role == MessageRole.USER
     val isSystem = message.role == MessageRole.SYSTEM
+    val colors = MaterialTheme.colorScheme
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
     ) {
         Surface(
             color = when {
-                isUser -> MonitorSignal
-                isSystem -> MonitorDanger.copy(alpha = 0.12f)
-                else -> MonitorSurfaceRaised
+                isUser -> colors.primaryContainer
+                isSystem -> colors.errorContainer
+                else -> colors.surfaceContainerHigh
             },
             shape = RoundedCornerShape(
                 topStart = 20.dp,
@@ -716,7 +719,7 @@ private fun MessageBubble(message: ConversationMessage) {
                 bottomEnd = if (isUser) 6.dp else 20.dp,
             ),
             border = if (isSystem) {
-                androidx.compose.foundation.BorderStroke(1.dp, MonitorDanger.copy(alpha = 0.35f))
+                androidx.compose.foundation.BorderStroke(1.dp, colors.error.copy(alpha = 0.45f))
             } else {
                 null
             },
@@ -728,14 +731,14 @@ private fun MessageBubble(message: ConversationMessage) {
                         Icon(
                             Icons.Rounded.ErrorOutline,
                             contentDescription = null,
-                            tint = MonitorDanger,
+                            tint = colors.onErrorContainer,
                             modifier = Modifier.size(16.dp),
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
                             "系统提示",
                             style = MaterialTheme.typography.labelMedium,
-                            color = MonitorDanger,
+                            color = colors.onErrorContainer,
                         )
                     }
                     Spacer(Modifier.height(6.dp))
@@ -743,7 +746,11 @@ private fun MessageBubble(message: ConversationMessage) {
                 Text(
                     text = message.text,
                     style = MaterialTheme.typography.bodyLarge,
-                    color = if (isUser) MonitorInk else MonitorPaper,
+                    color = when {
+                        isUser -> colors.onPrimaryContainer
+                        isSystem -> colors.onErrorContainer
+                        else -> colors.onSurface
+                    },
                 )
                 if (message.streaming) {
                     Spacer(Modifier.height(8.dp))
@@ -763,13 +770,14 @@ private fun StreamingIndicator() {
         animationSpec = infiniteRepeatable(tween(900), RepeatMode.Restart),
         label = "streaming-phase",
     )
+    val signalColor = MaterialTheme.colorScheme.primary
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         repeat(3) { index ->
             Box(
                 Modifier
                     .size(5.dp)
                     .background(
-                        MonitorSignal.copy(alpha = 0.25f + 0.75f * ((phase + index / 3f) % 1f)),
+                        signalColor.copy(alpha = 0.25f + 0.75f * ((phase + index / 3f) % 1f)),
                         CircleShape,
                     ),
             )
@@ -785,10 +793,11 @@ private fun ChatComposer(
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
 ) {
+    val colors = MaterialTheme.colorScheme
     Surface(
-        color = MonitorSurface,
+        color = colors.surfaceContainer,
         shape = RoundedCornerShape(24.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MonitorOutline),
+        border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = 8.dp),
@@ -801,7 +810,7 @@ private fun ChatComposer(
                 Icon(
                     Icons.AutoMirrored.Rounded.VolumeUp,
                     contentDescription = "语音回复已开启",
-                    tint = MonitorMuted,
+                    tint = colors.onSurfaceVariant,
                     modifier = Modifier.size(20.dp),
                 )
                 Spacer(Modifier.width(8.dp))
@@ -809,7 +818,7 @@ private fun ChatComposer(
             androidx.compose.foundation.text.BasicTextField(
                 value = text,
                 onValueChange = onTextChange,
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = MonitorPaper),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { if (enabled) onSend() }),
                 maxLines = 4,
@@ -820,7 +829,7 @@ private fun ChatComposer(
                             .padding(vertical = 10.dp),
                     ) {
                         if (text.isEmpty()) {
-                            Text("发送消息…", color = MonitorMuted)
+                            Text("发送消息…", color = colors.onSurfaceVariant)
                         }
                         inner()
                     }
@@ -831,10 +840,10 @@ private fun ChatComposer(
                 onClick = onSend,
                 enabled = enabled,
                 colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = MonitorSignal,
-                    contentColor = MonitorInk,
-                    disabledContainerColor = MonitorOutline,
-                    disabledContentColor = MonitorMuted,
+                    containerColor = colors.primary,
+                    contentColor = colors.onPrimary,
+                    disabledContainerColor = colors.surfaceVariant,
+                    disabledContentColor = colors.onSurfaceVariant,
                 ),
                 modifier = Modifier.size(48.dp),
             ) {
@@ -853,37 +862,59 @@ private fun AudioDuplexScreen(
     onToggleMic: () -> Unit,
     onToggleForceListen: () -> Unit,
 ) {
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        StatusPill(state)
-        Spacer(Modifier.weight(0.45f))
-        SignalOrb(
-            level = state.audioLevel,
-            active = state.phase == SessionPhase.LIVE,
-            modifier = Modifier.size(220.dp),
-        )
-        Spacer(Modifier.height(28.dp))
-        Text(
-            text = when (state.phase) {
-                SessionPhase.LIVE -> if (state.statusText.contains("回答")) "正在回应" else "正在聆听"
-                SessionPhase.PAUSED -> "会话暂停"
-                SessionPhase.CONNECTING, SessionPhase.QUEUED, SessionPhase.PREPARING -> "正在建立实时链路"
-                else -> "随时可以开始"
-            },
-            style = MaterialTheme.typography.headlineMedium,
-            color = MonitorPaper,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "16 kHz 实时上行 · 24 kHz 流式语音",
-            style = MaterialTheme.typography.labelMedium,
-            color = MonitorMuted,
-        )
-        Spacer(Modifier.height(20.dp))
-        TranscriptPreview(state.messages)
-        Spacer(Modifier.weight(0.55f))
+    val prompt = companionPrompt(state)
+    Column(modifier = Modifier.fillMaxSize()) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            val compact = maxHeight < 480.dp
+            val orbSize = when {
+                maxHeight < 340.dp -> 104.dp
+                maxHeight < 480.dp -> 144.dp
+                else -> 200.dp
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(top = if (compact) 4.dp else 12.dp, bottom = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                StatusPill(state)
+                Spacer(Modifier.height(if (compact) 12.dp else 24.dp))
+                SignalOrb(
+                    level = if (state.micEnabled) state.audioLevel else 0f,
+                    active = state.phase == SessionPhase.LIVE && state.micEnabled,
+                    modifier = Modifier.size(orbSize),
+                )
+                Spacer(Modifier.height(if (compact) 12.dp else 20.dp))
+                Text(
+                    text = prompt.title,
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = prompt.description,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(if (compact) 12.dp else 20.dp))
+                TranscriptPreview(state.messages)
+                state.mediaError?.let { message ->
+                    Spacer(Modifier.height(12.dp))
+                    SessionErrorBanner(
+                        message = message,
+                        onRetry = if (state.hasActiveSession) null else onStart,
+                    )
+                }
+            }
+        }
         DuplexControls(
             state = state,
             onStart = onStart,
@@ -905,14 +936,15 @@ private fun SignalOrb(level: Float, active: Boolean, modifier: Modifier = Modifi
         label = "orb-breathing",
     )
     val strength = if (active) (0.25f + level * 0.75f) * breathing else 0.16f
+    val signalColor = MaterialTheme.colorScheme.primary
 
     Canvas(modifier = modifier.semantics { contentDescription = "实时声音波形" }) {
         val center = Offset(size.width / 2f, size.height / 2f)
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
-                    MonitorSignal.copy(alpha = 0.5f * strength),
-                    MonitorSignal.copy(alpha = 0.08f),
+                    signalColor.copy(alpha = 0.5f * strength),
+                    signalColor.copy(alpha = 0.08f),
                     Color.Transparent,
                 ),
                 center = center,
@@ -922,7 +954,7 @@ private fun SignalOrb(level: Float, active: Boolean, modifier: Modifier = Modifi
         )
         repeat(3) { ring ->
             drawCircle(
-                color = MonitorSignal.copy(alpha = 0.18f - ring * 0.04f),
+                color = signalColor.copy(alpha = 0.18f - ring * 0.04f),
                 radius = size.minDimension * (0.25f + ring * 0.09f) * (1f + level * 0.08f),
                 style = Stroke(width = 1.4.dp.toPx()),
             )
@@ -936,7 +968,7 @@ private fun SignalOrb(level: Float, active: Boolean, modifier: Modifier = Modifi
             val height = maxHeight * wave * (0.45f + strength)
             val x = size.width * (0.25f + normalized * 0.5f)
             drawLine(
-                color = MonitorSignal,
+                color = signalColor,
                 start = Offset(x, center.y - height / 2f),
                 end = Offset(x, center.y + height / 2f),
                 strokeWidth = barWidth,
@@ -947,26 +979,40 @@ private fun SignalOrb(level: Float, active: Boolean, modifier: Modifier = Modifi
 }
 
 @Composable
-private fun TranscriptPreview(messages: List<ConversationMessage>) {
+private fun TranscriptPreview(
+    messages: List<ConversationMessage>,
+    overMedia: Boolean = false,
+    maxLines: Int = 3,
+) {
     val last = messages.lastOrNull { it.role != MessageRole.SYSTEM } ?: return
+    val colors = MaterialTheme.colorScheme
     Surface(
-        color = MonitorSurface.copy(alpha = 0.82f),
+        color = if (overMedia) Color.Black.copy(alpha = 0.68f) else colors.surfaceContainerHigh,
         shape = RoundedCornerShape(18.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MonitorOutline),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (overMedia) Color.White.copy(alpha = 0.34f) else colors.outlineVariant,
+        ),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(16.dp)) {
             Text(
-                text = if (last.role == MessageRole.USER) "你" else "MINICPM-O",
+                text = if (last.role == MessageRole.USER) "你" else "AI 陪伴",
                 style = MaterialTheme.typography.labelMedium,
-                color = if (last.role == MessageRole.USER) MonitorMuted else MonitorSignal,
+                color = if (overMedia) {
+                    Color.White.copy(alpha = 0.78f)
+                } else if (last.role == MessageRole.USER) {
+                    colors.onSurfaceVariant
+                } else {
+                    colors.primary
+                },
             )
             Spacer(Modifier.height(6.dp))
             Text(
                 text = last.text,
                 style = MaterialTheme.typography.bodyLarge,
-                color = MonitorPaper,
-                maxLines = 3,
+                color = if (overMedia) Color.White else colors.onSurface,
+                maxLines = maxLines,
                 overflow = TextOverflow.Ellipsis,
             )
         }
@@ -986,124 +1032,344 @@ private fun VideoDuplexScreen(
     onCameraError: (String) -> Unit,
 ) {
     var lensFacing by rememberSaveable { mutableIntStateOf(CameraSelector.LENS_FACING_FRONT) }
+    val showCameraPreview = state.phase == SessionPhase.LIVE && cameraPermissionGranted
+    val switchCamera = {
+        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
+            CameraSelector.LENS_FACING_BACK
+        } else {
+            CameraSelector.LENS_FACING_FRONT
+        }
+    }
 
-    Column(Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .clip(RoundedCornerShape(28.dp))
-                .background(MonitorSurface)
-                .border(1.dp, MonitorOutline, RoundedCornerShape(28.dp)),
-        ) {
-            if (cameraPermissionGranted) {
-                NativeCameraPreview(
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val compactLandscape = maxWidth >= 600.dp && maxHeight < 500.dp
+        if (compactLandscape) {
+            val sidePanelWidth = (maxWidth * 0.4f).coerceIn(236.dp, 300.dp)
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                VideoPreview(
+                    state = state,
+                    cameraPermissionGranted = cameraPermissionGranted,
+                    showCameraPreview = showCameraPreview,
                     lensFacing = lensFacing,
+                    onSwitchCamera = switchCamera,
                     onFrame = onFrame,
-                    onError = onCameraError,
-                    modifier = Modifier.fillMaxSize(),
+                    onCameraError = onCameraError,
+                    showTranscriptOverlay = false,
+                    showStatusPill = false,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
                 )
-            } else {
                 Column(
-                    modifier = Modifier.align(Alignment.Center),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .width(sidePanelWidth)
+                        .fillMaxHeight(),
                 ) {
-                    Icon(
-                        Icons.Rounded.CameraAlt,
-                        contentDescription = null,
-                        tint = MonitorSignal,
-                        modifier = Modifier.size(48.dp),
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        StatusPill(state)
+                        Spacer(Modifier.height(8.dp))
+                        state.mediaError?.let { message ->
+                            SessionErrorBanner(
+                                message = message,
+                                onRetry = if (state.hasActiveSession) null else onStart,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                        }
+                        state.cameraError?.let { message ->
+                            CameraErrorBanner(message)
+                            Spacer(Modifier.height(8.dp))
+                        }
+                        TranscriptPreview(state.messages, maxLines = Int.MAX_VALUE)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    DuplexControls(
+                        state = state,
+                        onStart = onStart,
+                        onStop = onStop,
+                        onTogglePause = onTogglePause,
+                        onToggleMic = onToggleMic,
+                        onToggleForceListen = onToggleForceListen,
+                        compact = true,
                     )
-                    Spacer(Modifier.height(12.dp))
-                    Text("开始时将申请摄像头权限", color = MonitorMuted)
                 }
             }
+        } else {
+            Column(Modifier.fillMaxSize()) {
+                VideoPreview(
+                    state = state,
+                    cameraPermissionGranted = cameraPermissionGranted,
+                    showCameraPreview = showCameraPreview,
+                    lensFacing = lensFacing,
+                    onSwitchCamera = switchCamera,
+                    onFrame = onFrame,
+                    onCameraError = onCameraError,
+                    showTranscriptOverlay = true,
+                    showStatusPill = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                )
+                if (state.mediaError != null || state.cameraError != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 180.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        state.mediaError?.let { message ->
+                            SessionErrorBanner(
+                                message = message,
+                                onRetry = if (state.hasActiveSession) null else onStart,
+                            )
+                            if (state.cameraError != null) Spacer(Modifier.height(8.dp))
+                        }
+                        state.cameraError?.let { message ->
+                            CameraErrorBanner(message)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                DuplexControls(
+                    state = state,
+                    onStart = onStart,
+                    onStop = onStop,
+                    onTogglePause = onTogglePause,
+                    onToggleMic = onToggleMic,
+                    onToggleForceListen = onToggleForceListen,
+                )
+            }
+        }
+    }
+}
 
+@Composable
+private fun VideoPreview(
+    state: AppUiState,
+    cameraPermissionGranted: Boolean,
+    showCameraPreview: Boolean,
+    lensFacing: Int,
+    onSwitchCamera: () -> Unit,
+    onFrame: (String) -> Unit,
+    onCameraError: (String) -> Unit,
+    showTranscriptOverlay: Boolean,
+    showStatusPill: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(28.dp))
+            .background(colors.surfaceContainerHigh)
+            .border(1.dp, colors.outlineVariant, RoundedCornerShape(28.dp)),
+    ) {
+        if (showCameraPreview) {
+            NativeCameraPreview(
+                lensFacing = lensFacing,
+                onFrame = onFrame,
+                onError = onCameraError,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Icon(
+                    Icons.Rounded.CameraAlt,
+                    contentDescription = null,
+                    tint = colors.primary,
+                    modifier = Modifier.size(48.dp),
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = when {
+                        state.phase == SessionPhase.PAUSED -> "摄像头已暂停，点击“继续”恢复"
+                        state.hasActiveSession && !cameraPermissionGranted -> {
+                            "需要摄像头权限才能继续视频会话"
+                        }
+
+                        else -> "开始视频会话后启用摄像头"
+                    },
+                    color = colors.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 24.dp),
+                )
+            }
+        }
+
+        if (showCameraPreview) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
                             listOf(
-                                MonitorInk.copy(alpha = 0.68f),
+                                Color.Black.copy(alpha = 0.48f),
                                 Color.Transparent,
-                                MonitorInk.copy(alpha = 0.88f),
+                                Color.Black.copy(alpha = 0.72f),
                             ),
                         ),
                     ),
             )
+        }
+        if (showStatusPill) {
             StatusPill(
                 state = state,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(16.dp),
             )
+        }
+        if (showCameraPreview) {
             IconButton(
-                onClick = {
-                    lensFacing = if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
-                        CameraSelector.LENS_FACING_BACK
-                    } else {
-                        CameraSelector.LENS_FACING_FRONT
-                    }
-                },
-                enabled = cameraPermissionGranted,
+                onClick = onSwitchCamera,
                 colors = IconButtonDefaults.iconButtonColors(
-                    containerColor = MonitorInk.copy(alpha = 0.66f),
-                    contentColor = MonitorPaper,
+                    containerColor = Color.Black.copy(alpha = 0.58f),
+                    contentColor = Color.White,
                 ),
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(12.dp)
                     .size(48.dp)
-                    .border(1.dp, MonitorOutline, RoundedCornerShape(16.dp)),
+                    .border(
+                        1.dp,
+                        Color.White.copy(alpha = 0.34f),
+                        RoundedCornerShape(16.dp),
+                    ),
             ) {
                 Icon(Icons.Rounded.Cameraswitch, contentDescription = "切换摄像头")
             }
+        }
+        if (showTranscriptOverlay) {
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(16.dp),
             ) {
-                TranscriptPreview(state.messages)
+                TranscriptPreview(state.messages, overMedia = showCameraPreview)
             }
         }
-        Spacer(Modifier.height(12.dp))
-        DuplexControls(
-            state = state,
-            onStart = onStart,
-            onStop = onStop,
-            onTogglePause = onTogglePause,
-            onToggleMic = onToggleMic,
-            onToggleForceListen = onToggleForceListen,
-        )
     }
 }
 
 @Composable
-private fun StatusPill(state: AppUiState, modifier: Modifier = Modifier) {
+private fun StatusPill(
+    state: AppUiState,
+    modifier: Modifier = Modifier,
+) {
+    val visual = sessionStatusVisual(state)
     Surface(
-        color = MonitorInk.copy(alpha = 0.76f),
+        color = visual.containerColor,
+        contentColor = visual.contentColor,
         shape = CircleShape,
-        border = androidx.compose.foundation.BorderStroke(1.dp, statusColor(state.phase).copy(alpha = 0.55f)),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            visual.accentColor.copy(alpha = 0.55f),
+        ),
         modifier = modifier.semantics { liveRegion = LiveRegionMode.Polite },
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 13.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                Modifier
-                    .size(7.dp)
-                    .background(statusColor(state.phase), CircleShape),
+            Icon(
+                imageVector = visual.icon,
+                contentDescription = null,
+                tint = visual.contentColor,
+                modifier = Modifier.size(18.dp),
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = state.statusText.uppercase(Locale.getDefault()),
+                text = visual.label,
                 style = MaterialTheme.typography.labelMedium,
-                color = statusColor(state.phase),
+                color = visual.contentColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+    }
+}
+
+@Composable
+private fun CameraErrorBanner(message: String) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        color = colors.errorContainer,
+        contentColor = colors.onErrorContainer,
+        shape = RoundedCornerShape(16.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, colors.error.copy(alpha = 0.55f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.ErrorOutline,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("摄像头不可用", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionErrorBanner(
+    message: String,
+    onRetry: (() -> Unit)?,
+) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        color = colors.errorContainer,
+        contentColor = colors.onErrorContainer,
+        shape = RoundedCornerShape(16.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, colors.error.copy(alpha = 0.55f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.ErrorOutline,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text("陪伴暂时不可用", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+                onRetry?.let {
+                    TextButton(
+                        onClick = it,
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
+                    ) {
+                        Text("重新尝试")
+                    }
+                }
+            }
         }
     }
 }
@@ -1117,31 +1383,39 @@ private fun DuplexControls(
     onTogglePause: () -> Unit,
     onToggleMic: () -> Unit,
     onToggleForceListen: () -> Unit,
+    compact: Boolean = false,
 ) {
+    val colors = MaterialTheme.colorScheme
     Surface(
-        color = MonitorSurface,
+        color = colors.surfaceContainer,
         shape = RoundedCornerShape(24.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MonitorOutline),
+        border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = 8.dp),
     ) {
-        Column(Modifier.padding(12.dp)) {
+        Column(Modifier.padding(if (compact) 8.dp else 12.dp)) {
             if (!state.hasActiveSession) {
                 Button(
                     onClick = onStart,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 54.dp),
+                        .heightIn(min = if (compact) 48.dp else 54.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = MonitorSignal,
-                        contentColor = MonitorInk,
+                        containerColor = colors.primary,
+                        contentColor = colors.onPrimary,
                     ),
                     shape = RoundedCornerShape(16.dp),
                 ) {
                     Icon(Icons.Rounded.PlayArrow, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("开始${state.selectedMode.label}会话")
+                    Text(
+                        if (state.phase in setOf(SessionPhase.ERROR, SessionPhase.STOPPED)) {
+                            "重新开始${state.selectedMode.label}会话"
+                        } else {
+                            "开始${state.selectedMode.label}会话"
+                        },
+                    )
                 }
             } else {
                 FlowRow(
@@ -1153,6 +1427,7 @@ private fun DuplexControls(
                         icon = if (state.micEnabled) Icons.Rounded.Mic else Icons.Rounded.MicOff,
                         label = if (state.micEnabled) "静音" else "取消静音",
                         active = !state.micEnabled,
+                        showLabel = !compact,
                         onClick = onToggleMic,
                     )
                     RoundControl(
@@ -1160,6 +1435,7 @@ private fun DuplexControls(
                         label = if (state.phase == SessionPhase.PAUSED) "继续" else "暂停",
                         active = state.phase == SessionPhase.PAUSED,
                         enabled = state.phase in setOf(SessionPhase.LIVE, SessionPhase.PAUSED),
+                        showLabel = !compact,
                         onClick = onTogglePause,
                     )
                     RoundControl(
@@ -1167,6 +1443,7 @@ private fun DuplexControls(
                         label = "只听",
                         active = state.forceListen,
                         enabled = state.phase in setOf(SessionPhase.LIVE, SessionPhase.PAUSED),
+                        showLabel = !compact,
                         onClick = onToggleForceListen,
                     )
                     RoundControl(
@@ -1177,22 +1454,10 @@ private fun DuplexControls(
                             "结束"
                         },
                         danger = true,
+                        showLabel = !compact,
                         onClick = onStop,
                     )
                 }
-            }
-            if (state.lastLatencyMs != null || state.lastKvCacheLength != null) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = buildString {
-                        state.lastLatencyMs?.let { append("LATENCY ${it}MS") }
-                        if (state.lastLatencyMs != null && state.lastKvCacheLength != null) append("  ·  ")
-                        state.lastKvCacheLength?.let { append("KV $it") }
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MonitorMuted,
-                    modifier = Modifier.align(Alignment.CenterHorizontally),
-                )
             }
         }
     }
@@ -1205,32 +1470,41 @@ private fun RoundControl(
     active: Boolean = false,
     danger: Boolean = false,
     enabled: Boolean = true,
+    showLabel: Boolean = true,
     onClick: () -> Unit,
 ) {
+    val colors = MaterialTheme.colorScheme
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         FilledIconButton(
             onClick = onClick,
             enabled = enabled,
             colors = IconButtonDefaults.filledIconButtonColors(
                 containerColor = when {
-                    danger -> MonitorDanger.copy(alpha = 0.16f)
-                    active -> MonitorSignal
-                    else -> MonitorSurfaceRaised
+                    danger -> colors.errorContainer
+                    active -> colors.primaryContainer
+                    else -> colors.surfaceContainerHighest
                 },
                 contentColor = when {
-                    danger -> MonitorDanger
-                    active -> MonitorInk
-                    else -> MonitorPaper
+                    danger -> colors.onErrorContainer
+                    active -> colors.onPrimaryContainer
+                    else -> colors.onSurface
                 },
-                disabledContainerColor = MonitorSurfaceRaised.copy(alpha = 0.45f),
-                disabledContentColor = MonitorMuted.copy(alpha = 0.45f),
+                disabledContainerColor = colors.surfaceVariant,
+                disabledContentColor = colors.onSurfaceVariant.copy(alpha = 0.55f),
             ),
             modifier = Modifier.size(52.dp),
         ) {
             Icon(icon, contentDescription = label)
         }
-        Spacer(Modifier.height(4.dp))
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MonitorMuted)
+        if (showLabel) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }
 
@@ -1245,12 +1519,13 @@ private fun SettingsSheet(
     var error by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val colors = MaterialTheme.colorScheme
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = MonitorSurface,
-        contentColor = MonitorPaper,
+        containerColor = colors.surface,
+        contentColor = colors.onSurface,
         dragHandle = null,
     ) {
         LazyColumn(
@@ -1264,7 +1539,7 @@ private fun SettingsSheet(
                         Text(
                             "Realtime API 连接与生成参数",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MonitorMuted,
+                            color = colors.onSurfaceVariant,
                         )
                     }
                     IconButton(onClick = onDismiss, modifier = Modifier.size(48.dp)) {
@@ -1301,7 +1576,7 @@ private fun SettingsSheet(
                         Text(
                             String.format(Locale.US, "%.1f", draft.lengthPenalty),
                             style = MaterialTheme.typography.labelMedium,
-                            color = MonitorSignal,
+                            color = colors.primary,
                         )
                     }
                     Slider(
@@ -1322,7 +1597,7 @@ private fun SettingsSheet(
                         Text(
                             "播放服务端返回的 24 kHz 流式音频",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MonitorMuted,
+                            color = colors.onSurfaceVariant,
                         )
                     }
                     Switch(
@@ -1331,22 +1606,22 @@ private fun SettingsSheet(
                     )
                 }
             }
-            item { HorizontalDivider(color = MonitorOutline) }
+            item { HorizontalDivider(color = colors.outlineVariant) }
             item {
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = MonitorSurfaceRaised),
+                    colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerHigh),
                     shape = RoundedCornerShape(18.dp),
                 ) {
                     Row(
                         modifier = Modifier.padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = MonitorSignal)
+                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = colors.primary)
                         Spacer(Modifier.width(12.dp))
                         Text(
                             "官方公网服务当前无需 API Key。应用不会写入或上传额外凭据。",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MonitorMuted,
+                            color = colors.onSurfaceVariant,
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -1356,15 +1631,15 @@ private fun SettingsSheet(
                 item {
                     Text(
                         text = message,
-                        color = MonitorDanger,
+                        color = colors.error,
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
             }
             item {
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     TextButton(
                         onClick = {
@@ -1375,7 +1650,9 @@ private fun SettingsSheet(
                                 ),
                             )
                         },
-                        modifier = Modifier.heightIn(min = 52.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 52.dp),
                     ) {
                         Text("API 文档")
                         Spacer(Modifier.width(6.dp))
@@ -1390,12 +1667,12 @@ private fun SettingsSheet(
                             error = onSave(draft)
                         },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = MonitorSignal,
-                            contentColor = MonitorInk,
+                            containerColor = colors.primary,
+                            contentColor = colors.onPrimary,
                         ),
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
-                            .weight(1f)
+                            .fillMaxWidth()
                             .heightIn(min = 52.dp),
                     ) {
                         Text("保存设置")
@@ -1419,11 +1696,166 @@ private fun preferredMode(allowedModes: Set<RealtimeMode>): RealtimeMode? = when
     else -> null
 }
 
-private fun statusColor(phase: SessionPhase): Color = when (phase) {
-    SessionPhase.LIVE -> MonitorSignal
-    SessionPhase.CONNECTING, SessionPhase.QUEUED, SessionPhase.PREPARING -> Color(0xFFFFCB69)
-    SessionPhase.ERROR -> MonitorDanger
-    SessionPhase.PAUSED, SessionPhase.IDLE, SessionPhase.STOPPED -> MonitorMuted
+private data class SessionStatusVisual(
+    val label: String,
+    val icon: ImageVector,
+    val containerColor: Color,
+    val contentColor: Color,
+    val accentColor: Color,
+)
+
+private data class CompanionPrompt(
+    val title: String,
+    val description: String,
+)
+
+private fun companionPrompt(state: AppUiState): CompanionPrompt {
+    if (state.phase == SessionPhase.LIVE && !state.micEnabled) {
+        return CompanionPrompt(
+            title = "麦克风已静音",
+            description = "不会发送声音，点击“取消静音”后继续聊天",
+        )
+    }
+    return when (state.phase) {
+        SessionPhase.LIVE -> when (state.duplexActivity) {
+            DuplexActivity.READY -> CompanionPrompt(
+                title = "陪伴已经准备好",
+                description = "可以直接说话，我会一直在这里听你",
+            )
+
+            DuplexActivity.LISTENING -> CompanionPrompt(
+                title = "我正在听你说",
+                description = "自然说话就好，不需要按住任何按钮",
+            )
+
+            DuplexActivity.RESPONDING -> CompanionPrompt(
+                title = "正在为你回答",
+                description = "我说完后会继续听你说",
+            )
+        }
+
+        SessionPhase.CONNECTING, SessionPhase.QUEUED, SessionPhase.PREPARING -> CompanionPrompt(
+            title = "正在连接，请稍候",
+            description = "连接完成后就可以开始聊天",
+        )
+
+        SessionPhase.PAUSED -> CompanionPrompt(
+            title = "陪伴已经暂停",
+            description = "麦克风和摄像头已停止，点击“继续”恢复",
+        )
+
+        SessionPhase.ERROR -> CompanionPrompt(
+            title = "暂时无法开始陪伴",
+            description = "请查看下方原因并重新尝试",
+        )
+
+        SessionPhase.STOPPED -> CompanionPrompt(
+            title = "本次陪伴已经结束",
+            description = "想继续聊天时，可以重新开始",
+        )
+
+        SessionPhase.IDLE -> CompanionPrompt(
+            title = "我在这里，随时陪你聊聊",
+            description = "点击下方按钮后，直接对我说话就好",
+        )
+    }
+}
+
+@Composable
+private fun sessionStatusVisual(state: AppUiState): SessionStatusVisual {
+    val colors = MaterialTheme.colorScheme
+    if (state.phase == SessionPhase.LIVE && !state.micEnabled) {
+        return SessionStatusVisual(
+            label = "已静音，不发送声音",
+            icon = Icons.Rounded.MicOff,
+            containerColor = colors.tertiaryContainer,
+            contentColor = colors.onTertiaryContainer,
+            accentColor = colors.tertiary,
+        )
+    }
+    return when (state.phase) {
+        SessionPhase.LIVE -> when (state.duplexActivity) {
+            DuplexActivity.READY -> SessionStatusVisual(
+                label = "实时会话已就绪",
+                icon = Icons.Rounded.CheckCircle,
+                containerColor = colors.primaryContainer,
+                contentColor = colors.onPrimaryContainer,
+                accentColor = colors.primary,
+            )
+
+            DuplexActivity.LISTENING -> SessionStatusVisual(
+                label = "正在聆听",
+                icon = Icons.Rounded.Hearing,
+                containerColor = colors.primaryContainer,
+                contentColor = colors.onPrimaryContainer,
+                accentColor = colors.primary,
+            )
+
+            DuplexActivity.RESPONDING -> SessionStatusVisual(
+                label = "正在回应",
+                icon = Icons.AutoMirrored.Rounded.VolumeUp,
+                containerColor = colors.secondaryContainer,
+                contentColor = colors.onSecondaryContainer,
+                accentColor = colors.secondary,
+            )
+        }
+
+        SessionPhase.CONNECTING -> SessionStatusVisual(
+            label = "正在连接服务",
+            icon = Icons.Rounded.GraphicEq,
+            containerColor = colors.tertiaryContainer,
+            contentColor = colors.onTertiaryContainer,
+            accentColor = colors.tertiary,
+        )
+
+        SessionPhase.QUEUED -> SessionStatusVisual(
+            label = "正在等待服务",
+            icon = Icons.Rounded.GraphicEq,
+            containerColor = colors.tertiaryContainer,
+            contentColor = colors.onTertiaryContainer,
+            accentColor = colors.tertiary,
+        )
+
+        SessionPhase.PREPARING -> SessionStatusVisual(
+            label = "正在准备会话",
+            icon = Icons.Rounded.GraphicEq,
+            containerColor = colors.tertiaryContainer,
+            contentColor = colors.onTertiaryContainer,
+            accentColor = colors.tertiary,
+        )
+
+        SessionPhase.ERROR -> SessionStatusVisual(
+            label = "会话异常",
+            icon = Icons.Rounded.ErrorOutline,
+            containerColor = colors.errorContainer,
+            contentColor = colors.onErrorContainer,
+            accentColor = colors.error,
+        )
+
+        SessionPhase.PAUSED -> SessionStatusVisual(
+            label = "会话已暂停",
+            icon = Icons.Rounded.Pause,
+            containerColor = colors.surfaceVariant,
+            contentColor = colors.onSurfaceVariant,
+            accentColor = colors.onSurfaceVariant,
+        )
+
+        SessionPhase.IDLE -> SessionStatusVisual(
+            label = "随时可以开始",
+            icon = Icons.Rounded.PlayArrow,
+            containerColor = colors.surfaceContainerHigh,
+            contentColor = colors.onSurface,
+            accentColor = colors.onSurfaceVariant,
+        )
+
+        SessionPhase.STOPPED -> SessionStatusVisual(
+            label = "会话已结束",
+            icon = Icons.Rounded.Stop,
+            containerColor = colors.surfaceContainerHigh,
+            contentColor = colors.onSurface,
+            accentColor = colors.onSurfaceVariant,
+        )
+    }
 }
 
 private fun android.content.Context.hasPermission(permission: String): Boolean =

@@ -17,6 +17,12 @@ enum class SessionPhase {
     ERROR,
 }
 
+enum class DuplexActivity {
+    READY,
+    LISTENING,
+    RESPONDING,
+}
+
 enum class MessageRole {
     USER,
     ASSISTANT,
@@ -41,6 +47,7 @@ data class SessionSettings(
 data class AppUiState(
     val selectedMode: RealtimeMode = RealtimeMode.CHAT,
     val phase: SessionPhase = SessionPhase.IDLE,
+    val duplexActivity: DuplexActivity = DuplexActivity.READY,
     val statusText: String = "准备就绪",
     val serviceAvailable: Boolean? = null,
     val messages: List<ConversationMessage> = emptyList(),
@@ -50,6 +57,8 @@ data class AppUiState(
     val micEnabled: Boolean = true,
     val forceListen: Boolean = false,
     val audioLevel: Float = 0f,
+    val cameraError: String? = null,
+    val mediaError: String? = null,
     val queuePosition: Int? = null,
     val queueWaitSeconds: Int? = null,
     val sessionId: String? = null,

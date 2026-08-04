@@ -134,7 +134,6 @@ import com.sun.minicpmo_android.lighthouse.realtime.LiveCallState
 import com.sun.minicpmo_android.lighthouse.realtime.presentFamilyCall
 import com.sun.minicpmo_android.ui.MiniCpmRoute
 import com.sun.minicpmo_android.model.RealtimeMode
-import com.sun.minicpmo_android.ui.theme.MinicpmoAndroidTheme
 import kotlinx.coroutines.launch
 import livekit.org.webrtc.SurfaceViewRenderer
 import java.util.Locale
@@ -270,49 +269,47 @@ fun LighthouseRoute(
     }
 
     if (state.aiScreenVisible) {
-        MinicpmoAndroidTheme {
-            val incoming = state.incomingRemoteSession
+        val incoming = state.incomingRemoteSession
 
-            Box(Modifier.fillMaxSize()) {
-                if (remoteHandoffInProgress) {
-                    LoadingScreen("正在安全切换到家属通话")
-                } else {
-                    MiniCpmRoute(
-                        miniCpmViewModel,
-                        onExit = viewModel::closeAiCompanion,
-                        allowedModes = setOf(RealtimeMode.AUDIO, RealtimeMode.VIDEO),
-                    )
-                }
-
-                incoming?.let {
-                    IncomingCallDialog(
-                        onAccept = {
-                            val permissions = buildList {
-                                if (incoming.media.receiveDeviceAudio) {
-                                    add(Manifest.permission.RECORD_AUDIO)
-                                }
-                                if (incoming.media.receiveDeviceVideo) {
-                                    add(Manifest.permission.CAMERA)
-                                }
-                            }
-                            withPermissions(permissions) {
-                                viewModel.acceptIncomingCall()
-                            }
-                        },
-                        onDecline = viewModel::declineIncomingCall,
-                        acceptEnabled = !remoteHandoffInProgress,
-                        declineEnabled = !remoteHandoffInProgress,
-                        accepting = remoteHandoffInProgress,
-                    )
-                }
-
-                SnackbarHost(
-                    hostState = snackbar,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(16.dp),
+        Box(Modifier.fillMaxSize()) {
+            if (remoteHandoffInProgress) {
+                LoadingScreen("正在安全切换到家属通话")
+            } else {
+                MiniCpmRoute(
+                    miniCpmViewModel,
+                    onExit = viewModel::closeAiCompanion,
+                    allowedModes = setOf(RealtimeMode.AUDIO, RealtimeMode.VIDEO),
                 )
             }
+
+            incoming?.let {
+                IncomingCallDialog(
+                    onAccept = {
+                        val permissions = buildList {
+                            if (incoming.media.receiveDeviceAudio) {
+                                add(Manifest.permission.RECORD_AUDIO)
+                            }
+                            if (incoming.media.receiveDeviceVideo) {
+                                add(Manifest.permission.CAMERA)
+                            }
+                        }
+                        withPermissions(permissions) {
+                            viewModel.acceptIncomingCall()
+                        }
+                    },
+                    onDecline = viewModel::declineIncomingCall,
+                    acceptEnabled = !remoteHandoffInProgress,
+                    declineEnabled = !remoteHandoffInProgress,
+                    accepting = remoteHandoffInProgress,
+                )
+            }
+
+            SnackbarHost(
+                hostState = snackbar,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp),
+            )
         }
         return
     }

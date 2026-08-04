@@ -7,45 +7,6 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-private val MonitorColorScheme = darkColorScheme(
-    primary = MonitorSignal,
-    onPrimary = Color(0xFF003543),
-    primaryContainer = MonitorSignalDark,
-    onPrimaryContainer = MonitorPrimaryContainerText,
-    inversePrimary = LighthouseBlue,
-    secondary = MonitorCare,
-    onSecondary = Color(0xFF073820),
-    secondaryContainer = MonitorSecondaryContainer,
-    onSecondaryContainer = MonitorOnSecondaryContainer,
-    tertiary = MonitorTertiary,
-    onTertiary = Color(0xFF003735),
-    tertiaryContainer = MonitorTertiaryContainer,
-    onTertiaryContainer = MonitorOnTertiaryContainer,
-    background = MonitorInk,
-    onBackground = MonitorPaper,
-    surface = MonitorSurface,
-    onSurface = MonitorPaper,
-    surfaceVariant = MonitorSurfaceRaised,
-    onSurfaceVariant = MonitorMuted,
-    surfaceTint = MonitorSignal,
-    inverseSurface = MonitorPaper,
-    inverseOnSurface = MonitorInk,
-    error = MonitorDanger,
-    onError = LighthouseDarkOnError,
-    errorContainer = LighthouseDarkErrorContainer,
-    onErrorContainer = LighthouseDarkOnErrorContainer,
-    outline = MonitorOutline,
-    outlineVariant = MonitorOutlineVariant,
-    scrim = Color.Black,
-    surfaceBright = MonitorSurfaceBright,
-    surfaceDim = MonitorSurfaceDim,
-    surfaceContainerLowest = MonitorSurfaceContainerLowest,
-    surfaceContainerLow = MonitorSurfaceContainerLow,
-    surfaceContainer = MonitorSurface,
-    surfaceContainerHigh = MonitorSurfaceContainerHigh,
-    surfaceContainerHighest = MonitorSurfaceContainerHighest,
-)
-
 private val LighthouseLightColorScheme = lightColorScheme(
     primary = LighthouseBlue,
     onPrimary = LighthouseSurface,
@@ -131,16 +92,6 @@ fun LighthouseTheme(
 ) {
     MaterialTheme(
         colorScheme = if (darkTheme) LighthouseDarkColorScheme else LighthouseLightColorScheme,
-        typography = Typography,
-        shapes = LighthouseShapes,
-        content = content,
-    )
-}
-
-@Composable
-fun MinicpmoAndroidTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = MonitorColorScheme,
         typography = Typography,
         shapes = LighthouseShapes,
         content = content,

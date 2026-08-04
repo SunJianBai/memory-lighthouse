@@ -9,6 +9,8 @@ import androidx.activity.viewModels
 import com.sun.minicpmo_android.lighthouse.LighthouseViewModel
 import com.sun.minicpmo_android.lighthouse.call.CompanionCallService
 import com.sun.minicpmo_android.lighthouse.ui.LighthouseRoute
+import com.sun.minicpmo_android.model.RealtimeMode
+import com.sun.minicpmo_android.ui.MiniCpmRoute
 import com.sun.minicpmo_android.ui.theme.LighthouseTheme
 
 class MainActivity : ComponentActivity() {
@@ -25,9 +27,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val showAiCompanionPreview = BuildConfig.DEBUG &&
+            intent.getBooleanExtra(EXTRA_DEBUG_AI_COMPANION, false)
         setContent {
             LighthouseTheme {
-                LighthouseRoute(lighthouseViewModel, miniCpmViewModel)
+                if (showAiCompanionPreview) {
+                    MiniCpmRoute(
+                        viewModel = miniCpmViewModel,
+                        onExit = ::finish,
+                        allowedModes = setOf(RealtimeMode.AUDIO, RealtimeMode.VIDEO),
+                    )
+                } else {
+                    LighthouseRoute(lighthouseViewModel, miniCpmViewModel)
+                }
             }
         }
         handleIntent(intent)
@@ -45,5 +57,9 @@ class MainActivity : ComponentActivity() {
             value?.action,
             value?.getStringExtra(CompanionCallService.EXTRA_SESSION_ID),
         )
+    }
+
+    private companion object {
+        const val EXTRA_DEBUG_AI_COMPANION = "debug_ai_companion"
     }
 }

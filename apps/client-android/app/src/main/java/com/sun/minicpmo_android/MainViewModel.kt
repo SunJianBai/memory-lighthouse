@@ -10,6 +10,7 @@ import com.sun.minicpmo_android.lighthouse.model.CompanionModelConnection
 import com.sun.minicpmo_android.media.DuplexAudioEngine
 import com.sun.minicpmo_android.model.AppUiState
 import com.sun.minicpmo_android.model.ConversationMessage
+import com.sun.minicpmo_android.model.DuplexActivity
 import com.sun.minicpmo_android.model.MessageRole
 import com.sun.minicpmo_android.model.RealtimeMode
 import com.sun.minicpmo_android.model.SessionPhase
@@ -20,6 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -34,7 +36,11 @@ class MainViewModel(
 ) : ViewModel(), RealtimeApiClient.Listener {
     private val nextMessageId = AtomicLong(1)
     private val latestVideoFrame = AtomicReference<String?>(null)
+    private val mediaGeneration = AtomicLong(0)
+    private val connectionGeneration = AtomicLong(0)
+    private val mediaStateLock = Any()
     private var pendingChat: String? = null
+    @Volatile
     private var stoppedByUser = false
     private var companionConnection: CompanionModelConnection? = null
     private var firstResponseReported = false
@@ -51,25 +57,30 @@ class MainViewModel(
     fun selectMode(mode: RealtimeMode) {
         if (mode == _uiState.value.selectedMode) return
         stopSession(quiet = true)
-        _uiState.value = _uiState.value.copy(
-            selectedMode = mode,
-            phase = SessionPhase.IDLE,
-            statusText = when (mode) {
-                RealtimeMode.CHAT -> "输入消息开始对话"
-                RealtimeMode.AUDIO -> "准备开始语音双工"
-                RealtimeMode.VIDEO -> "准备开始视频双工"
-            },
-            messages = emptyList(),
-            queuePosition = null,
-            queueWaitSeconds = null,
-            sessionId = null,
-            forceListen = false,
-            audioLevel = 0f,
-        )
+        _uiState.update { current ->
+            current.copy(
+                selectedMode = mode,
+                phase = SessionPhase.IDLE,
+                duplexActivity = DuplexActivity.READY,
+                statusText = when (mode) {
+                    RealtimeMode.CHAT -> "输入消息开始对话"
+                    RealtimeMode.AUDIO -> "准备开始语音双工"
+                    RealtimeMode.VIDEO -> "准备开始视频双工"
+                },
+                messages = emptyList(),
+                queuePosition = null,
+                queueWaitSeconds = null,
+                sessionId = null,
+                forceListen = false,
+                audioLevel = 0f,
+                cameraError = null,
+                mediaError = null,
+            )
+        }
     }
 
     fun updateComposer(text: String) {
-        _uiState.value = _uiState.value.copy(composerText = text)
+        _uiState.update { current -> current.copy(composerText = text) }
     }
 
     fun sendChat() {
@@ -78,7 +89,7 @@ class MainViewModel(
         if (text.isEmpty() || state.selectedMode != RealtimeMode.CHAT) return
 
         addMessage(MessageRole.USER, text)
-        _uiState.value = _uiState.value.copy(composerText = "")
+        _uiState.update { current -> current.copy(composerText = "") }
         if (realtimeClient.isSessionReady) {
             if (!realtimeClient.sendChat(
                     text,
@@ -101,21 +112,29 @@ class MainViewModel(
     }
 
     fun stopSession(quiet: Boolean = false) {
-        stoppedByUser = true
         pendingChat = null
+        synchronized(mediaStateLock) {
+            stoppedByUser = true
+            mediaGeneration.incrementAndGet()
+            connectionGeneration.incrementAndGet()
+            _uiState.update { current ->
+                current.copy(
+                    phase = if (quiet) SessionPhase.IDLE else SessionPhase.STOPPED,
+                    duplexActivity = DuplexActivity.READY,
+                    statusText = if (quiet) "准备就绪" else "会话已结束",
+                    queuePosition = null,
+                    queueWaitSeconds = null,
+                    sessionId = null,
+                    audioLevel = 0f,
+                    forceListen = false,
+                    mediaError = null,
+                )
+            }
+        }
+        latestVideoFrame.set(null)
         audioEngine.stop()
         realtimeClient.close("user_stop")
-        latestVideoFrame.set(null)
         finishCompanion("DEVICE_ENDED")
-        _uiState.value = _uiState.value.copy(
-            phase = if (quiet) SessionPhase.IDLE else SessionPhase.STOPPED,
-            statusText = if (quiet) "准备就绪" else "会话已结束",
-            queuePosition = null,
-            queueWaitSeconds = null,
-            sessionId = null,
-            audioLevel = 0f,
-            forceListen = false,
-        )
     }
 
     /** Stops local capture/provider and confirms the server model is closed. */
@@ -149,73 +168,139 @@ class MainViewModel(
     }
 
     private fun stopLocalCompanionForHandoff(): CompanionModelConnection? {
-        stoppedByUser = true
         pendingChat = null
         val connection = companionConnection
         companionConnection = null
+        synchronized(mediaStateLock) {
+            stoppedByUser = true
+            mediaGeneration.incrementAndGet()
+            connectionGeneration.incrementAndGet()
+            _uiState.update { current ->
+                current.copy(
+                    phase = SessionPhase.STOPPED,
+                    duplexActivity = DuplexActivity.READY,
+                    statusText = "正在切换到家属通话",
+                    queuePosition = null,
+                    queueWaitSeconds = null,
+                    sessionId = null,
+                    audioLevel = 0f,
+                    forceListen = false,
+                )
+            }
+        }
+        latestVideoFrame.set(null)
         audioEngine.stop()
         realtimeClient.close("remote_call")
-        latestVideoFrame.set(null)
-        _uiState.value = _uiState.value.copy(
-            phase = SessionPhase.STOPPED,
-            statusText = "正在切换到家属通话",
-            queuePosition = null,
-            queueWaitSeconds = null,
-            sessionId = null,
-            audioLevel = 0f,
-            forceListen = false,
-        )
         return connection
     }
 
     fun togglePause() {
-        val state = _uiState.value
-        when (state.phase) {
-            SessionPhase.LIVE -> {
-                audioEngine.clearPlayback()
-                _uiState.value = state.copy(
-                    phase = SessionPhase.PAUSED,
-                    statusText = "会话已暂停",
-                    audioLevel = 0f,
-                )
+        var stopCapture = false
+        var startCapture = false
+        synchronized(mediaStateLock) {
+            val state = _uiState.value
+            when (state.phase) {
+                SessionPhase.LIVE -> {
+                    mediaGeneration.incrementAndGet()
+                    _uiState.value = state.copy(
+                        phase = SessionPhase.PAUSED,
+                        duplexActivity = DuplexActivity.READY,
+                        statusText = "已暂停传输，麦克风和摄像头已停止",
+                        audioLevel = 0f,
+                    )
+                    stopCapture = true
+                }
+
+                SessionPhase.PAUSED -> {
+                    _uiState.value = state.copy(
+                        phase = SessionPhase.LIVE,
+                        duplexActivity = DuplexActivity.LISTENING,
+                        statusText = if (state.micEnabled) {
+                            "正在聆听"
+                        } else {
+                            "麦克风已静音，不发送声音"
+                        },
+                        audioLevel = 0f,
+                    )
+                    startCapture = true
+                }
+
+                else -> Unit
             }
-
-            SessionPhase.PAUSED -> _uiState.value = state.copy(
-                phase = SessionPhase.LIVE,
-                statusText = "会话进行中",
-            )
-
-            else -> Unit
+        }
+        if (stopCapture) {
+            latestVideoFrame.set(null)
+            audioEngine.stop()
+        } else if (startCapture) {
+            startDuplexMedia()
         }
     }
 
     fun toggleMic() {
-        _uiState.value = _uiState.value.copy(micEnabled = !_uiState.value.micEnabled)
+        synchronized(mediaStateLock) {
+            val state = _uiState.value
+            val enabled = !state.micEnabled
+            _uiState.value = state.copy(
+                micEnabled = enabled,
+                audioLevel = if (enabled) state.audioLevel else 0f,
+                statusText = when {
+                    !enabled -> "麦克风已静音，不发送声音"
+                    state.phase == SessionPhase.PAUSED -> "会话已暂停"
+                    state.duplexActivity == DuplexActivity.RESPONDING -> "MiniCPM-o 正在回答"
+                    else -> "正在聆听"
+                },
+            )
+        }
     }
 
     fun toggleForceListen() {
-        val active = !_uiState.value.forceListen
-        if (active) audioEngine.clearPlayback()
-        _uiState.value = _uiState.value.copy(
-            forceListen = active,
-            statusText = if (active) "强制聆听已开启" else "会话进行中",
-        )
+        synchronized(mediaStateLock) {
+            val state = _uiState.value
+            val active = !state.forceListen
+            if (active) audioEngine.clearPlayback()
+            _uiState.value = state.copy(
+                forceListen = active,
+                duplexActivity = if (state.phase == SessionPhase.LIVE) {
+                    DuplexActivity.LISTENING
+                } else {
+                    state.duplexActivity
+                },
+                statusText = when {
+                    state.phase == SessionPhase.PAUSED -> "会话已暂停"
+                    !state.micEnabled -> "麦克风已静音，不发送声音"
+                    active -> "强制聆听已开启"
+                    else -> "正在聆听"
+                },
+            )
+        }
     }
 
     fun onVideoFrame(base64Jpeg: String) {
-        latestVideoFrame.set(base64Jpeg)
+        if (base64Jpeg.isBlank()) return
+        synchronized(mediaStateLock) {
+            if (_uiState.value.phase != SessionPhase.LIVE) return
+            latestVideoFrame.set(base64Jpeg)
+            _uiState.update { current ->
+                if (current.cameraError == null) current else current.copy(cameraError = null)
+            }
+        }
     }
 
     fun onCameraError(message: String) {
-        addSystemMessage("摄像头：$message")
+        val cameraError = message.trim().ifEmpty { "摄像头不可用" }
+        val isNew = _uiState.value.cameraError != cameraError
+        _uiState.update { current -> current.copy(cameraError = cameraError) }
+        if (isNew) {
+            addSystemMessage("摄像头：$cameraError")
+        }
     }
 
     fun setSettingsVisible(visible: Boolean) {
-        _uiState.value = _uiState.value.copy(settingsVisible = visible)
+        _uiState.update { current -> current.copy(settingsVisible = visible) }
     }
 
     fun updateSettings(settings: SessionSettings) {
-        _uiState.value = _uiState.value.copy(settings = settings)
+        _uiState.update { current -> current.copy(settings = settings) }
     }
 
     fun saveSettings(): String? {
@@ -232,21 +317,23 @@ class MainViewModel(
 
         if (_uiState.value.hasActiveSession) stopSession(quiet = true)
         settingsRepository.save(settings)
-        _uiState.value = _uiState.value.copy(
-            settings = settings,
-            settingsVisible = false,
-        )
+        _uiState.update { current ->
+            current.copy(settings = settings, settingsVisible = false)
+        }
         refreshServiceStatus()
         return null
     }
 
     fun clearConversation() {
         if (_uiState.value.hasActiveSession) stopSession(quiet = true)
-        _uiState.value = _uiState.value.copy(
-            messages = emptyList(),
-            phase = SessionPhase.IDLE,
-            statusText = "对话已清空",
-        )
+        _uiState.update { current ->
+            current.copy(
+                messages = emptyList(),
+                phase = SessionPhase.IDLE,
+                duplexActivity = DuplexActivity.READY,
+                statusText = "对话已清空",
+            )
+        }
     }
 
     fun onAppBackgrounded() {
@@ -257,90 +344,190 @@ class MainViewModel(
         val host = _uiState.value.settings.apiHost
         viewModelScope.launch {
             val available = realtimeClient.isServiceAvailable(host)
-            _uiState.value = _uiState.value.copy(serviceAvailable = available)
+            _uiState.update { current -> current.copy(serviceAvailable = available) }
         }
     }
 
     private fun connect(mode: RealtimeMode) {
-        stoppedByUser = false
-        _uiState.value = _uiState.value.copy(
-            phase = SessionPhase.CONNECTING,
-            statusText = "正在连接服务",
-            queuePosition = null,
-            queueWaitSeconds = null,
-        )
+        latestVideoFrame.set(null)
+        val attemptGeneration = synchronized(mediaStateLock) {
+            stoppedByUser = false
+            companionConnection = null
+            mediaGeneration.incrementAndGet()
+            val generation = connectionGeneration.incrementAndGet()
+            _uiState.update { current ->
+                current.copy(
+                    phase = SessionPhase.CONNECTING,
+                    duplexActivity = DuplexActivity.READY,
+                    statusText = "正在连接服务",
+                    cameraError = null,
+                    mediaError = null,
+                    forceListen = false,
+                    audioLevel = 0f,
+                    queuePosition = null,
+                    queueWaitSeconds = null,
+                )
+            }
+            generation
+        }
+        audioEngine.stop()
         viewModelScope.launch {
             runCatching {
-                val connection = companionBridge?.let { bridge ->
-                    bridge.prepare(mode).also {
-                        companionConnection = it
+                val bridge = companionBridge
+                val connection = bridge?.prepare(mode)
+                val accepted = synchronized(mediaStateLock) {
+                    if (!isConnectionAttemptCurrent(attemptGeneration)) {
+                        false
+                    } else {
+                        companionConnection = connection
                         firstResponseReported = false
-                        _uiState.value = _uiState.value.copy(
-                            settings = _uiState.value.settings.copy(
-                                apiHost = it.realtimeUrl,
-                                systemPrompt = it.systemPrompt,
-                            ),
-                        )
-                        bridge.event(it, "CONNECTING")
+                        connection?.let { prepared ->
+                            _uiState.update { current ->
+                                current.copy(
+                                    settings = current.settings.copy(
+                                        apiHost = prepared.realtimeUrl,
+                                        systemPrompt = prepared.systemPrompt,
+                                    ),
+                                )
+                            }
+                        }
+                        true
                     }
                 }
-                realtimeClient.connect(
-                    mode,
-                    connection?.let {
-                        _uiState.value.settings.copy(
-                            apiHost = it.realtimeUrl,
-                            systemPrompt = it.systemPrompt,
+                if (!accepted) {
+                    if (bridge != null && connection != null) {
+                        runCatching { bridge.end(connection, "DEVICE_ENDED") }
+                    }
+                    return@runCatching
+                }
+                if (bridge != null && connection != null) {
+                    bridge.event(connection, "CONNECTING")
+                }
+                val connected = synchronized(mediaStateLock) {
+                    if (!isConnectionAttemptCurrent(attemptGeneration)) {
+                        false
+                    } else {
+                        val currentSettings = _uiState.value.settings
+                        realtimeClient.connect(
+                            mode,
+                            connection?.let {
+                                currentSettings.copy(
+                                    apiHost = it.realtimeUrl,
+                                    systemPrompt = it.systemPrompt,
+                                )
+                            } ?: currentSettings,
+                            this@MainViewModel,
                         )
-                    } ?: _uiState.value.settings,
-                    this@MainViewModel,
-                )
-            }.onFailure { reportError(it.message ?: "连接参数无效") }
+                        true
+                    }
+                }
+                if (!connected) {
+                    if (bridge != null && connection != null) {
+                        runCatching { bridge.end(connection, "DEVICE_ENDED") }
+                    }
+                    return@runCatching
+                }
+            }.onFailure {
+                if (isConnectionAttemptCurrent(attemptGeneration)) {
+                    reportError(it.message ?: "连接参数无效")
+                }
+            }
         }
     }
 
+    private fun isConnectionAttemptCurrent(generation: Long): Boolean =
+        connectionGeneration.get() == generation &&
+            !stoppedByUser &&
+            _uiState.value.phase == SessionPhase.CONNECTING
+
     override fun onSocketOpen() {
-        _uiState.value = _uiState.value.copy(statusText = "已连接，等待服务分配")
+        if (stoppedByUser) return
+        _uiState.update { current ->
+            current.copy(
+                duplexActivity = DuplexActivity.READY,
+                statusText = "已连接，等待服务分配",
+            )
+        }
     }
 
     override fun onQueue(position: Int?, estimatedWaitSeconds: Int?) {
         reportCompanionEvent("QUEUED")
-        _uiState.value = _uiState.value.copy(
-            phase = SessionPhase.QUEUED,
-            statusText = buildString {
-                append("正在排队")
-                position?.let { append(" · 前方 $it 位") }
-                estimatedWaitSeconds?.let { append(" · 约 ${it}s") }
-            },
-            queuePosition = position,
-            queueWaitSeconds = estimatedWaitSeconds,
-        )
+        if (stoppedByUser) return
+        _uiState.update { current ->
+            current.copy(
+                phase = SessionPhase.QUEUED,
+                duplexActivity = DuplexActivity.READY,
+                statusText = buildString {
+                    append("正在排队")
+                    position?.let { append(" · 前方 $it 位") }
+                    estimatedWaitSeconds?.let { append(" · 约 ${it}s") }
+                },
+                queuePosition = position,
+                queueWaitSeconds = estimatedWaitSeconds,
+            )
+        }
     }
 
     override fun onQueueDone() {
-        _uiState.value = _uiState.value.copy(
-            phase = SessionPhase.PREPARING,
-            statusText = "Worker 已分配，正在初始化",
-            queuePosition = null,
-            queueWaitSeconds = null,
-        )
+        if (stoppedByUser) return
+        _uiState.update { current ->
+            current.copy(
+                phase = SessionPhase.PREPARING,
+                duplexActivity = DuplexActivity.READY,
+                statusText = "Worker 已分配，正在初始化",
+                queuePosition = null,
+                queueWaitSeconds = null,
+            )
+        }
     }
 
     override fun onSessionCreated(sessionId: String) {
+        val selectedMode = synchronized(mediaStateLock) {
+            val current = _uiState.value
+            if (
+                stoppedByUser ||
+                current.phase !in setOf(
+                    SessionPhase.CONNECTING,
+                    SessionPhase.QUEUED,
+                    SessionPhase.PREPARING,
+                )
+            ) {
+                return
+            }
+            val mode = current.selectedMode
+            _uiState.update { latest ->
+                latest.copy(
+                    phase = SessionPhase.LIVE,
+                    duplexActivity = if (mode == RealtimeMode.CHAT) {
+                        DuplexActivity.READY
+                    } else {
+                        DuplexActivity.LISTENING
+                    },
+                    statusText = if (mode == RealtimeMode.CHAT) {
+                        "模型已就绪"
+                    } else if (!latest.micEnabled) {
+                        "麦克风已静音，不发送声音"
+                    } else {
+                        "正在聆听"
+                    },
+                    sessionId = sessionId,
+                    mediaError = null,
+                )
+            }
+            mode
+        }
         reportCompanionEvent("CONNECTED")
-        _uiState.value = _uiState.value.copy(
-            phase = SessionPhase.LIVE,
-            statusText = if (_uiState.value.selectedMode == RealtimeMode.CHAT) {
-                "模型已就绪"
-            } else {
-                "会话进行中"
-            },
-            sessionId = sessionId,
-        )
 
-        if (_uiState.value.selectedMode == RealtimeMode.CHAT) {
+        if (selectedMode == RealtimeMode.CHAT) {
             if (_uiState.value.settings.chatTtsEnabled) {
-                runCatching { audioEngine.startPlayback() }
-                    .onFailure { addSystemMessage("音频播放不可用：${it.message}") }
+                runCatching {
+                    synchronized(mediaStateLock) {
+                        if (!stoppedByUser && _uiState.value.phase == SessionPhase.LIVE) {
+                            audioEngine.startPlayback()
+                        }
+                    }
+                }
+                    .onFailure { reportMediaError("音频播放不可用：${it.message}") }
             }
             pendingChat?.let { text ->
                 pendingChat = null
@@ -361,8 +548,19 @@ class MainViewModel(
     override fun onListen(metrics: JSONObject?) {
         finalizeStreamingMessage()
         updateMetrics(metrics)
-        if (_uiState.value.phase == SessionPhase.LIVE) {
-            _uiState.value = _uiState.value.copy(statusText = "正在聆听")
+        _uiState.update { current ->
+            if (current.phase != SessionPhase.LIVE) {
+                current
+            } else {
+                current.copy(
+                    duplexActivity = DuplexActivity.LISTENING,
+                    statusText = if (current.micEnabled) {
+                        "正在聆听"
+                    } else {
+                        "麦克风已静音，不发送声音"
+                    },
+                )
+            }
         }
     }
 
@@ -372,61 +570,113 @@ class MainViewModel(
             firstResponseReported = true
             reportCompanionEvent("FIRST_RESPONSE")
         }
-        val messages = _uiState.value.messages.toMutableList()
-        val lastIndex = messages.indexOfLast {
-            it.role == MessageRole.ASSISTANT && it.streaming &&
-                (responseId == null || it.responseId == null || it.responseId == responseId)
-        }
-        if (lastIndex >= 0) {
-            val previous = messages[lastIndex]
-            messages[lastIndex] = previous.copy(
-                text = previous.text + text,
-                responseId = responseId ?: previous.responseId,
+        val newMessageId = nextMessageId.getAndIncrement()
+        _uiState.update { current ->
+            val messages = current.messages.toMutableList()
+            val lastIndex = messages.indexOfLast {
+                it.role == MessageRole.ASSISTANT && it.streaming &&
+                    (responseId == null || it.responseId == null || it.responseId == responseId)
+            }
+            if (lastIndex >= 0) {
+                val previous = messages[lastIndex]
+                messages[lastIndex] = previous.copy(
+                    text = previous.text + text,
+                    responseId = responseId ?: previous.responseId,
+                )
+            } else {
+                messages += ConversationMessage(
+                    id = newMessageId,
+                    role = MessageRole.ASSISTANT,
+                    text = text,
+                    responseId = responseId,
+                    streaming = true,
+                )
+            }
+            current.copy(
+                messages = messages,
+                duplexActivity = if (current.phase == SessionPhase.LIVE) {
+                    DuplexActivity.RESPONDING
+                } else {
+                    current.duplexActivity
+                },
+                statusText = if (current.phase == SessionPhase.LIVE) {
+                    "MiniCPM-o 正在回答"
+                } else {
+                    current.statusText
+                },
             )
-        } else {
-            messages += ConversationMessage(
-                id = nextMessageId.getAndIncrement(),
-                role = MessageRole.ASSISTANT,
-                text = text,
-                responseId = responseId,
-                streaming = true,
-            )
         }
-        _uiState.value = _uiState.value.copy(
-            messages = messages,
-            statusText = "MiniCPM-o 正在回答",
-        )
     }
 
     override fun onAudioDelta(audioBase64: String) {
-        runCatching { audioEngine.enqueuePlayback(audioBase64) }
-            .onFailure { addSystemMessage("音频解码失败：${it.message}") }
+        if (audioBase64.isBlank()) return
+        synchronized(mediaStateLock) {
+            if (_uiState.value.phase != SessionPhase.LIVE) return
+            runCatching { audioEngine.enqueuePlayback(audioBase64) }
+                .onSuccess {
+                    _uiState.update { current ->
+                        if (
+                            current.phase == SessionPhase.LIVE &&
+                            current.duplexActivity != DuplexActivity.RESPONDING
+                        ) {
+                            current.copy(
+                                duplexActivity = DuplexActivity.RESPONDING,
+                                statusText = "MiniCPM-o 正在回答",
+                            )
+                        } else {
+                            current
+                        }
+                    }
+                }
+                .onFailure { reportMediaError("音频解码失败：${it.message}") }
+        }
     }
 
     override fun onResponseDone(text: String, responseId: String?) {
-        val messages = _uiState.value.messages.toMutableList()
-        val index = messages.indexOfLast {
-            it.role == MessageRole.ASSISTANT &&
-                (responseId == null || it.responseId == responseId)
-        }
-        if (index >= 0) {
-            val current = messages[index]
-            messages[index] = current.copy(
-                text = text.ifBlank { current.text },
-                streaming = false,
+        val newMessageId = nextMessageId.getAndIncrement()
+        _uiState.update { current ->
+            val messages = current.messages.toMutableList()
+            val index = messages.indexOfLast {
+                it.role == MessageRole.ASSISTANT &&
+                    (responseId == null || it.responseId == responseId)
+            }
+            if (index >= 0) {
+                val previous = messages[index]
+                messages[index] = previous.copy(
+                    text = text.ifBlank { previous.text },
+                    streaming = false,
+                )
+            } else if (text.isNotBlank()) {
+                messages += ConversationMessage(
+                    id = newMessageId,
+                    role = MessageRole.ASSISTANT,
+                    text = text,
+                    responseId = responseId,
+                )
+            }
+            val liveActivity = if (current.selectedMode == RealtimeMode.CHAT) {
+                DuplexActivity.READY
+            } else {
+                DuplexActivity.LISTENING
+            }
+            current.copy(
+                messages = messages,
+                duplexActivity = if (current.phase == SessionPhase.LIVE) {
+                    liveActivity
+                } else {
+                    current.duplexActivity
+                },
+                statusText = if (current.phase != SessionPhase.LIVE) {
+                    current.statusText
+                } else if (current.selectedMode == RealtimeMode.CHAT) {
+                    "模型已就绪"
+                } else if (!current.micEnabled) {
+                    "麦克风已静音，不发送声音"
+                } else {
+                    "正在聆听"
+                },
             )
-        } else if (text.isNotBlank()) {
-            messages += ConversationMessage(
-                id = nextMessageId.getAndIncrement(),
-                role = MessageRole.ASSISTANT,
-                text = text,
-                responseId = responseId,
-            )
         }
-        _uiState.value = _uiState.value.copy(
-            messages = messages,
-            statusText = "模型已就绪",
-        )
         val connection = companionConnection
         if (connection != null && text.isNotBlank()) {
             viewModelScope.launch {
@@ -446,20 +696,35 @@ class MainViewModel(
     }
 
     override fun onClosed(reason: String) {
-        audioEngine.stop()
         if (stoppedByUser) return
+        val closureMessage = when (reason) {
+            "timeout" -> "会话已达到时长上限"
+            else -> "会话已结束：$reason"
+        }
+        synchronized(mediaStateLock) {
+            mediaGeneration.incrementAndGet()
+            connectionGeneration.incrementAndGet()
+            _uiState.update { current ->
+                current.copy(
+                    phase = SessionPhase.STOPPED,
+                    duplexActivity = DuplexActivity.READY,
+                    statusText = closureMessage,
+                    mediaError = closureMessage,
+                    messages = current.messages.map {
+                        if (it.streaming) it.copy(streaming = false) else it
+                    },
+                    audioLevel = 0f,
+                    forceListen = false,
+                    queuePosition = null,
+                    queueWaitSeconds = null,
+                    sessionId = null,
+                )
+            }
+        }
+        latestVideoFrame.set(null)
+        audioEngine.stop()
         reportCompanionEvent("DISCONNECTED")
         finishCompanion(if (reason == "timeout") "PROVIDER_TIMEOUT" else "PROVIDER_DISCONNECTED")
-        finalizeStreamingMessage()
-        _uiState.value = _uiState.value.copy(
-            phase = SessionPhase.STOPPED,
-            statusText = when (reason) {
-                "timeout" -> "会话已达到时长上限"
-                else -> "会话已结束：$reason"
-            },
-            audioLevel = 0f,
-            sessionId = null,
-        )
     }
 
     override fun onError(message: String) {
@@ -470,57 +735,117 @@ class MainViewModel(
     }
 
     private fun startDuplexMedia() {
+        val generation = mediaGeneration.incrementAndGet()
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
-                audioEngine.startPlayback()
-                audioEngine.startRecording { samples, level ->
-                    val state = _uiState.value
-                    if (state.phase != SessionPhase.LIVE) return@startRecording
-                    _uiState.value = state.copy(audioLevel = level)
-                    val outgoing = if (state.micEnabled) samples else FloatArray(samples.size)
-                    val frame = if (state.selectedMode == RealtimeMode.VIDEO) {
-                        latestVideoFrame.getAndSet(null)
-                    } else {
-                        null
+                synchronized(mediaStateLock) {
+                    if (
+                        mediaGeneration.get() != generation ||
+                        _uiState.value.phase != SessionPhase.LIVE
+                    ) {
+                        return@synchronized
                     }
-                    realtimeClient.sendDuplex(outgoing, frame, state.forceListen)
+                    audioEngine.startPlayback()
+                    audioEngine.startRecording { samples, level ->
+                        synchronized(mediaStateLock) {
+                            val state = _uiState.value
+                            if (
+                                mediaGeneration.get() != generation ||
+                                state.phase != SessionPhase.LIVE
+                            ) {
+                                return@synchronized
+                            }
+                            _uiState.update { current ->
+                                if (
+                                    mediaGeneration.get() == generation &&
+                                    current.phase == SessionPhase.LIVE
+                                ) {
+                                    current.copy(
+                                        audioLevel = if (current.micEnabled) level else 0f,
+                                    )
+                                } else {
+                                    current
+                                }
+                            }
+                            val outgoing = if (state.micEnabled) {
+                                samples
+                            } else {
+                                FloatArray(samples.size)
+                            }
+                            val frame = if (state.selectedMode == RealtimeMode.VIDEO) {
+                                latestVideoFrame.getAndSet(null)
+                            } else {
+                                null
+                            }
+                            realtimeClient.sendDuplex(outgoing, frame, state.forceListen)
+                        }
+                    }
                 }
-            }.onFailure { reportError("音频设备启动失败：${it.message}") }
+            }.onFailure {
+                if (
+                    mediaGeneration.get() == generation &&
+                    _uiState.value.phase == SessionPhase.LIVE
+                ) {
+                    reportError("音频设备启动失败：${it.message}")
+                }
+            }
         }
     }
 
     private fun addMessage(role: MessageRole, text: String) {
-        _uiState.value = _uiState.value.copy(
-            messages = _uiState.value.messages + ConversationMessage(
-                id = nextMessageId.getAndIncrement(),
-                role = role,
-                text = text,
-            ),
+        val message = ConversationMessage(
+            id = nextMessageId.getAndIncrement(),
+            role = role,
+            text = text,
         )
+        _uiState.update { current ->
+            current.copy(messages = current.messages + message)
+        }
     }
 
     private fun addSystemMessage(text: String) {
         addMessage(MessageRole.SYSTEM, text)
     }
 
+    private fun reportMediaError(message: String) {
+        val normalized = message.trim().ifEmpty { "陪伴服务暂时不可用" }
+        val isNew = _uiState.value.mediaError != normalized
+        _uiState.update { current -> current.copy(mediaError = normalized) }
+        if (isNew) {
+            addSystemMessage(normalized)
+        }
+    }
+
     private fun finalizeStreamingMessage() {
-        _uiState.value = _uiState.value.copy(
-            messages = _uiState.value.messages.map {
+        _uiState.update { current ->
+            current.copy(messages = current.messages.map {
                 if (it.streaming) it.copy(streaming = false) else it
-            },
-        )
+            })
+        }
     }
 
     private fun reportError(message: String) {
+        synchronized(mediaStateLock) {
+            mediaGeneration.incrementAndGet()
+            connectionGeneration.incrementAndGet()
+            _uiState.update { current ->
+                current.copy(
+                    phase = SessionPhase.ERROR,
+                    duplexActivity = DuplexActivity.READY,
+                    statusText = message,
+                    mediaError = message,
+                    audioLevel = 0f,
+                    forceListen = false,
+                    queuePosition = null,
+                    queueWaitSeconds = null,
+                    sessionId = null,
+                )
+            }
+        }
+        latestVideoFrame.set(null)
         audioEngine.stop()
         realtimeClient.close("client_error")
         finishCompanion("CLIENT_ERROR")
-        _uiState.value = _uiState.value.copy(
-            phase = SessionPhase.ERROR,
-            statusText = message,
-            audioLevel = 0f,
-            sessionId = null,
-        )
         addSystemMessage(message)
     }
 
@@ -536,10 +861,12 @@ class MainViewModel(
         } else {
             null
         }
-        _uiState.value = _uiState.value.copy(
-            lastLatencyMs = latency ?: _uiState.value.lastLatencyMs,
-            lastKvCacheLength = kv ?: _uiState.value.lastKvCacheLength,
-        )
+        _uiState.update { current ->
+            current.copy(
+                lastLatencyMs = latency ?: current.lastLatencyMs,
+                lastKvCacheLength = kv ?: current.lastKvCacheLength,
+            )
+        }
     }
 
     private fun reportCompanionEvent(
