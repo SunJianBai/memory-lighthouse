@@ -20,7 +20,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -36,6 +37,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -72,6 +74,7 @@ import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -117,6 +120,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -170,10 +174,11 @@ fun MiniCpmRoute(
         mutableStateOf(context.hasPermission(Manifest.permission.CAMERA))
     }
     var pendingDuplexStart by remember { mutableStateOf(false) }
+    var exitConfirmationVisible by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(allowedModes, state.selectedMode) {
         if (state.selectedMode !in allowedModes) {
-            allowedModes.firstOrNull()?.let(viewModel::selectMode)
+            preferredMode(allowedModes)?.let(viewModel::selectMode)
         }
     }
 
@@ -233,11 +238,19 @@ fun MiniCpmRoute(
         }
     }
 
-    BackHandler(enabled = state.hasActiveSession) {
-        viewModel.stopSession()
+    fun requestExit() {
+        if (state.hasActiveSession) {
+            exitConfirmationVisible = true
+        } else {
+            onExit?.invoke()
+        }
     }
-    BackHandler(enabled = !state.hasActiveSession && onExit != null) {
-        onExit?.invoke()
+
+    BackHandler(enabled = onExit != null) {
+        requestExit()
+    }
+    BackHandler(enabled = onExit == null && state.hasActiveSession) {
+        viewModel.stopSession()
     }
 
     MiniCpmApp(
@@ -261,14 +274,33 @@ fun MiniCpmRoute(
             viewModel.saveSettings()
         },
         onClear = viewModel::clearConversation,
-        onExit = onExit?.let { exit ->
-            {
-                if (state.hasActiveSession) viewModel.stopSession()
-                exit()
-            }
-        },
+        onExit = if (onExit != null) ::requestExit else null,
         allowedModes = allowedModes,
     )
+
+    if (exitConfirmationVisible) {
+        AlertDialog(
+            onDismissRequest = { exitConfirmationVisible = false },
+            title = { Text("结束陪伴对话并返回？") },
+            text = { Text("当前实时陪伴会话将结束，返回后可以重新开始。") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        exitConfirmationVisible = false
+                        viewModel.stopSession()
+                        onExit?.invoke()
+                    },
+                ) {
+                    Text("结束并返回")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { exitConfirmationVisible = false }) {
+                    Text("继续陪伴")
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -293,6 +325,9 @@ private fun MiniCpmApp(
     onExit: (() -> Unit)?,
     allowedModes: Set<RealtimeMode>,
 ) {
+    var clearConfirmationVisible by rememberSaveable { mutableStateOf(false) }
+    val clearEnabled = state.messages.isNotEmpty() && !state.hasActiveSession
+
     Scaffold(
         containerColor = MonitorInk,
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -316,13 +351,16 @@ private fun MiniCpmApp(
             ) {
                 AppTopBar(
                     state = state,
+                    embeddedInLighthouse = onExit != null,
                     onOpenSettings = onOpenSettings,
-                    onClear = onClear,
+                    settingsEnabled = !state.hasActiveSession,
+                    clearEnabled = clearEnabled,
+                    onClear = { clearConfirmationVisible = true },
                     onExit = onExit,
                 )
                 ModeSelector(
                     selected = state.selectedMode,
-                    enabled = true,
+                    enabled = !state.hasActiveSession,
                     modes = allowedModes,
                     onSelect = onSelectMode,
                 )
@@ -375,19 +413,45 @@ private fun MiniCpmApp(
             onSave = onSaveSettings,
         )
     }
+
+    if (clearConfirmationVisible) {
+        AlertDialog(
+            onDismissRequest = { clearConfirmationVisible = false },
+            title = { Text("清空全部对话？") },
+            text = { Text("当前显示的对话内容将被清空，此操作无法撤销。") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        clearConfirmationVisible = false
+                        onClear()
+                    },
+                ) {
+                    Text("确认清空")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { clearConfirmationVisible = false }) {
+                    Text("取消")
+                }
+            },
+        )
+    }
 }
 
 @Composable
 private fun AppTopBar(
     state: AppUiState,
+    embeddedInLighthouse: Boolean,
     onOpenSettings: () -> Unit,
+    settingsEnabled: Boolean,
+    clearEnabled: Boolean,
     onClear: () -> Unit,
     onExit: (() -> Unit)?,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(72.dp),
+            .heightIn(min = 72.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (onExit != null) {
@@ -417,7 +481,7 @@ private fun AppTopBar(
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = "MiniCPM-o",
+                text = if (embeddedInLighthouse) "守忆灯塔" else "MiniCPM-o",
                 style = MaterialTheme.typography.titleMedium,
                 color = MonitorPaper,
             )
@@ -425,7 +489,11 @@ private fun AppTopBar(
                 ServiceDot(state.serviceAvailable)
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    text = state.statusText,
+                    text = if (embeddedInLighthouse) {
+                        "MiniCPM-o · ${state.statusText}"
+                    } else {
+                        state.statusText
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     color = statusColor(state.phase),
                     maxLines = 1,
@@ -438,12 +506,14 @@ private fun AppTopBar(
         }
         IconButton(
             onClick = onClear,
+            enabled = clearEnabled,
             modifier = Modifier.size(48.dp),
         ) {
             Icon(Icons.Rounded.DeleteOutline, contentDescription = "清空对话")
         }
         IconButton(
             onClick = onOpenSettings,
+            enabled = settingsEnabled,
             modifier = Modifier.size(48.dp),
         ) {
             Icon(Icons.Rounded.Settings, contentDescription = "打开设置")
@@ -487,10 +557,11 @@ private fun ModeSelector(
             .fillMaxWidth()
             .background(MonitorSurface, RoundedCornerShape(18.dp))
             .border(1.dp, MonitorOutline.copy(alpha = 0.7f), RoundedCornerShape(18.dp))
-            .padding(4.dp),
+            .padding(4.dp)
+            .selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        RealtimeMode.entries.filter { it in modes }.forEach { mode ->
+        MODE_DISPLAY_ORDER.filter { it in modes }.forEach { mode ->
             val active = mode == selected
             val icon = when (mode) {
                 RealtimeMode.CHAT -> Icons.Rounded.ChatBubbleOutline
@@ -500,11 +571,15 @@ private fun ModeSelector(
             Row(
                 modifier = Modifier
                     .weight(1f)
-                    .height(48.dp)
+                    .heightIn(min = 48.dp)
                     .clip(RoundedCornerShape(14.dp))
                     .background(if (active) MonitorSignal else Color.Transparent)
-                    .clickable(enabled = enabled && !active) { onSelect(mode) }
-                    .semantics { contentDescription = "${mode.label}模式" },
+                    .selectable(
+                        selected = active,
+                        enabled = enabled,
+                        role = Role.Tab,
+                        onClick = { if (!active) onSelect(mode) },
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center,
             ) {
@@ -1057,7 +1132,7 @@ private fun DuplexControls(
                     onClick = onStart,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(54.dp),
+                        .heightIn(min = 54.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MonitorSignal,
                         contentColor = MonitorInk,
@@ -1300,7 +1375,7 @@ private fun SettingsSheet(
                                 ),
                             )
                         },
-                        modifier = Modifier.height(52.dp),
+                        modifier = Modifier.heightIn(min = 52.dp),
                     ) {
                         Text("API 文档")
                         Spacer(Modifier.width(6.dp))
@@ -1321,7 +1396,7 @@ private fun SettingsSheet(
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .weight(1f)
-                            .height(52.dp),
+                            .heightIn(min = 52.dp),
                     ) {
                         Text("保存设置")
                     }
@@ -1329,6 +1404,19 @@ private fun SettingsSheet(
             }
         }
     }
+}
+
+private val MODE_DISPLAY_ORDER = listOf(
+    RealtimeMode.AUDIO,
+    RealtimeMode.VIDEO,
+    RealtimeMode.CHAT,
+)
+
+private fun preferredMode(allowedModes: Set<RealtimeMode>): RealtimeMode? = when {
+    RealtimeMode.AUDIO in allowedModes -> RealtimeMode.AUDIO
+    RealtimeMode.VIDEO in allowedModes -> RealtimeMode.VIDEO
+    RealtimeMode.CHAT in allowedModes -> RealtimeMode.CHAT
+    else -> null
 }
 
 private fun statusColor(phase: SessionPhase): Color = when (phase) {

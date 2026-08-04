@@ -1,5 +1,6 @@
 package com.sun.minicpmo_android.lighthouse.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PrivacyTip
@@ -43,11 +46,15 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
@@ -172,6 +179,22 @@ internal fun FamilyManagementContent(
     var memberRemoval by remember { mutableStateOf<HouseholdMemberView?>(null) }
     var bindingRevoke by remember { mutableStateOf<CompanionBindingView?>(null) }
 
+    val selectSection: (FamilySection) -> Unit = { item ->
+        section = item
+        if (
+            item == FamilySection.ACCESS &&
+            state.selectedHousehold?.roleCodes?.contains("OWNER") == true &&
+            state.selectedRecipientId != null &&
+            state.authoritiesLoadedRecipientId != state.selectedRecipientId
+        ) {
+            actions.loadCareAuthorities()
+        }
+    }
+
+    BackHandler(enabled = section != FamilySection.OVERVIEW) {
+        section = FamilySection.OVERVIEW
+    }
+
     Column(Modifier.fillMaxSize()) {
         WorkspaceSelector(
             state = state,
@@ -181,87 +204,82 @@ internal fun FamilyManagementContent(
             onAddRecipient = { createRecipientVisible = true },
         )
         HorizontalDivider()
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Box(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth(),
         ) {
-            items(FamilySection.entries) { item ->
-                FilterChip(
-                    selected = section == item,
-                    onClick = {
-                        section = item
-                        if (
-                            item == FamilySection.ACCESS &&
-                            state.selectedHousehold?.roleCodes?.contains("OWNER") == true &&
-                            state.selectedRecipientId != null &&
-                            state.authoritiesLoadedRecipientId != state.selectedRecipientId
-                        ) {
-                            actions.loadCareAuthorities()
-                        }
+            when (section) {
+                FamilySection.OVERVIEW -> OverviewSection(
+                    state = state,
+                    onRequestEmailVerification = onRequestEmailVerification,
+                    onAddHousehold = { createHouseholdVisible = true },
+                    onAddRecipient = { createRecipientVisible = true },
+                    onCreateActivation = actions.createActivation,
+                    onRequestCall = actions.requestCall,
+                    onRevokeBinding = { bindingRevoke = it },
+                )
+                FamilySection.MEMORIES -> MemoriesSection(
+                    state = state,
+                    onAdd = {
+                        memoryEditor = null
+                        memoryEditorVisible = true
                     },
-                    label = { Text(item.label) },
-                    leadingIcon = {
-                        Icon(item.icon, contentDescription = null, Modifier.size(18.dp))
+                    onEdit = {
+                        memoryEditor = it
+                        memoryEditorVisible = true
                     },
-                    modifier = Modifier.height(48.dp),
+                    onDelete = { memoryDelete = it },
+                )
+                FamilySection.CARE -> CareSection(
+                    state = state,
+                    onAddRoutine = {
+                        routineEditor = null
+                        routineEditorVisible = true
+                    },
+                    onEditRoutine = {
+                        routineEditor = it
+                        routineEditorVisible = true
+                    },
+                    onDeleteRoutine = { routineDelete = it },
+                    onVerifyOccurrence = { occurrence, verified ->
+                        occurrenceDecision = OccurrenceDecision(occurrence, verified)
+                    },
+                    onClaimTask = actions.claimFamilyTask,
+                    onFinishTask = { task, resolve ->
+                        taskDecision = TaskDecision(task, resolve)
+                    },
+                )
+                FamilySection.PRIVACY -> PrivacySection(
+                    state = state,
+                    onDecide = { definition, grant ->
+                        consentDecision = ConsentDecision(definition, grant)
+                    },
+                )
+                FamilySection.ACCESS -> AuthoritySection(
+                    state = state,
+                    onLoad = actions.loadCareAuthorities,
+                    onEditAuthority = { authorityEditor = it },
+                    onEditRoles = { memberRoleEditor = it },
+                    onRemoveMember = { memberRemoval = it },
                 )
             }
         }
         HorizontalDivider()
-        when (section) {
-            FamilySection.OVERVIEW -> OverviewSection(
-                state = state,
-                onRequestEmailVerification = onRequestEmailVerification,
-                onAddHousehold = { createHouseholdVisible = true },
-                onAddRecipient = { createRecipientVisible = true },
-                onCreateActivation = actions.createActivation,
-                onRequestCall = actions.requestCall,
-                onRevokeBinding = { bindingRevoke = it },
-            )
-            FamilySection.MEMORIES -> MemoriesSection(
-                state = state,
-                onAdd = {
-                    memoryEditor = null
-                    memoryEditorVisible = true
-                },
-                onEdit = {
-                    memoryEditor = it
-                    memoryEditorVisible = true
-                },
-                onDelete = { memoryDelete = it },
-            )
-            FamilySection.CARE -> CareSection(
-                state = state,
-                onAddRoutine = {
-                    routineEditor = null
-                    routineEditorVisible = true
-                },
-                onEditRoutine = {
-                    routineEditor = it
-                    routineEditorVisible = true
-                },
-                onDeleteRoutine = { routineDelete = it },
-                onVerifyOccurrence = { occurrence, verified ->
-                    occurrenceDecision = OccurrenceDecision(occurrence, verified)
-                },
-                onClaimTask = actions.claimFamilyTask,
-                onFinishTask = { task, resolve ->
-                    taskDecision = TaskDecision(task, resolve)
-                },
-            )
-            FamilySection.PRIVACY -> PrivacySection(
-                state = state,
-                onDecide = { definition, grant ->
-                    consentDecision = ConsentDecision(definition, grant)
-                },
-            )
-            FamilySection.ACCESS -> AuthoritySection(
-                state = state,
-                onLoad = actions.loadCareAuthorities,
-                onEditAuthority = { authorityEditor = it },
-                onEditRoles = { memberRoleEditor = it },
-                onRemoveMember = { memberRemoval = it },
-            )
+        NavigationBar(Modifier.fillMaxWidth()) {
+            FamilySection.entries.forEach { item ->
+                NavigationBarItem(
+                    selected = section == item,
+                    onClick = { selectSection(item) },
+                    icon = {
+                        Icon(item.icon, contentDescription = null)
+                    },
+                    label = {
+                        Text(item.label, maxLines = 1)
+                    },
+                    alwaysShowLabel = true,
+                )
+            }
         }
     }
 
@@ -428,49 +446,115 @@ private fun WorkspaceSelector(
     onAddHousehold: () -> Unit,
     onAddRecipient: () -> Unit,
 ) {
-    Column(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    var householdMenuExpanded by remember { mutableStateOf(false) }
+    var recipientMenuExpanded by remember { mutableStateOf(false) }
+
+    OutlinedCard(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("家庭", style = MaterialTheme.typography.labelLarge, modifier = Modifier.width(56.dp))
-            LazyRow(
-                Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            WorkspaceContextRow(
+                label = "家庭",
+                selectedId = state.selectedHouseholdId,
+                selectedLabel = state.selectedHousehold?.name ?: "选择家庭",
+                options = state.households.map { it.id to it.name },
+                expanded = householdMenuExpanded,
+                onExpandedChange = { householdMenuExpanded = it },
+                onSelect = onSelectHousehold,
+                actionLabel = "新建家庭",
+                onAction = onAddHousehold,
+            )
+            if (state.selectedHouseholdId != null) {
+                WorkspaceContextRow(
+                    label = "长者",
+                    selectedId = state.selectedRecipientId,
+                    selectedLabel = state.selectedRecipient?.preferredName ?: "选择长者",
+                    options = state.recipients.map { it.id to it.preferredName },
+                    expanded = recipientMenuExpanded,
+                    onExpandedChange = { recipientMenuExpanded = it },
+                    onSelect = onSelectRecipient,
+                    actionLabel = "添加长者",
+                    onAction = onAddRecipient,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceContextRow(
+    label: String,
+    selectedId: String?,
+    selectedLabel: String,
+    options: List<Pair<String, String>>,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onSelect: (String) -> Unit,
+    actionLabel: String,
+    onAction: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.width(40.dp),
+        )
+        Box(Modifier.weight(1f)) {
+            OutlinedButton(
+                onClick = { onExpandedChange(true) },
+                enabled = options.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp),
             ) {
-                items(state.households, key = { it.id }) { household ->
-                    FilterChip(
-                        selected = household.id == state.selectedHouseholdId,
-                        onClick = { onSelectHousehold(household.id) },
-                        label = { Text(household.name, maxLines = 1) },
-                        modifier = Modifier.height(48.dp),
+                Text(
+                    selectedLabel,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = null)
+            }
+            DropdownMenu(
+                expanded = expanded && options.isNotEmpty(),
+                onDismissRequest = { onExpandedChange(false) },
+            ) {
+                options.forEach { (id, optionLabel) ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(optionLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        },
+                        onClick = {
+                            onExpandedChange(false)
+                            onSelect(id)
+                        },
+                        leadingIcon = {
+                            if (id == selectedId) {
+                                Icon(Icons.Rounded.CheckCircle, contentDescription = "当前选择")
+                            } else {
+                                Spacer(Modifier.size(24.dp))
+                            }
+                        },
                     )
                 }
             }
-            IconButton(onClick = onAddHousehold, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Rounded.Add, contentDescription = "创建家庭")
-            }
         }
-        if (state.selectedHouseholdId != null) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("长者", style = MaterialTheme.typography.labelLarge, modifier = Modifier.width(56.dp))
-                LazyRow(
-                    Modifier.weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(state.recipients, key = { it.id }) { recipient ->
-                        FilterChip(
-                            selected = recipient.id == state.selectedRecipientId,
-                            onClick = { onSelectRecipient(recipient.id) },
-                            label = { Text(recipient.preferredName, maxLines = 1) },
-                            modifier = Modifier.height(48.dp),
-                        )
-                    }
-                }
-                IconButton(onClick = onAddRecipient, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Rounded.Add, contentDescription = "添加长者")
-                }
-            }
+        TextButton(
+            onClick = onAction,
+            modifier = Modifier.heightIn(min = 48.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp),
+        ) {
+            Icon(Icons.Rounded.Add, contentDescription = null, Modifier.size(18.dp))
+            Spacer(Modifier.width(4.dp))
+            Text(actionLabel, maxLines = 1)
         }
     }
 }
@@ -539,7 +623,10 @@ private fun OverviewSection(
                                     fontWeight = FontWeight.Bold,
                                 )
                                 Text(
-                                    listOfNotNull(recipient.homeLabel, recipient.timezone)
+                                    listOfNotNull(
+                                        recipient.homeLabel?.takeIf(String::isNotBlank),
+                                        timezoneDisplayLabel(recipient.timezone),
+                                    )
                                         .joinToString(" · "),
                                     style = MaterialTheme.typography.bodyLarge,
                                 )
@@ -564,7 +651,7 @@ private fun OverviewSection(
                                     )
                                     Button(
                                         onClick = { onCreateActivation(recipient.id) },
-                                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                                     ) {
                                         Icon(Icons.Rounded.Key, contentDescription = null)
                                         Spacer(Modifier.width(8.dp))
@@ -581,34 +668,41 @@ private fun OverviewSection(
                                         Column(Modifier.weight(1f)) {
                                             Text(binding.displayName, fontWeight = FontWeight.SemiBold)
                                             Text(
-                                                "已绑定 · ${binding.status}",
+                                                "已绑定 · 运行正常",
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                         }
                                     }
                                     Button(
                                         onClick = { onRequestCall(binding.id) },
-                                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
                                     ) {
                                         Icon(Icons.Rounded.Call, contentDescription = null)
                                         Spacer(Modifier.width(8.dp))
                                         Text("呼叫陪伴设备")
                                     }
-                                    OutlinedButton(
+                                    Text(
+                                        "通话需陪伴设备现场明确接听；不会录音或转写。",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    TextButton(
                                         onClick = { onRevokeBinding(binding) },
-                                        modifier = Modifier.fillMaxWidth().height(52.dp),
-                                        colors = ButtonDefaults.outlinedButtonColors(
+                                        modifier = Modifier
+                                            .align(Alignment.End)
+                                            .heightIn(min = 48.dp),
+                                        colors = ButtonDefaults.textButtonColors(
                                             contentColor = MaterialTheme.colorScheme.error,
                                         ),
                                     ) {
-                                        Icon(Icons.Rounded.Delete, contentDescription = null)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("解绑陪伴设备")
+                                        Icon(
+                                            Icons.Rounded.Delete,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("解绑设备")
                                     }
-                                    Text(
-                                        "需要陪伴设备现场明确接听；通话不录制、不转写。",
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
                                 }
                             }
                         }
@@ -655,7 +749,7 @@ private fun AuthoritySection(
         if (!canManageMembers) {
             item {
                 Text(
-                    "只有家庭 OWNER 可以查看或修改成员角色与长者级照护权限。",
+                    "只有家庭所有者可以查看或修改成员角色与长者级照护权限。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -670,7 +764,7 @@ private fun AuthoritySection(
                 Button(
                     onClick = onLoad,
                     enabled = !state.busy,
-                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                 ) {
                     Icon(Icons.Rounded.Security, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
@@ -695,7 +789,9 @@ private fun AuthoritySection(
                             Column(Modifier.weight(1f)) {
                                 Text(member.displayName, fontWeight = FontWeight.SemiBold)
                                 Text(
-                                    member.roleCodes.joinToString(" · ").ifBlank { "家庭成员" },
+                                    member.roleCodes
+                                        .joinToString(" · ") { householdRoleLabel(it) }
+                                        .ifBlank { "家庭成员" },
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
@@ -715,7 +811,7 @@ private fun AuthoritySection(
                         OutlinedButton(
                             onClick = { onEditAuthority(member) },
                             enabled = canManageMembers && member.status == "ACTIVE" && !state.busy,
-                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         ) {
                             Icon(Icons.Rounded.Edit, contentDescription = null)
                             Spacer(Modifier.width(8.dp))
@@ -736,7 +832,7 @@ private fun AuthoritySection(
                                     OutlinedButton(
                                         onClick = { onEditRoles(member) },
                                         enabled = member.status == "ACTIVE" && !state.busy,
-                                        modifier = Modifier.weight(1f).height(48.dp),
+                                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                                     ) {
                                         Icon(Icons.Rounded.Security, contentDescription = null)
                                         Spacer(Modifier.width(6.dp))
@@ -745,7 +841,7 @@ private fun AuthoritySection(
                                     OutlinedButton(
                                         onClick = { onRemoveMember(member) },
                                         enabled = member.status == "ACTIVE" && !state.busy,
-                                        modifier = Modifier.weight(1f).height(48.dp),
+                                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                                         colors = ButtonDefaults.outlinedButtonColors(
                                             contentColor = MaterialTheme.colorScheme.error,
                                         ),
@@ -786,7 +882,7 @@ private fun HouseholdMemberRoleDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "角色决定家庭级权限。服务端会校验当前操作者仍为 OWNER，并保护最后一位所有者。",
+                    "角色决定家庭级权限。服务端会确认当前操作者仍是家庭所有者，并保护最后一位所有者。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 HOUSEHOLD_ROLE_OPTIONS.forEach { (code, label) ->
@@ -1120,7 +1216,7 @@ private fun CareAuthorityView.permissionSummary(): String {
     }
     return buildString {
         append(relationshipLabel?.let { "$it · " }.orEmpty())
-        append(accessLevel)
+        append(accessLevelLabel(accessLevel))
         append(" · ")
         append(permissions.joinToString("、").ifBlank { "无功能权限" })
     }
@@ -1187,7 +1283,10 @@ private fun MemoriesSection(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.End,
                         ) {
-                            TextButton(onClick = { onEdit(memory) }, modifier = Modifier.height(48.dp)) {
+                            TextButton(
+                                onClick = { onEdit(memory) },
+                                modifier = Modifier.heightIn(min = 48.dp),
+                            ) {
                                 Icon(Icons.Rounded.Edit, contentDescription = null)
                                 Spacer(Modifier.width(6.dp))
                                 Text("编辑")
@@ -1197,7 +1296,7 @@ private fun MemoriesSection(
                                 colors = ButtonDefaults.textButtonColors(
                                     contentColor = MaterialTheme.colorScheme.error,
                                 ),
-                                modifier = Modifier.height(48.dp),
+                                modifier = Modifier.heightIn(min = 48.dp),
                             ) {
                                 Icon(Icons.Rounded.Delete, contentDescription = null)
                                 Spacer(Modifier.width(6.dp))
@@ -1351,12 +1450,12 @@ private fun PrivacySection(
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.error,
                                 ),
-                                modifier = Modifier.height(48.dp),
+                                modifier = Modifier.heightIn(min = 48.dp),
                             ) { Text("撤回") }
                         } else {
                             Button(
                                 onClick = { onDecide(definition, true) },
-                                modifier = Modifier.height(48.dp),
+                                modifier = Modifier.heightIn(min = 48.dp),
                             ) { Text("查看并授权") }
                         }
                     }
@@ -1410,7 +1509,10 @@ private fun RoutineCard(
                 )
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = { onEdit(routine) }, modifier = Modifier.height(48.dp)) {
+                TextButton(
+                    onClick = { onEdit(routine) },
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) {
                     Icon(Icons.Rounded.Edit, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
                     Text("编辑")
@@ -1420,7 +1522,7 @@ private fun RoutineCard(
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,
                     ),
-                    modifier = Modifier.height(48.dp),
+                    modifier = Modifier.heightIn(min = 48.dp),
                 ) {
                     Icon(Icons.Rounded.Delete, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
@@ -1470,16 +1572,16 @@ private fun TaskCard(
                     if (task.status == "OPEN") {
                         OutlinedButton(
                             onClick = { onClaim(task) },
-                            modifier = Modifier.weight(1f).height(48.dp),
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                         ) { Text("领取") }
                     }
                     Button(
                         onClick = { onFinish(task, true) },
-                        modifier = Modifier.weight(1f).height(48.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     ) { Text("已处理") }
                     TextButton(
                         onClick = { onFinish(task, false) },
-                        modifier = Modifier.height(48.dp),
+                        modifier = Modifier.heightIn(min = 48.dp),
                     ) { Text("忽略") }
                 }
             } else {
@@ -1526,7 +1628,7 @@ private fun OccurrenceCard(
                 ) {
                     Button(
                         onClick = { onVerify(occurrence, true) },
-                        modifier = Modifier.weight(1f).height(48.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     ) {
                         Icon(Icons.Rounded.CheckCircle, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
@@ -1534,7 +1636,7 @@ private fun OccurrenceCard(
                     }
                     OutlinedButton(
                         onClick = { onVerify(occurrence, false) },
-                        modifier = Modifier.weight(1f).height(48.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     ) { Text("核验未完成") }
                 }
             }
@@ -1559,7 +1661,7 @@ private fun ResourceToolbar(
         Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Button(
             onClick = onAction,
-            modifier = Modifier.fillMaxWidth().height(52.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
         ) {
             Icon(Icons.Rounded.Add, contentDescription = null)
             Spacer(Modifier.width(8.dp))
@@ -1592,7 +1694,10 @@ private fun ActionNotice(
             }
             Text(body, style = MaterialTheme.typography.bodyLarge)
             if (actionLabel != null && onAction != null) {
-                Button(onClick = onAction, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                Button(
+                    onClick = onAction,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) {
                     Text(actionLabel)
                 }
             }
@@ -1621,7 +1726,10 @@ private fun SetupCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
-            Button(onClick = onAction, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+            Button(
+                onClick = onAction,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+            ) {
                 Icon(Icons.Rounded.Add, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text(actionLabel)
@@ -2291,6 +2399,16 @@ private fun memoryKindLabel(value: String) = MEMORY_KINDS.toMap()[value] ?: valu
 
 private fun routineTypeLabel(value: String) = ROUTINE_TYPES.toMap()[value] ?: value
 
+private fun householdRoleLabel(value: String) =
+    HOUSEHOLD_ROLE_OPTIONS.toMap()[value] ?: "家庭成员"
+
+private fun accessLevelLabel(value: String) = when (value) {
+    "FULL" -> "完整权限"
+    "CUSTOM" -> "自定义权限"
+    "LIMITED" -> "受限权限"
+    else -> "已配置权限"
+}
+
 private fun sensitivityLabel(value: String) = when (value) {
     "SENSITIVE" -> "敏感信息"
     "HOUSEHOLD" -> "家庭内信息"
@@ -2366,6 +2484,15 @@ private fun formatInstant(value: String): String = runCatching {
 
 private fun localTimezone(): String = TimeZone.getDefault().id.takeIf(String::isNotBlank)
     ?: "Asia/Shanghai"
+
+private fun timezoneDisplayLabel(value: String): String = when (value) {
+    "Asia/Shanghai", "Asia/Chongqing", "Asia/Harbin", "PRC" -> "北京时间"
+    "Asia/Hong_Kong" -> "香港时间"
+    "Asia/Taipei" -> "台北时间"
+    "Asia/Tokyo" -> "日本时间"
+    "UTC", "Etc/UTC", "GMT" -> "协调世界时"
+    else -> "当地时间"
+}
 
 private val INSTANT_FORMATTER = DateTimeFormatter.ofPattern("MM-dd HH:mm")
     .withZone(ZoneId.systemDefault())

@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -51,6 +52,7 @@ import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.QrCodeScanner
@@ -67,6 +69,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -100,6 +104,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -394,7 +399,11 @@ fun LighthouseRoute(
                 )
             }
 
-            if (state.busy && (state.signedIn || state.companionDeviceLocked)) {
+            if (
+                state.busy &&
+                (state.signedIn || state.companionDeviceLocked) &&
+                state.activeRemoteSession == null
+            ) {
                 Surface(
                     color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.48f),
                     modifier = Modifier
@@ -649,48 +658,88 @@ private fun SignedInShell(
     onAttachRenderer: (SurfaceViewRenderer) -> Unit,
     onDetachRenderer: (SurfaceViewRenderer) -> Unit,
 ) {
-    Column(Modifier.fillMaxSize()) {
-        AppHeader(
-            state,
-            onSwitchRole,
-            onRefresh,
-            onLogout,
-            onRequireFamilyAuthentication,
+    var companionModeConfirmationVisible by rememberSaveable { mutableStateOf(false) }
+    val activeCall = state.activeRemoteSession?.takeIf {
+        it.status != "RINGING" || state.role == AppRole.FAMILY
+    }
+
+    if (activeCall != null) {
+        RemoteCallScreen(
+            role = state.role,
+            session = activeCall,
+            callState = callState,
+            familyFailureLatched = state.remoteCallFailureSessionId == activeCall.id,
+            onConnect = if (state.role == AppRole.FAMILY) onConnectFamilyCall else onConnectDeviceCall,
+            onCancel = onCancelCall,
+            onEnd = onEndCall,
+            onAttachRenderer = onAttachRenderer,
+            onDetachRenderer = onDetachRenderer,
         )
-        HorizontalDivider()
-        Box(Modifier.weight(1f)) {
-            if (state.activeRemoteSession != null &&
-                (state.activeRemoteSession.status != "RINGING" || state.role == AppRole.FAMILY)
-            ) {
-                RemoteCallScreen(
-                    role = state.role,
-                    session = state.activeRemoteSession,
-                    callState = callState,
-                    familyFailureLatched = state.remoteCallFailureSessionId ==
-                        state.activeRemoteSession.id,
-                    onConnect = if (state.role == AppRole.FAMILY) onConnectFamilyCall else onConnectDeviceCall,
-                    onCancel = onCancelCall,
-                    onEnd = onEndCall,
-                    onAttachRenderer = onAttachRenderer,
-                    onDetachRenderer = onDetachRenderer,
-                )
-            } else if (state.role == AppRole.FAMILY) {
+    } else {
+        Column(Modifier.fillMaxSize()) {
+            AppHeader(
+                state = state,
+                onSwitchRole = { role ->
+                    if (
+                        role == AppRole.COMPANION &&
+                        state.role == AppRole.FAMILY &&
+                        state.deviceActivated
+                    ) {
+                        companionModeConfirmationVisible = true
+                    } else {
+                        onSwitchRole(role)
+                    }
+                },
+                onRefresh = onRefresh,
+                onLogout = onLogout,
+                onRequireFamilyAuthentication = onRequireFamilyAuthentication,
+            )
+            HorizontalDivider()
+            Box(Modifier.weight(1f)) {
+                if (state.role == AppRole.FAMILY) {
                 FamilyScreen(
                     state,
                     familyActions,
                 )
-            } else {
-                CompanionScreen(
-                    state,
-                    onClaimDynamic,
-                    onOpenScanner,
-                    onOpenAi,
-                    onAcceptCall,
-                    onDeclineCall,
-                    onDismissRemoteCallFailure,
-                )
+                } else {
+                    CompanionScreen(
+                        state,
+                        onClaimDynamic,
+                        onOpenScanner,
+                        onOpenAi,
+                        onAcceptCall,
+                        onDeclineCall,
+                        onDismissRemoteCallFailure,
+                    )
+                }
             }
         }
+    }
+
+    if (companionModeConfirmationVisible) {
+        AlertDialog(
+            onDismissRequest = { companionModeConfirmationVisible = false },
+            icon = { Icon(Icons.Rounded.Lock, contentDescription = null) },
+            title = { Text("进入专用陪伴模式？") },
+            text = {
+                Text(
+                    "为保护家属数据，进入后会退出当前家属账号。陪伴设备会继续运行；再次管理时需要重新登录。",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        companionModeConfirmationVisible = false
+                        onSwitchRole(AppRole.COMPANION)
+                    },
+                ) { Text("退出账号并进入") }
+            },
+            dismissButton = {
+                TextButton(onClick = { companionModeConfirmationVisible = false }) {
+                    Text("留在家属端")
+                }
+            },
+        )
     }
 }
 
@@ -702,62 +751,107 @@ private fun AppHeader(
     onLogout: () -> Unit,
     onRequireFamilyAuthentication: () -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+    var menuExpanded by rememberSaveable { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(48.dp)) {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(40.dp),
+            ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.Lightbulb, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Icon(
+                        Icons.Rounded.Lightbulb,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp),
+                    )
                 }
             }
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text("守忆灯塔", style = MaterialTheme.typography.titleLarge)
+                Text("守忆灯塔", style = MaterialTheme.typography.titleMedium)
                 Text(
                     if (state.companionDeviceLocked) {
                         "${state.companionContext?.recipientName ?: "长者"}的专用陪伴设备"
                     } else {
                         state.user?.displayName.orEmpty()
                     },
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-            IconButton(onClick = onRefresh, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Rounded.Refresh, contentDescription = "刷新数据")
-            }
-            if (state.companionDeviceLocked) {
+            Box {
                 IconButton(
-                    onClick = onRequireFamilyAuthentication,
-                    enabled = state.activeRemoteSession == null,
+                    onClick = { menuExpanded = true },
                     modifier = Modifier.size(48.dp),
                 ) {
-                    Icon(Icons.Rounded.Person, contentDescription = "家属管理（需要重新登录）")
+                    Icon(Icons.Rounded.MoreVert, contentDescription = "更多操作")
                 }
-            } else {
-                IconButton(onClick = onLogout, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = "退出登录")
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("刷新数据") },
+                        leadingIcon = { Icon(Icons.Rounded.Refresh, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onRefresh()
+                        },
+                    )
+                    if (state.companionDeviceLocked) {
+                        DropdownMenuItem(
+                            text = { Text("进入家属管理") },
+                            leadingIcon = { Icon(Icons.Rounded.Person, contentDescription = null) },
+                            enabled = state.activeRemoteSession == null,
+                            onClick = {
+                                menuExpanded = false
+                                onRequireFamilyAuthentication()
+                            },
+                        )
+                    } else {
+                        DropdownMenuItem(
+                            text = { Text("退出登录") },
+                            leadingIcon = {
+                                Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null)
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onLogout()
+                            },
+                        )
+                    }
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
         if (state.companionDeviceLocked) {
-            Row(
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                shape = RoundedCornerShape(12.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Icon(Icons.Rounded.Lock, contentDescription = null, Modifier.size(18.dp))
                 Text(
-                    "设备身份已锁定；家属端令牌不保留",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        "专用陪伴模式 · 家属账号未保留",
+                        style = MaterialTheme.typography.bodySmall,
                 )
+            }
             }
             return@Column
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             RoleButton(
                 selected = state.role == AppRole.FAMILY,
-                label = "家属端",
+                label = "家属管理",
                 icon = Icons.Rounded.FamilyRestroom,
                 onClick = { onSwitchRole(AppRole.FAMILY) },
                 enabled = state.activeRemoteSession == null,
@@ -765,7 +859,7 @@ private fun AppHeader(
             )
             RoleButton(
                 selected = state.role == AppRole.COMPANION,
-                label = "陪伴端",
+                label = if (state.deviceActivated) "专用陪伴" else "陪伴模式",
                 icon = Icons.Rounded.Home,
                 onClick = { onSwitchRole(AppRole.COMPANION) },
                 enabled = state.activeRemoteSession == null,
@@ -1025,6 +1119,7 @@ private fun DeviceActivationScreen(
 ) {
     var publicId by rememberSaveable { mutableStateOf("") }
     var dynamicCode by rememberSaveable { mutableStateOf("") }
+    var manualCodeVisible by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(state.activation) {
         state.activation?.let {
@@ -1039,43 +1134,51 @@ private fun DeviceActivationScreen(
     ) {
         SectionTitle("激活陪伴设备", Icons.Rounded.Key)
         Text(
-            "本设备会使用独立 Ed25519 安装密钥认领；家属批准前不会获得长者数据。",
+            "请使用家属端生成的二维码完成绑定。家属确认前，本设备不会读取长者资料。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Button(onClick = onOpenScanner, modifier = Modifier.fillMaxWidth().height(60.dp)) {
-            Icon(Icons.Rounded.QrCodeScanner, contentDescription = null)
-            Spacer(Modifier.width(10.dp))
-            Text("扫描家属端二维码", fontSize = 18.sp)
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            HorizontalDivider(Modifier.weight(1f))
-            Text("或输入动态码", Modifier.padding(horizontal = 12.dp))
-            HorizontalDivider(Modifier.weight(1f))
-        }
-        OutlinedTextField(
-            value = publicId,
-            onValueChange = { publicId = it.uppercase(Locale.ROOT) },
-            label = { Text("设备激活标识（如 ML-ABC234）") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = dynamicCode,
-            onValueChange = { dynamicCode = it.uppercase(Locale.ROOT) },
-            label = { Text("8 位动态激活码") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        FilledTonalButton(
-            onClick = { onClaimDynamic(publicId, dynamicCode) },
-            enabled = publicId.isNotBlank() && dynamicCode.length >= 8 && state.pendingDeviceActivation == null,
-            modifier = Modifier.fillMaxWidth().height(56.dp),
-        ) { Text("认领设备") }
         state.pendingDeviceActivation?.let { pending ->
             NoticeCard(
                 title = "等待家属批准",
-                body = "认领编号 ${pending.publicId}。请切换到家属端，在激活卡片中点击批准。",
+                body = "设备 ${pending.publicId} 已提交绑定申请。请在家属端核对设备信息并批准。",
             )
+        } ?: run {
+            Button(
+                onClick = onOpenScanner,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+            ) {
+                Icon(Icons.Rounded.QrCodeScanner, contentDescription = null)
+                Spacer(Modifier.width(10.dp))
+                Text("扫描家属端二维码")
+            }
+            TextButton(
+                onClick = { manualCodeVisible = !manualCodeVisible },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            ) {
+                Text(if (manualCodeVisible) "收起动态码输入" else "无法扫码？改用动态激活码")
+            }
+            if (manualCodeVisible) {
+                OutlinedTextField(
+                    value = publicId,
+                    onValueChange = { publicId = it.uppercase(Locale.ROOT) },
+                    label = { Text("设备激活标识") },
+                    supportingText = { Text("示例：ML-ABC234") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = dynamicCode,
+                    onValueChange = { dynamicCode = it.uppercase(Locale.ROOT) },
+                    label = { Text("8 位动态激活码") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Button(
+                    onClick = { onClaimDynamic(publicId, dynamicCode) },
+                    enabled = publicId.isNotBlank() && dynamicCode.length >= 8,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                ) { Text("提交绑定申请") }
+            }
         }
     }
 }
@@ -1126,6 +1229,7 @@ private fun RemoteCallScreen(
     onAttachRenderer: (SurfaceViewRenderer) -> Unit,
     onDetachRenderer: (SurfaceViewRenderer) -> Unit,
 ) {
+    var exitConfirmationVisible by rememberSaveable(session.id) { mutableStateOf(false) }
     val familyPresentation = if (role == AppRole.FAMILY) {
         presentFamilyCall(
             sessionStatus = session.status,
@@ -1136,14 +1240,21 @@ private fun RemoteCallScreen(
     } else {
         null
     }
-    BackHandler { if (session.status == "RINGING") onCancel() else onEnd() }
-    Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
+    val exitAction = if (session.status == "RINGING") onCancel else onEnd
+    BackHandler { exitConfirmationVisible = true }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val compactHeight = maxHeight < 600.dp
+        val outerPadding = if (compactHeight) 8.dp else 16.dp
+        val sectionSpacing = if (compactHeight) 8.dp else 16.dp
+        val videoMinHeight = if (compactHeight) 96.dp else 140.dp
+        val callInfoMaxHeight = if (compactHeight) 96.dp else 240.dp
+        Column(
+            modifier = Modifier.fillMaxSize().padding(outerPadding),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(sectionSpacing),
+        ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { if (session.status == "RINGING") onCancel() else onEnd() }, Modifier.size(48.dp)) {
+            IconButton(onClick = { exitConfirmationVisible = true }, Modifier.size(48.dp)) {
                 Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "退出通话")
             }
             Text(
@@ -1155,7 +1266,10 @@ private fun RemoteCallScreen(
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
             shape = RoundedCornerShape(28.dp),
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .heightIn(min = videoMinHeight),
         ) {
             if (
                 role == AppRole.FAMILY &&
@@ -1181,73 +1295,118 @@ private fun RemoteCallScreen(
                 }
             }
         }
-        NoticeCard(
-            title = "隐私保护已开启",
-            body = "本次通话不录音、不录像、不转写。摄像头和麦克风状态会明确显示。",
-        )
-        if (familyPresentation?.mediaFailed == true) {
-            OutlinedCard(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.outlinedCardColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                ),
-            ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = callInfoMaxHeight)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            NoticeCard(
+                title = "隐私保护已开启",
+                body = "本次通话不录音、不录像、不转写。摄像头和麦克风状态会明确显示。",
+            )
+            if (familyPresentation?.mediaFailed == true) {
+                OutlinedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.outlinedCardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                    ),
+                ) {
+                    Column(
+                        Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            familyPresentation.title,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            familyPresentation.message,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                }
+            }
+            if (callState.phase == LiveCallPhase.CONNECTED) {
                 Column(
-                    Modifier.padding(16.dp),
+                    Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(
-                        familyPresentation.title,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        fontWeight = FontWeight.Bold,
+                    CallStatusPill(
+                        label = if (callState.microphonePublished) "麦克风已开启" else "麦克风未发布",
+                        icon = Icons.Rounded.Security,
+                        modifier = Modifier.fillMaxWidth(),
                     )
-                    Text(
-                        familyPresentation.message,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    CallStatusPill(
+                        label = if (callState.cameraPublished) "摄像头已开启" else "摄像头未发布",
+                        icon = Icons.Rounded.Videocam,
+                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
             }
         }
-        if (callState.phase == LiveCallPhase.CONNECTED) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-            ) {
-                CallStatusPill(
-                    label = if (callState.microphonePublished) "麦克风已开启" else "麦克风未发布",
-                    icon = Icons.Rounded.Security,
-                )
-                CallStatusPill(
-                    label = if (callState.cameraPublished) "摄像头已开启" else "摄像头未发布",
-                    icon = Icons.Rounded.Videocam,
-                )
-            }
-        }
         if (session.status == "RINGING") {
-            OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth().height(60.dp)) {
-                Text("取消呼叫", fontSize = 18.sp)
+            OutlinedButton(
+                onClick = { exitConfirmationVisible = true },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+            ) {
+                Text("取消呼叫")
             }
         } else if (
             familyPresentation?.canConnect == true ||
             (role != AppRole.FAMILY &&
                 callState.phase !in setOf(LiveCallPhase.CONNECTING, LiveCallPhase.CONNECTED))
         ) {
-            Button(onClick = onConnect, modifier = Modifier.fillMaxWidth().height(64.dp)) {
+            Button(onClick = onConnect, modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp)) {
                 Icon(Icons.Rounded.Call, contentDescription = null)
                 Spacer(Modifier.width(10.dp))
-                Text("进入通话", fontSize = 20.sp)
+                Text("进入通话")
             }
         } else {
             Button(
                 onClick = onEnd,
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                modifier = Modifier.fillMaxWidth().height(64.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp),
             ) {
                 Icon(Icons.Rounded.CallEnd, contentDescription = null)
                 Spacer(Modifier.width(10.dp))
-                Text("挂断", fontSize = 20.sp)
+                Text("挂断")
             }
         }
+    }
+    }
+
+    if (exitConfirmationVisible) {
+        AlertDialog(
+            onDismissRequest = { exitConfirmationVisible = false },
+            icon = { Icon(Icons.Rounded.CallEnd, contentDescription = null) },
+            title = { Text(if (session.status == "RINGING") "取消本次呼叫？" else "结束当前通话？") },
+            text = {
+                Text(
+                    if (session.status == "RINGING") {
+                        "取消后，陪伴设备将不再收到本次呼叫。"
+                    } else {
+                        "结束后，双方的摄像头和麦克风会立即关闭。"
+                    },
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        exitConfirmationVisible = false
+                        exitAction()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) { Text(if (session.status == "RINGING") "确认取消" else "确认挂断") }
+            },
+            dismissButton = {
+                TextButton(onClick = { exitConfirmationVisible = false }) { Text("继续通话") }
+            },
+        )
     }
 }
 
@@ -1255,11 +1414,13 @@ private fun RemoteCallScreen(
 private fun CallStatusPill(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    modifier: Modifier = Modifier,
 ) {
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
         shape = RoundedCornerShape(24.dp),
+        modifier = modifier,
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -1350,7 +1511,7 @@ private fun ActivationDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Rounded.QrCode2, contentDescription = null) },
-        title = { Text("设备激活凭据") },
+        title = { Text("激活陪伴设备") },
         text = {
             Column(
                 Modifier.verticalScroll(rememberScrollState()),
@@ -1360,14 +1521,14 @@ private fun ActivationDialog(
                 QrCodeImage(
                     activation.qrPayload,
                     contentDescription = "设备激活二维码",
-                    modifier = Modifier.size(220.dp).border(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier.size(180.dp).border(1.dp, MaterialTheme.colorScheme.outline),
                 )
                 Text("激活标识", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(activation.publicId, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text(activation.publicId, style = MaterialTheme.typography.titleLarge)
                 Text("动态激活码", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(activation.dynamicCode, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+                Text(activation.dynamicCode, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    "先让陪伴设备扫描或输入动态码，再由家属点击批准。二维码和动态码均为短时一次性凭据。",
+                    "请在陪伴设备上扫码或输入动态码，再核对设备信息并批准。凭据短时有效且仅可使用一次。",
                     textAlign = TextAlign.Center,
                 )
                 if (approvalDetails == null) {
@@ -1378,7 +1539,7 @@ private fun ActivationDialog(
                     )
                     OutlinedButton(
                         onClick = { onLoadApprovalDetails(activation.challengeId) },
-                        modifier = Modifier.height(52.dp),
+                        modifier = Modifier.heightIn(min = 48.dp),
                     ) { Text("读取待批准设备信息") }
                 } else {
                     val deviceName = listOfNotNull(
@@ -1402,11 +1563,11 @@ private fun ActivationDialog(
                 onClick = { onApprove(activation.challengeId) },
                 enabled = approvalDetails != null &&
                     (pendingChallengeId == null || pendingChallengeId == activation.challengeId),
-                modifier = Modifier.height(52.dp),
+                modifier = Modifier.heightIn(min = 48.dp),
             ) { Text(if (approvalDetails == null) "请先核对设备信息" else "确认上述信息并批准") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, modifier = Modifier.height(52.dp)) { Text("稍后处理") }
+            TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text("稍后处理") }
         },
     )
 }
@@ -1482,13 +1643,21 @@ private fun RoleButton(
     enabled: Boolean = true,
 ) {
     if (selected) {
-        Button(onClick = onClick, enabled = enabled, modifier = modifier.height(52.dp)) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier.heightIn(min = 48.dp).semantics { this.selected = true },
+        ) {
             Icon(icon, contentDescription = null)
             Spacer(Modifier.width(8.dp))
             Text(label)
         }
     } else {
-        OutlinedButton(onClick = onClick, enabled = enabled, modifier = modifier.height(52.dp)) {
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier.heightIn(min = 48.dp).semantics { this.selected = false },
+        ) {
             Icon(icon, contentDescription = null)
             Spacer(Modifier.width(8.dp))
             Text(label)
