@@ -216,7 +216,7 @@ export const useOmniSession = (appState: AppState, activeRoutine?: Routine) => {
             {
               direction: "local",
               type: "replay.ready",
-              detail: "Presenter-controlled deterministic demo mode",
+              detail: "Deterministic offline replay mode",
               tone: "green",
             },
           ],

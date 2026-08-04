@@ -1,14 +1,3 @@
-export type AppRole = "care" | "family" | "presenter";
-
-export type AppRoute =
-  | "welcome"
-  | "onboarding"
-  | "care"
-  | "family"
-  | "memories"
-  | "demo"
-  | "settings";
-
 export type MemoryKind =
   "person" | "medication" | "routine" | "preference" | "place" | "story";
 

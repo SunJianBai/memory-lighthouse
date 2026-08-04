@@ -1,42 +1,15 @@
 import {
   ArrowRight,
   BellRing,
-  BookHeart,
   HeartHandshake,
-  MonitorPlay,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
 import { navigate } from "../app/navigation";
 import { useAuth } from "../auth/auth-context";
 import { BrandMark } from "../components/BrandMark";
-import { useAppState } from "../state/app-state";
 
-const demoRoleCards = [
-  {
-    title: "我是长者",
-    description: "开始语音和视频陪伴，查看今天的下一项任务。",
-    route: "care" as const,
-    icon: BellRing,
-    tone: "blue",
-  },
-  {
-    title: "我是家属",
-    description: "查看任务状态、待确认事件和陪伴摘要。",
-    route: "family" as const,
-    icon: HeartHandshake,
-    tone: "green",
-  },
-  {
-    title: "我是演示者",
-    description: "按照比赛脚本，一镜到底展示完整产品闭环。",
-    route: "demo" as const,
-    icon: MonitorPlay,
-    tone: "amber",
-  },
-];
-
-const productRoleCards = [
+const roleCards = [
   {
     title: "家属工作区",
     description: "管理家庭、陪伴对象、记忆、日程、授权与远程关怀通话。",
@@ -51,20 +24,12 @@ const productRoleCards = [
     icon: BellRing,
     tone: "blue",
   },
-  {
-    title: "比赛 Demo",
-    description: "保留原有本地演示、MiniCPM-o runtime 与一镜到底比赛脚本。",
-    route: "demo-demo" as const,
-    icon: MonitorPlay,
-    tone: "amber",
-  },
 ];
 
-export const WelcomePage = ({ demoLanding = false }: { demoLanding?: boolean }) => {
-  const { state } = useAppState();
+export const WelcomePage = () => {
   const auth = useAuth();
-  const primaryRoute = auth.status === "authenticated" ? "workspace-overview" : "login";
-  const roleCards = demoLanding ? demoRoleCards : productRoleCards;
+  const primaryRoute =
+    auth.status === "authenticated" ? "workspace-overview" : "login";
   return (
     <main id="main-content" className="welcome-page" tabIndex={-1}>
       <header className="welcome-header">
@@ -72,9 +37,9 @@ export const WelcomePage = ({ demoLanding = false }: { demoLanding?: boolean }) 
         <button
           className="quiet-button"
           type="button"
-          onClick={() => navigate(demoLanding ? "settings" : primaryRoute)}
+          onClick={() => navigate(primaryRoute)}
         >
-          {demoLanding ? "模型与隐私设置" : auth.status === "authenticated" ? "进入家属工作区" : "登录 / 注册"}
+          {auth.status === "authenticated" ? "进入家属工作区" : "登录 / 注册"}
         </button>
       </header>
 
@@ -96,27 +61,25 @@ export const WelcomePage = ({ demoLanding = false }: { demoLanding?: boolean }) 
             <button
               className="primary-button large"
               type="button"
-              onClick={() => navigate(demoLanding ? "demo" : primaryRoute)}
+              onClick={() => navigate(primaryRoute)}
             >
-              {demoLanding ? "开始完整演示" : auth.status === "authenticated" ? "进入家属工作区" : "登录家属工作区"}
+              {auth.status === "authenticated"
+                ? "进入家属工作区"
+                : "登录家属工作区"}
               <ArrowRight aria-hidden="true" size={20} />
             </button>
             <button
               className="secondary-button large"
               type="button"
-              onClick={() => navigate(demoLanding ? "onboarding" : "demo-demo")}
+              onClick={() => navigate("companion")}
             >
-              <BookHeart aria-hidden="true" size={20} />
-              {demoLanding
-                ? state.initialized
-                  ? "编辑陪伴档案"
-                  : "建立陪伴档案"
-                : "查看比赛 Demo"}
+              <BellRing aria-hidden="true" size={20} />
+              进入陪伴设备模式
             </button>
           </div>
           <div className="trust-row" aria-label="产品安全原则">
             <span>
-              <ShieldCheck aria-hidden="true" size={17} /> {demoLanding ? "Demo 默认本地保存" : "服务器逐项鉴权"}
+              <ShieldCheck aria-hidden="true" size={17} /> 服务器逐项鉴权
             </span>
             <span>不识别药片与剂量</span>
             <span>不把沉默判定为危险</span>
@@ -131,8 +94,8 @@ export const WelcomePage = ({ demoLanding = false }: { demoLanding?: boolean }) 
               <BellRing aria-hidden="true" size={36} />
             </div>
             <span>正在温和守候</span>
-            <strong>{state.recipient.preferredName}，早上好</strong>
-            <p>下一项：08:30 晨间任务</p>
+            <strong>准备开始今天的陪伴</strong>
+            <p>登录家属工作区，或激活陪伴设备</p>
           </div>
           <div className="floating-note note-top">
             <span className="status-dot green" />
@@ -148,7 +111,7 @@ export const WelcomePage = ({ demoLanding = false }: { demoLanding?: boolean }) 
       <section className="role-section" aria-labelledby="role-title">
         <div className="section-heading">
           <p className="eyebrow">选择体验入口</p>
-          <h2 id="role-title">同一份记忆，三种清晰视角</h2>
+          <h2 id="role-title">同一个账号，两种清晰模式</h2>
         </div>
         <div className="role-grid">
           {roleCards.map((card) => {

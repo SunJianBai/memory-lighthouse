@@ -1,10 +1,12 @@
 # 守忆灯塔 Client Web
 
-同一个 React/Vite Web 提供两个真实工作区，并保留原比赛 Demo：
+同一个 React/Vite Web 提供家属工作区与陪伴设备模式：
 
 - `/openBMB/app/*`：家属工作区，数据与权限以 Server API 为准；
-- `/openBMB/companion`：陪伴设备模式；首次 Claim/批准后改用独立 Device Identity，已激活设备无需家属登录；
-- `/openBMB/demo/*`：完整保留原本地 Demo、MiniCPM-o runtime 和测试。
+- `/openBMB/companion`：陪伴设备模式；首次 Claim/批准后改用独立 Device Identity，已激活设备无需家属登录。
+
+旧比赛 Demo 的 `/openBMB/demo/*` 页面已经下线，历史书签会回到新版首页。
+陪伴设备模式继续复用经过验证的 MiniCPM-o 音视频 runtime，但不再暴露独立的本地演示页面。
 
 ## 本地运行
 

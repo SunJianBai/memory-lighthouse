@@ -5,7 +5,7 @@ export default defineConfig({
   base: "/openBMB/",
   plugins: [react()],
   test: {
-    // This workspace owns the preserved browser demo tests and client tests.
+    // Keep all user Web and companion-mode unit tests in this workspace.
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     exclude: ["tmp/**", "node_modules/**", "dist/**"],
   },

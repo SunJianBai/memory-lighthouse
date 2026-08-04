@@ -1,12 +1,12 @@
 # 验收记录
 
-核对时间：2026-08-01（Asia/Shanghai）。
+核对时间：2026-08-04（Asia/Shanghai）。
 
 ## 自动化
 
 | 检查 | 结果 |
 | --- | --- |
-| Client Web / Demo | 10 个测试文件、51 个测试、类型检查和生产构建全部通过 |
+| Client Web | 20 个测试文件、107 个测试、类型检查和生产构建全部通过 |
 | Server | 56 个测试套件、208 个单元/集成测试、Prisma validate/generate、ESLint 与生产构建通过；另有 5 个真实 HTTP E2E |
 | Admin Web | 3 个测试文件、8 个测试、类型检查、普通生产构建与开发检查模式构建全部通过 |
 | API / Event Contracts | 两个契约包 `tsc --noEmit` 均通过 |
@@ -23,9 +23,9 @@
 
 上述新增隐私通知功能已在本地完成全量复核；推送后由 [main 分支 CI](https://github.com/SunJianBai/memory-lighthouse/actions/workflows/ci.yml?query=branch%3Amain) 重复同一组门禁，具体交付只以目标提交对应的绿色运行结果为准。
 
-## 早期 Demo 浏览器端到端（持续保留）
+## 已下线的早期 Demo 浏览器端到端（历史记录）
 
-本节记录原比赛 Demo 的浏览器验收，不等同于当前完整账号、家庭、设备、管理员和 Android 公网端到端验收。
+本节仅保留 2026-08-01 原比赛 Demo 的历史验收证据；该独立页面组现已下线，不等同于当前完整账号、家庭、设备、管理员和 Android 公网端到端验收。
 
 使用 Chrome/Playwright 检查：
 
@@ -54,14 +54,14 @@
 | 本地 vLLM `18099` | 当前工作站端口不可达 |
 | TX4H4G SSH 与生产预检 | SSH 已连通；系统、CampusHub、Docker、Caddy、资源和生产配置审计完成，不可变发布候选已通过静态与结构预检 |
 
-当前已跑通原 Demo 回放闭环、ModelBest 公网音频 Realtime、Server 真实基础设施启动/健康冒烟与 HTTP E2E，以及 Android JVM 单测、Lint 和 Debug APK 构建。仍未完成真实 MinIO 资产数据流、真实摄像头、Android 真机/界面运行、双公网设备 LiveKit 媒体、真实 SMTP 邮件和公网切流后的浏览器验收；这些项目不得写成已通过。
+原比赛 Demo 回放闭环仅保留为上述历史验收记录。当前已跑通 ModelBest 公网音频 Realtime、Server 真实基础设施启动/健康冒烟与 HTTP E2E，以及 Android JVM 单测、Lint 和 Debug APK 构建。仍未完成真实 MinIO 资产数据流、真实摄像头、Android 真机/界面运行、双公网设备 LiveKit 媒体、真实 SMTP 邮件和公网切流后的浏览器验收；这些项目不得写成已通过。
 
-## 比赛设备最终清单
+## 完整产品公网验收清单
 
 1. 本地 `/health` 与 `/v1/models` 返回成功。
 2. 真实摄像头显示“画面已接入”，视频帧指标持续增长。
 3. 真实麦克风可打断模型输出，播放队列停止后恢复监听。
-4. 运行五步主线和两个可选场景，并在家属端看到来源明确的对应事件。
+4. 使用真实账号完成家庭与陪伴对象选择、记忆和日程下发，并在家属端看到来源明确的对应事件。
 5. 结束会话后浏览器摄像头和麦克风占用指示消失。
 6. 使用真实邮箱完成注册验证和密码重置。
 7. 家属端与陪伴端处于不同公网网络时完成 LiveKit 双向音视频、拒接、挂断和 AI/远程接管切换。

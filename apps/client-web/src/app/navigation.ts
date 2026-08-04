@@ -1,5 +1,3 @@
-import type { AppRoute as DemoRoute } from "../domain/types";
-
 export type ProductRoute =
   | "home"
   | "login"
@@ -17,7 +15,7 @@ export type ProductRoute =
   | "workspace-settings"
   | "companion";
 
-export type ClientRoute = ProductRoute | `demo-${DemoRoute}`;
+export type ClientRoute = ProductRoute;
 
 const paths: Record<ClientRoute, string> = {
   home: "",
@@ -35,13 +33,6 @@ const paths: Record<ClientRoute, string> = {
   "workspace-remote": "app/remote",
   "workspace-settings": "app/settings",
   companion: "companion",
-  "demo-welcome": "demo",
-  "demo-onboarding": "demo/onboarding",
-  "demo-care": "demo/care",
-  "demo-family": "demo/family",
-  "demo-memories": "demo/memories",
-  "demo-demo": "demo/showcase",
-  "demo-settings": "demo/settings",
 };
 
 const routesByPath = new Map(
@@ -55,44 +46,47 @@ routesByPath.set("reset-password", "reset-password");
 routesByPath.set("verify-email", "verify-email");
 routesByPath.set("accept-invitation", "accept-invitation");
 
-const legacyDemoMap: Record<DemoRoute, ClientRoute> = {
-  welcome: "demo-welcome",
-  onboarding: "demo-onboarding",
-  care: "demo-care",
-  family: "demo-family",
-  memories: "demo-memories",
-  demo: "demo-demo",
-  settings: "demo-settings",
-};
-
-const basePath = import.meta.env.BASE_URL.replace(/^\//, "").replace(/\/$/, "");
-
-const relativePath = (): string => {
-  const pathname = window.location.pathname.replace(/^\/+|\/+$/g, "");
-  if (!basePath) return pathname;
-  if (pathname === basePath) return "";
-  return pathname.startsWith(`${basePath}/`)
-    ? pathname.slice(basePath.length + 1)
+const relativePath = (pathname: string, baseUrl: string): string => {
+  const basePath = baseUrl.replace(/^\//, "").replace(/\/$/, "");
+  const normalizedPathname = pathname.replace(/^\/+|\/+$/g, "");
+  if (!basePath) return normalizedPathname;
+  if (normalizedPathname === basePath) return "";
+  return normalizedPathname.startsWith(`${basePath}/`)
+    ? normalizedPathname.slice(basePath.length + 1)
     : "";
 };
 
-export const routeFromLocation = (): ClientRoute =>
-  routesByPath.get(relativePath()) ?? "home";
+export type RouteResolution = {
+  route: ClientRoute;
+  canonicalHref?: string;
+};
 
-export const routeFromHash = (): DemoRoute => {
-  const route = routeFromLocation();
-  return route.startsWith("demo-")
-    ? (route.slice(5) as DemoRoute)
-    : "welcome";
+export const resolveRoute = (
+  pathname: string,
+  baseUrl: string = import.meta.env.BASE_URL,
+): RouteResolution => {
+  const path = relativePath(pathname, baseUrl);
+  if (path === "demo" || path.startsWith("demo/")) {
+    return {
+      route: "home",
+      canonicalHref: baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`,
+    };
+  }
+  return { route: routesByPath.get(path) ?? "home" };
+};
+
+export const routeFromLocation = (): ClientRoute => {
+  const resolution = resolveRoute(window.location.pathname);
+  if (resolution.canonicalHref) {
+    window.history.replaceState(null, "", resolution.canonicalHref);
+  }
+  return resolution.route;
 };
 
 export const hrefFor = (route: ClientRoute): string =>
   `${import.meta.env.BASE_URL}${paths[route]}`;
 
-export function navigate(route: DemoRoute | ProductRoute | ClientRoute): void {
-  const normalized = route in legacyDemoMap
-    ? legacyDemoMap[route as DemoRoute]
-    : (route as ClientRoute);
-  window.history.pushState(null, "", hrefFor(normalized));
+export function navigate(route: ClientRoute): void {
+  window.history.pushState(null, "", hrefFor(route));
   window.dispatchEvent(new PopStateEvent("popstate"));
 }

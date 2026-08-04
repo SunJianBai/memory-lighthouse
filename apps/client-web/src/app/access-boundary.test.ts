@@ -14,13 +14,13 @@ describe("family session route boundary", () => {
     expect(requiresFamilySession("accept-invitation")).toBe(true);
   });
 
-  it("does not put public or demo routes behind family authentication", () => {
+  it("does not put public or companion routes behind family authentication", () => {
     expect(requiresFamilySession("home")).toBe(false);
-    expect(requiresFamilySession("demo-demo")).toBe(false);
+    expect(requiresFamilySession("companion")).toBe(false);
   });
 
   it("revokes even a stale refresh-cookie session before persisting device credentials", () => {
-    expect(authContextSource).toContain('/auth/device-mode-lock');
+    expect(authContextSource).toContain("/auth/device-mode-lock");
     expect(authContextSource).toMatch(
       /\/auth\/device-mode-lock[\s\S]*authenticated:\s*false[\s\S]*markAnonymous\(\)/,
     );

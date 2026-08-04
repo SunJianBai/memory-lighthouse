@@ -14,11 +14,9 @@
   "scripts": {
     "dev": "npm run dev --workspace @memory-lighthouse/client-web",
     "dev:client": "npm run dev --workspace @memory-lighthouse/client-web",
-    "dev:demo": "npm run dev --workspace @memory-lighthouse/client-web",
     "dev:server": "npm run start:dev --workspace @memory-lighthouse/server-api",
     "build": "npm run build --workspace @memory-lighthouse/client-web",
     "build:client": "npm run build --workspace @memory-lighthouse/client-web",
-    "build:demo": "npm run build --workspace @memory-lighthouse/client-web",
     "build:server": "npm run build --workspace @memory-lighthouse/server-api",
     "build:contracts": "npm run build --workspace @memory-lighthouse/api-contracts && npm run build --workspace @memory-lighthouse/event-contracts",
     "preview": "npm run preview --workspace @memory-lighthouse/client-web",
