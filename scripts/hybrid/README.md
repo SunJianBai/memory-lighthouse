@@ -83,21 +83,20 @@ a dirty or mismatched checkout, dereferences npm workspace/bin links without
 emitting tar hard-link members, and verifies both the archive and extracted
 tree before upload.
 
-Every successful `main` CI run delivers both the API and Web artifacts. This
-deliberately avoids path-filter false negatives. Immediately before either
-promotion, the runner rechecks the current remote `main` SHA. The server then
+Every successful `main` CI run can deliver API and/or Web artifacts depending on
+what changed. The change detector evaluates:
+
+- `apps/server-api`, `packages/api-contracts`, `packages/event-contracts`
+- `apps/client-web`, `apps/admin-web`, `design-system`, `packages/api-contracts`,
+  `packages/event-contracts`
+
+Immediately before either promotion, the runner rechecks the current remote `main`
+SHA. The server then
 holds `/run/lock/openbmb-operation.lock`, requires exactly `mode=hybrid`, a
 native `13101`/`13102` upstream, and `pending=no`, and only then calls the
 stable promoter. Incoming cleanup is limited to eight precisely named,
 owned, older-than-24-hours entries per run, and both upload and promotion are
 guarded by an artifact-size-aware free-space check.
-
-Automatic Web and API delivery requires both repository variables below:
-
-```text
-PRODUCTION_DEPLOY_ENABLED=true
-PRODUCTION_DELIVERY_MODE=hybrid
-```
 
 The complete Docker delivery workflow is mutually exclusive, manual-only, and
 activates only when `PRODUCTION_DELIVERY_MODE=docker-full` is explicitly

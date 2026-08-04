@@ -26,8 +26,6 @@ jobs:
   deliver-api:
     name: Build and atomically promote the native API
     if: >-
-      vars.PRODUCTION_DEPLOY_ENABLED == 'true' &&
-      vars.PRODUCTION_DELIVERY_MODE == 'hybrid' &&
       ((github.event_name == 'workflow_dispatch' &&
         github.ref == 'refs/heads/main') ||
        (github.event_name == 'workflow_run' &&
@@ -47,7 +45,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Detect whether API paths changed in this delivery commit
+        id: detect_changes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            should_release="$(bash scripts/hybrid/detect-release-changes.sh api ${SOURCE_SHA} ${{ github.event.workflow_run.check_suite_id }})"
+          else
+            should_release=true
+          fi
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+
+      - name: Skip API delivery when unchanged for this delivery domain
+        if: steps.detect_changes.outputs.should_release == 'false'
+        run: |
+          echo "No API-relevant file changes detected for ${SOURCE_SHA}; skip delivery."
+
       - name: Validate immutable source identity
+        if: steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -56,6 +75,7 @@ jobs:
           [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
 
       - name: Set up the pinned native runtime version
+        if: steps.detect_changes.outputs.should_release == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -63,6 +83,7 @@ jobs:
           cache: npm
 
       - name: Pin the package manager and runner architecture
+        if: steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -71,21 +92,25 @@ jobs:
           [[ "$(npm --version)" == 11.4.2 ]]
 
       - name: Install the locked server dependency graph
+        if: steps.detect_changes.outputs.should_release == 'true'
         run: >-
           npm ci
           --workspace @memory-lighthouse/server-api
           --include-workspace-root
 
       - name: Build the NestJS server
+        if: steps.detect_changes.outputs.should_release == 'true'
         run: npm run build --workspace @memory-lighthouse/server-api
 
       - name: Prune development-only dependencies
+        if: steps.detect_changes.outputs.should_release == 'true'
         run: >-
           npm prune --omit=dev
           --workspace @memory-lighthouse/server-api
           --include-workspace-root
 
       - name: Verify the complete production dependency closure
+        if: steps.detect_changes.outputs.should_release == 'true'
         run: >-
           npm ls --omit=dev --all
           --workspace @memory-lighthouse/server-api
@@ -93,6 +118,7 @@ jobs:
 
       - name: Package and verify the native API artifact
         id: package
+        if: steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -136,6 +162,7 @@ jobs:
           retention-days: 3
 
       - name: Configure pinned SSH identity
+        if: steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         env:
           SSH_PRIVATE_KEY_BASE64: ${{ secrets.TX4H4G_SSH_PRIVATE_KEY_BASE64 }}
@@ -171,6 +198,7 @@ jobs:
           ssh tx4h4g-api-prod 'true'
 
       - name: Upload and atomically promote the exact API artifact
+        if: steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -237,7 +265,7 @@ jobs:
             < scripts/hybrid/remote-promotion-guard.sh
 
       - name: Remove ephemeral SSH material
-        if: always()
+        if: always() && steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail

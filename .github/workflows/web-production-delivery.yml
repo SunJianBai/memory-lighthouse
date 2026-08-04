@@ -26,8 +26,6 @@ jobs:
   deliver-web:
     name: Build and atomically promote web assets
     if: >-
-      vars.PRODUCTION_DEPLOY_ENABLED == 'true' &&
-      vars.PRODUCTION_DELIVERY_MODE == 'hybrid' &&
       ((github.event_name == 'workflow_dispatch' &&
         github.ref == 'refs/heads/main') ||
        (github.event_name == 'workflow_run' &&
@@ -47,7 +45,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Detect whether web paths changed in this delivery commit
+        id: detect_changes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            should_release="$(bash scripts/hybrid/detect-release-changes.sh web ${SOURCE_SHA} ${{ github.event.workflow_run.check_suite_id }})"
+          else
+            should_release=true
+          fi
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+
+      - name: Skip web delivery when unchanged for this delivery domain
+        if: steps.detect_changes.outputs.should_release == 'false'
+        run: |
+          echo "No web-relevant file changes detected for ${SOURCE_SHA}; skip delivery."
+
       - name: Validate immutable source identity
+        if: steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -56,15 +75,18 @@ jobs:
           [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
 
       - name: Set up Node.js
+        if: steps.detect_changes.outputs.should_release == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
       - name: Install locked dependencies
+        if: steps.detect_changes.outputs.should_release == 'true'
         run: npm ci
 
       - name: Build client and admin web applications
+        if: steps.detect_changes.outputs.should_release == 'true'
         env:
           VITE_API_BASE_URL: /openBMB/api/v1
           VITE_API_BASE: /openBMB/api/v1
@@ -76,6 +98,7 @@ jobs:
 
       - name: Package normalized web artifact
         id: package
+        if: steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -111,6 +134,7 @@ jobs:
           retention-days: 3
 
       - name: Configure pinned SSH identity
+        if: steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         env:
           SSH_PRIVATE_KEY_BASE64: ${{ secrets.TX4H4G_SSH_PRIVATE_KEY_BASE64 }}
@@ -146,6 +170,7 @@ jobs:
           ssh tx4h4g-web-prod 'true'
 
       - name: Upload and atomically promote exact web artifact
+        if: steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -190,7 +215,7 @@ jobs:
             < scripts/hybrid/remote-promotion-guard.sh
 
       - name: Remove ephemeral SSH material
-        if: always()
+        if: always() && steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
