@@ -269,9 +269,21 @@ health_public() {
     retry_url "https://$domain/openBMB/api/v1/health/ready"
 }
 
+wait_docker_api_healthy() {
+  local attempts="${OPENBMB_HEALTH_ATTEMPTS:-20}"
+  local interval="${OPENBMB_HEALTH_INTERVAL_SECONDS:-1}"
+  local running health
+  for _attempt in $(seq 1 "$attempts"); do
+    running="$($docker_bin inspect --format '{{.State.Running}}' openbmb-api 2>/dev/null || true)"
+    health="$($docker_bin inspect --format '{{.State.Health.Status}}' openbmb-api 2>/dev/null || true)"
+    [[ "$running" == true && "$health" == healthy ]] && return 0
+    [[ "$_attempt" -eq "$attempts" ]] || sleep "$interval"
+  done
+  return 1
+}
+
 health_docker_direct() {
-  [[ "$($docker_bin inspect --format '{{.State.Running}}' openbmb-api 2>/dev/null || true)" == true ]] || return 1
-  [[ "$($docker_bin inspect --format '{{.State.Health.Status}}' openbmb-api 2>/dev/null || true)" == healthy ]] || return 1
+  wait_docker_api_healthy || return 1
   retry_url 'http://127.0.0.1:13100/openBMB/api/v1/health/live' && \
     retry_url 'http://127.0.0.1:13100/openBMB/api/v1/health/ready'
 }

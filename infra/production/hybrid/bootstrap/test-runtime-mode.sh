@@ -282,7 +282,23 @@ case "$1" in
     state_file="$FIXTURE_STATE/$container"
     case "$template" in
       *State.Running*) [[ -f "$state_file" ]] && printf 'true\n' || printf 'false\n' ;;
-      *State.Health.Status*) [[ -f "$state_file" ]] && printf 'healthy\n' || printf 'unhealthy\n' ;;
+      *State.Health.Status*)
+        if [[ -f "$FIXTURE_STATE/docker-health-starting" ]]; then
+          count="$(cat "$FIXTURE_STATE/docker-health-count" 2>/dev/null || printf 0)"
+          count=$((count + 1))
+          printf '%s\n' "$count" >"$FIXTURE_STATE/docker-health-count"
+          if [[ "$count" -lt 3 ]]; then
+            printf 'starting\n'
+          else
+            rm -f "$FIXTURE_STATE/docker-health-starting"
+            printf 'healthy\n'
+          fi
+        elif [[ -f "$state_file" ]]; then
+          printf 'healthy\n'
+        else
+          printf 'unhealthy\n'
+        fi
+        ;;
       *Config.Image*) printf 'openbmb-api:git-0123456789ab\n' ;;
     esac
     ;;
@@ -440,11 +456,15 @@ cp "$state_root/configs/hybrid/openbmb.env" "$caddy_root/openbmb.env"
 chmod 0644 "$caddy_root/Caddyfile"
 chmod 0640 "$caddy_root/openbmb.env"
 touch "$mock_state/caddy-active"
-rm -f "$mock_state/openbmb-api" "$mock_state/calls"
+rm -f "$mock_state/openbmb-api" "$mock_state/calls" "$mock_state/docker-health-count"
+touch "$mock_state/docker-health-starting"
+export OPENBMB_HEALTH_ATTEMPTS=4
+export OPENBMB_HEALTH_INTERVAL_SECONDS=0
 "$script_dir/openbmb-runtime-mode" switch docker
 [[ "$(cat "$state_root/mode")" == docker ]]
 [[ -f "$mock_state/openbmb-api" ]]
 [[ ! -e "$state_root/transition.pending" ]]
+[[ "$(cat "$mock_state/docker-health-count")" -eq 3 ]]
 grep -Eq '^compose .* api ' "$mock_state/calls"
 grep -Fq 'systemctl disable --now openbmb-native-api@blue.service' "$mock_state/calls"
 
