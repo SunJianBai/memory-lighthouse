@@ -1,0 +1,10 @@
+{
+  "versionCode": 2,
+  "versionName": "1.0.1",
+  "mandatory": false,
+  "releaseNotes": [
+    "优化家属端与陪伴端界面和交互",
+    "精简页面说明文字",
+    "新增安全的应用内更新功能"
+  ]
+}

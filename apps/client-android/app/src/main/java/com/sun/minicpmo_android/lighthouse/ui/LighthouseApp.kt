@@ -135,6 +135,8 @@ import com.sun.minicpmo_android.lighthouse.realtime.LiveCallState
 import com.sun.minicpmo_android.lighthouse.realtime.presentFamilyCall
 import com.sun.minicpmo_android.ui.MiniCpmRoute
 import com.sun.minicpmo_android.model.RealtimeMode
+import com.sun.minicpmo_android.update.AndroidUpdateManager
+import com.sun.minicpmo_android.update.AppUpdateState
 import kotlinx.coroutines.launch
 import livekit.org.webrtc.SurfaceViewRenderer
 import java.util.Locale
@@ -143,10 +145,12 @@ import java.util.Locale
 fun LighthouseRoute(
     viewModel: LighthouseViewModel,
     miniCpmViewModel: MainViewModel,
+    updateManager: AndroidUpdateManager,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val callState by viewModel.callState.collectAsStateWithLifecycle()
     val mediaHandoffState by viewModel.companionMediaHandoffState.collectAsState()
+    val updateState by updateManager.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -269,6 +273,14 @@ fun LighthouseRoute(
         onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
 
+    AppUpdateDialog(
+        state = updateState,
+        onDownload = updateManager::download,
+        onInstall = updateManager::install,
+        onRetry = { updateManager.checkForUpdate(manual = true) },
+        onDismiss = updateManager::dismiss,
+    )
+
     if (state.aiScreenVisible) {
         val incoming = state.incomingRemoteSession
 
@@ -359,6 +371,7 @@ fun LighthouseRoute(
                     onLogout = viewModel::logout,
                     onRequireFamilyAuthentication = viewModel::requireFamilyAuthentication,
                     onRefresh = viewModel::refresh,
+                    onCheckUpdate = { updateManager.checkForUpdate(manual = true) },
                     familyActions = familyActions,
                     onCancelCall = viewModel::cancelRemoteRequest,
                     onConnectFamilyCall = {
@@ -644,6 +657,7 @@ private fun SignedInShell(
     onLogout: () -> Unit,
     onRequireFamilyAuthentication: () -> Unit,
     onRefresh: () -> Unit,
+    onCheckUpdate: () -> Unit,
     familyActions: FamilyUiActions,
     onCancelCall: () -> Unit,
     onConnectFamilyCall: () -> Unit,
@@ -691,6 +705,7 @@ private fun SignedInShell(
                     }
                 },
                 onRefresh = onRefresh,
+                onCheckUpdate = onCheckUpdate,
                 onLogout = onLogout,
                 onRequireFamilyAuthentication = onRequireFamilyAuthentication,
             )
@@ -744,10 +759,73 @@ private fun SignedInShell(
 }
 
 @Composable
+private fun AppUpdateDialog(
+    state: AppUpdateState,
+    onDownload: () -> Unit,
+    onInstall: () -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    when (state) {
+        AppUpdateState.Idle -> Unit
+        is AppUpdateState.Available -> AlertDialog(
+            onDismissRequest = { if (!state.release.mandatory) onDismiss() },
+            icon = { Icon(Icons.Rounded.Refresh, contentDescription = null) },
+            title = { Text("发现新版本 ${state.release.versionName}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (state.release.releaseNotes.isEmpty()) {
+                        Text("新版本已准备好，建议更新后继续使用。")
+                    } else {
+                        state.release.releaseNotes.forEach { note -> Text("• $note") }
+                    }
+                }
+            },
+            confirmButton = { Button(onClick = onDownload) { Text("下载更新") } },
+            dismissButton = if (state.release.mandatory) null else {
+                { TextButton(onClick = onDismiss) { Text("稍后") } }
+            },
+        )
+        is AppUpdateState.Downloading -> AlertDialog(
+            onDismissRequest = {},
+            icon = { CircularProgressIndicator() },
+            title = { Text("正在下载 ${state.release.versionName}") },
+            text = {
+                Text(state.progress?.let { "已完成 $it%" } ?: "正在连接下载服务…")
+            },
+            confirmButton = {},
+        )
+        is AppUpdateState.Ready -> AlertDialog(
+            onDismissRequest = { if (!state.release.mandatory) onDismiss() },
+            icon = { Icon(Icons.Rounded.CheckCircle, contentDescription = null) },
+            title = { Text("更新包已准备好") },
+            text = { Text("点击安装后，Android 系统会要求你确认本次更新。") },
+            confirmButton = { Button(onClick = onInstall) { Text("安装更新") } },
+            dismissButton = if (state.release.mandatory) null else {
+                { TextButton(onClick = onDismiss) { Text("稍后") } }
+            },
+        )
+        is AppUpdateState.Failed -> AlertDialog(
+            onDismissRequest = onDismiss,
+            icon = { Icon(Icons.Rounded.ErrorOutline, contentDescription = null) },
+            title = { Text("更新没有完成") },
+            text = { Text(state.message) },
+            confirmButton = {
+                Button(onClick = if (state.release == null) onRetry else onDownload) {
+                    Text("重试")
+                }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("稍后") } },
+        )
+    }
+}
+
+@Composable
 private fun AppHeader(
     state: LighthouseUiState,
     onSwitchRole: (AppRole) -> Unit,
     onRefresh: () -> Unit,
+    onCheckUpdate: () -> Unit,
     onLogout: () -> Unit,
     onRequireFamilyAuthentication: () -> Unit,
 ) {
@@ -800,6 +878,14 @@ private fun AppHeader(
                         onClick = {
                             menuExpanded = false
                             onRefresh()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("检查更新") },
+                        leadingIcon = { Icon(Icons.Rounded.Refresh, contentDescription = null) },
+                        onClick = {
+                            menuExpanded = false
+                            onCheckUpdate()
                         },
                     )
                     if (state.companionDeviceLocked) {

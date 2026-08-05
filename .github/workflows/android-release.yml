@@ -1,0 +1,174 @@
+name: Android release
+
+on:
+  push:
+    tags:
+      - android-v*
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Sign and publish Android APK
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
+
+      - name: Restore fixed release signing key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          [[ -n "$KEYSTORE_BASE64" ]]
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/memory-lighthouse-release.jks"
+          chmod 0600 "$RUNNER_TEMP/memory-lighthouse-release.jks"
+
+      - name: Test, lint, and build signed release APK
+        working-directory: apps/client-android
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/memory-lighthouse-release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon testDebugUnitTest lintDebug assembleRelease
+
+      - name: Verify release identity and create update manifest
+        id: metadata
+        shell: bash
+        env:
+          EXPECTED_CERT_SHA256: 2268c6f77a14ec35e6b2ebb8a597d82ed28621d96fdc4ffbbf5866691247b5cc
+        run: |
+          set -euo pipefail
+          source_apk=apps/client-android/app/build/outputs/apk/release/app-release.apk
+          output_dir="$RUNNER_TEMP/android-release"
+          output_apk="$output_dir/memory-lighthouse-android.apk"
+          install -d -m 0700 "$output_dir"
+          install -m 0600 "$source_apk" "$output_apk"
+
+          apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          [[ -x "$apksigner" ]]
+          cert_sha256="$($apksigner verify --print-certs "$output_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+          [[ "$cert_sha256" == "$EXPECTED_CERT_SHA256" ]]
+
+          version_code="$(node -p "require('./apps/client-android/release-notes.json').versionCode")"
+          version_name="$(node -p "require('./apps/client-android/release-notes.json').versionName")"
+          [[ "$GITHUB_REF_NAME" == "android-v$version_name" ]]
+          grep -Fq "versionCode = $version_code" apps/client-android/app/build.gradle.kts
+          grep -Fq "versionName = \"$version_name\"" apps/client-android/app/build.gradle.kts
+
+          apk_sha256="$(sha256sum "$output_apk" | awk '{print $1}')"
+          node - "$apk_sha256" <<'NODE' > "$output_dir/android-update.json"
+          const fs = require('fs');
+          const release = JSON.parse(fs.readFileSync('apps/client-android/release-notes.json', 'utf8'));
+          const sha256 = process.argv[2];
+          process.stdout.write(JSON.stringify({
+            ...release,
+            apkUrl: 'https://sun227454.online/openBMB/downloads/memory-lighthouse-android.apk',
+            sha256,
+          }, null, 2) + '\n');
+          NODE
+          echo "output_dir=$output_dir" >> "$GITHUB_OUTPUT"
+          echo "version_name=$version_name" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTPUT_DIR: ${{ steps.metadata.outputs.output_dir }}
+          VERSION_NAME: ${{ steps.metadata.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "$OUTPUT_DIR/memory-lighthouse-android.apk" \
+            "$OUTPUT_DIR/android-update.json" \
+            --verify-tag \
+            --title "守忆灯塔 Android $VERSION_NAME" \
+            --generate-notes
+
+      - name: Configure pinned SSH identity
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY_BASE64: ${{ secrets.TX4H4G_SSH_PRIVATE_KEY_BASE64 }}
+          SSH_KNOWN_HOSTS_BASE64: ${{ secrets.TX4H4G_KNOWN_HOSTS_BASE64 }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s' "$SSH_PRIVATE_KEY_BASE64" | base64 --decode > "$HOME/.ssh/openbmb_android_release"
+          printf '%s' "$SSH_KNOWN_HOSTS_BASE64" | base64 --decode > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/openbmb_android_release" "$HOME/.ssh/known_hosts"
+          cat > "$HOME/.ssh/config" <<'EOF'
+          Host openbmb-production
+            HostName 124.220.81.104
+            User ubuntu
+            IdentityFile ~/.ssh/openbmb_android_release
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+          EOF
+          chmod 0600 "$HOME/.ssh/config"
+
+      - name: Publish same-origin Android update assets
+        shell: bash
+        env:
+          OUTPUT_DIR: ${{ steps.metadata.outputs.output_dir }}
+        run: |
+          set -euo pipefail
+          remote_root="/home/ubuntu/.openbmb-android-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ssh openbmb-production "install -d -m 0700 '$remote_root'"
+          scp -- \
+            "$OUTPUT_DIR/memory-lighthouse-android.apk" \
+            "$OUTPUT_DIR/android-update.json" \
+            "openbmb-production:$remote_root/"
+          apk_sha256="$(sha256sum "$OUTPUT_DIR/memory-lighthouse-android.apk" | awk '{print $1}')"
+          manifest_sha256="$(sha256sum "$OUTPUT_DIR/android-update.json" | awk '{print $1}')"
+          ssh openbmb-production bash -s -- "$remote_root" "$apk_sha256" "$manifest_sha256" <<'REMOTE'
+          set -euo pipefail
+          remote_root="$1"
+          apk_sha256="$2"
+          manifest_sha256="$3"
+          [[ "$(sha256sum "$remote_root/memory-lighthouse-android.apk" | awk '{print $1}')" == "$apk_sha256" ]]
+          [[ "$(sha256sum "$remote_root/android-update.json" | awk '{print $1}')" == "$manifest_sha256" ]]
+          sudo install -o root -g openbmb -m 0644 \
+            "$remote_root/memory-lighthouse-android.apk" \
+            /opt/openbmb/downloads/.memory-lighthouse-android.apk.incoming
+          sudo install -o root -g openbmb -m 0644 \
+            "$remote_root/android-update.json" \
+            /opt/openbmb/downloads/.android-update.json.incoming
+          sudo mv /opt/openbmb/downloads/.memory-lighthouse-android.apk.incoming \
+            /opt/openbmb/downloads/memory-lighthouse-android.apk
+          sudo mv /opt/openbmb/downloads/.android-update.json.incoming \
+            /opt/openbmb/downloads/android-update.json
+          rm -rf -- "$remote_root"
+          REMOTE
+
+      - name: Remove ephemeral signing material
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/memory-lighthouse-release.jks"
+          rm -f "$HOME/.ssh/openbmb_android_release" "$HOME/.ssh/config"

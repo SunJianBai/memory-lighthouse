@@ -39,6 +39,23 @@ https://github.com/SunJianBai/memory-lighthouse/releases/latest/download/memory-
 https://sun227454.online/openBMB/downloads/memory-lighthouse-android.apk
 ```
 
+应用启动时会读取同域版本清单；用户也可从右上角菜单选择“检查更新”。新 APK 下载完成后，客户端先校验 SHA-256 和当前应用签名证书，再交给 Android 系统安装界面确认，不会静默安装：
+
+```text
+https://sun227454.online/openBMB/downloads/android-update.json
+```
+
+## 正式发布
+
+每个版本同时增加 `versionCode`、更新 `versionName` 和 `release-notes.json`，提交到 `main` 后创建并推送对应标签，例如：
+
+```powershell
+git tag android-v1.0.1
+git push origin android-v1.0.1
+```
+
+`Android release` 工作流会使用 GitHub Secrets 中固定的正式签名密钥执行测试、Lint 和 `assembleRelease`，核对证书 SHA-256，创建 GitHub Release，并原子更新服务器上的 APK 与版本清单。正式签名材料不得提交到仓库。
+
 默认 API Base URL 为：
 
 ```text

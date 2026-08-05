@@ -12,6 +12,7 @@ import com.sun.minicpmo_android.lighthouse.ui.LighthouseRoute
 import com.sun.minicpmo_android.model.RealtimeMode
 import com.sun.minicpmo_android.ui.MiniCpmRoute
 import com.sun.minicpmo_android.ui.theme.LighthouseTheme
+import com.sun.minicpmo_android.update.AndroidUpdateManager
 
 class MainActivity : ComponentActivity() {
     private val graph by lazy { (application as LighthouseApplication).appGraph }
@@ -23,6 +24,7 @@ class MainActivity : ComponentActivity() {
     private val miniCpmViewModel: MainViewModel by viewModels {
         MainViewModel.factory(applicationContext, graph.companionBridge)
     }
+    private val updateManager by lazy { AndroidUpdateManager(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,11 +40,17 @@ class MainActivity : ComponentActivity() {
                         allowedModes = setOf(RealtimeMode.AUDIO, RealtimeMode.VIDEO),
                     )
                 } else {
-                    LighthouseRoute(lighthouseViewModel, miniCpmViewModel)
+                    LighthouseRoute(lighthouseViewModel, miniCpmViewModel, updateManager)
                 }
             }
         }
+        updateManager.checkForUpdate()
         handleIntent(intent)
+    }
+
+    override fun onDestroy() {
+        updateManager.close()
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {
