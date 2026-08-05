@@ -67,19 +67,34 @@ jobs:
           source_apk=apps/client-android/app/build/outputs/apk/release/app-release.apk
           output_dir="$RUNNER_TEMP/android-release"
           output_apk="$output_dir/memory-lighthouse-android.apk"
+          [[ -f "$source_apk" ]] || { echo '::error::Signed release APK is missing'; exit 1; }
           install -d -m 0700 "$output_dir"
           install -m 0600 "$source_apk" "$output_apk"
 
           apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
-          [[ -x "$apksigner" ]]
-          cert_sha256="$($apksigner verify --print-certs "$output_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
-          [[ "$cert_sha256" == "$EXPECTED_CERT_SHA256" ]]
+          [[ -x "$apksigner" ]] || { echo '::error::apksigner is unavailable'; exit 1; }
+          cert_sha256="$($apksigner verify --print-certs "$output_apk" \
+            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+            | tr -d '\r[:space:]')"
+          [[ "$cert_sha256" == "$EXPECTED_CERT_SHA256" ]] || {
+            echo "::error::Release signing certificate mismatch: $cert_sha256"
+            exit 1
+          }
 
           version_code="$(node -p "require('./apps/client-android/release-notes.json').versionCode")"
           version_name="$(node -p "require('./apps/client-android/release-notes.json').versionName")"
-          [[ "$GITHUB_REF_NAME" == "android-v$version_name" ]]
-          grep -Fq "versionCode = $version_code" apps/client-android/app/build.gradle.kts
-          grep -Fq "versionName = \"$version_name\"" apps/client-android/app/build.gradle.kts
+          [[ "$GITHUB_REF_NAME" == "android-v$version_name" ]] || {
+            echo "::error::Tag $GITHUB_REF_NAME does not match Android version $version_name"
+            exit 1
+          }
+          grep -Fq "versionCode = $version_code" apps/client-android/app/build.gradle.kts || {
+            echo '::error::release-notes versionCode does not match Gradle configuration'
+            exit 1
+          }
+          grep -Fq "versionName = \"$version_name\"" apps/client-android/app/build.gradle.kts || {
+            echo '::error::release-notes versionName does not match Gradle configuration'
+            exit 1
+          }
 
           apk_sha256="$(sha256sum "$output_apk" | awk '{print $1}')"
           node - "$apk_sha256" <<'NODE' > "$output_dir/android-update.json"
