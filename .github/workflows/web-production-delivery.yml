@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-            should_release="$(bash scripts/hybrid/detect-release-changes.sh web ${SOURCE_SHA} ${{ github.event.workflow_run.check_suite_id }})"
+            should_release="$(bash scripts/hybrid/detect-release-changes.sh web ${SOURCE_SHA} ${{ github.event.workflow_run.id }})"
           else
             should_release=true
           fi

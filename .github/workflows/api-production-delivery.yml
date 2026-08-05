@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-            should_release="$(bash scripts/hybrid/detect-release-changes.sh api ${SOURCE_SHA} ${{ github.event.workflow_run.check_suite_id }})"
+            should_release="$(bash scripts/hybrid/detect-release-changes.sh api ${SOURCE_SHA} ${{ github.event.workflow_run.id }})"
           else
             should_release=true
           fi
@@ -106,6 +106,7 @@ jobs:
         if: steps.detect_changes.outputs.should_release == 'true'
         run: >-
           npm prune --omit=dev
+          --package-lock=false
           --workspace @memory-lighthouse/server-api
           --include-workspace-root
 

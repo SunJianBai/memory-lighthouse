@@ -4,7 +4,7 @@ export LC_ALL=C
 
 usage() {
   cat >&2 <<'EOF'
-usage: scripts/hybrid/detect-release-changes.sh api|web <source-sha40> <check-suite-id>
+usage: scripts/hybrid/detect-release-changes.sh api|web <source-sha40> <workflow-run-id>
 
 Prints exactly "true" or "false". An unavailable or untrusted push baseline
 fails open to "true" so change detection can never suppress a required release.
@@ -18,7 +18,7 @@ EOF
 
 component="$1"
 source_sha="${2,,}"
-check_suite_id="$3"
+workflow_run_id="$3"
 
 [[ "$component" =~ ^(api|web)$ ]] || {
   usage
@@ -28,8 +28,8 @@ check_suite_id="$3"
   printf 'source SHA must be 40 lowercase hexadecimal characters\n' >&2
   exit 64
 }
-[[ "$check_suite_id" =~ ^[1-9][0-9]*$ ]] || {
-  printf 'Change detector: missing check suite; conservatively publishing %s.\n' "$component" >&2
+[[ "$workflow_run_id" =~ ^[1-9][0-9]*$ ]] || {
+  printf 'Change detector: missing workflow run; conservatively publishing %s.\n' "$component" >&2
   printf 'true\n'
   exit 0
 }
@@ -57,32 +57,41 @@ actual_head="$(git rev-parse HEAD)"
   exit 65
 }
 
-suite_range="$(
-  gh api "repos/$repository/check-suites/$check_suite_id" \
-    --jq '[.before_sha, .after_sha] | join(" ")' 2>/dev/null || true
+trigger_identity="$(
+  gh api "repos/$repository/actions/runs/$workflow_run_id" \
+    --jq '[.head_sha, .event, .head_branch, .conclusion] | @tsv' 2>/dev/null || true
 )"
-before_sha=''
-after_sha=''
+trigger_sha=''
+trigger_event=''
+trigger_branch=''
+trigger_conclusion=''
 extra=''
-read -r before_sha after_sha extra <<<"$suite_range"
-
-if [[ ! "$before_sha" =~ ^[0-9a-f]{40}$ || ! "$after_sha" =~ ^[0-9a-f]{40}$ || \
-      -n "$extra" || "$after_sha" != "$source_sha" ]]; then
-  printf 'Change detector: check-suite range is unavailable or mismatched; conservatively publishing %s.\n' \
+read -r trigger_sha trigger_event trigger_branch trigger_conclusion extra <<<"$trigger_identity"
+if [[ "$trigger_sha" != "$source_sha" || "$trigger_event" != push || \
+      "$trigger_branch" != main || "$trigger_conclusion" != success || -n "$extra" ]]; then
+  printf 'Change detector: triggering CI run is unavailable or mismatched; conservatively publishing %s.\n' \
     "$component" >&2
   printf 'true\n'
   exit 0
 fi
 
-if [[ "$before_sha" == 0000000000000000000000000000000000000000 ]]; then
-  printf 'Change detector: initial push has no baseline; publishing %s.\n' "$component" >&2
-  printf 'true\n'
-  exit 0
-fi
+baseline_candidates="$(
+  gh api --paginate \
+    "repos/$repository/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100" \
+    --jq '.workflow_runs[].head_sha' 2>/dev/null || true
+)"
+before_sha=''
+while IFS= read -r candidate; do
+  [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$candidate" != "$source_sha" ]] || continue
+  if git cat-file -e "$candidate^{commit}" 2>/dev/null && \
+     git merge-base --is-ancestor "$candidate" "$source_sha"; then
+    before_sha="$candidate"
+    break
+  fi
+done <<<"$baseline_candidates"
 
-if ! git cat-file -e "$before_sha^{commit}" 2>/dev/null || \
-   ! git merge-base --is-ancestor "$before_sha" "$source_sha"; then
-  printf 'Change detector: push baseline is not a trusted ancestor; conservatively publishing %s.\n' \
+if [[ -z "$before_sha" ]]; then
+  printf 'Change detector: no prior successful main CI ancestor is available; conservatively publishing %s.\n' \
     "$component" >&2
   printf 'true\n'
   exit 0
