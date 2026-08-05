@@ -109,6 +109,19 @@
 			file_server
 		}
 
+		@openbmbDownloads path /openBMB/downloads/*
+		handle @openbmbDownloads {
+			header {
+				Cache-Control "public, max-age=300"
+				Content-Disposition "attachment"
+				Referrer-Policy "no-referrer"
+				Permissions-Policy "camera=(), microphone=(), geolocation=()"
+			}
+			root * /opt/openbmb/downloads
+			uri strip_prefix /openBMB/downloads
+			file_server
+		}
+
 		@openbmbClient path /openBMB/*
 		handle @openbmbClient {
 			header {

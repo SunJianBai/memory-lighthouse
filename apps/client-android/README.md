@@ -33,6 +33,12 @@ APK 输出：`app/build/outputs/apk/debug/app-debug.apk`。
 https://github.com/SunJianBai/memory-lighthouse/releases/latest/download/memory-lighthouse-android.apk
 ```
 
+由于源码仓库为私有仓库，官网为未登录访客提供公开镜像下载：
+
+```text
+https://sun227454.online/openBMB/downloads/memory-lighthouse-android.apk
+```
+
 默认 API Base URL 为：
 
 ```text
