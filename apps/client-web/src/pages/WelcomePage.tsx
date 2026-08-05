@@ -79,7 +79,7 @@ export const WelcomePage = () => {
             </button>
             <a
               className="secondary-button large"
-              href="/openBMB/downloads/memory-lighthouse-android.apk"
+              href="https://github.com/SunJianBai/memory-lighthouse/releases/latest/download/memory-lighthouse-android.apk"
               download
             >
               <Download aria-hidden="true" size={20} />
