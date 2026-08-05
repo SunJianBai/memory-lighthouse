@@ -108,7 +108,7 @@ watch(
       v-if="loading && !page"
       kind="loading"
       title="正在读取数据"
-      message="查询结果将直接来自 server-api。"
+      message="请稍候。"
     />
     <StatePanel
       v-else-if="errorMessage"

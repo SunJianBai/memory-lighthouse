@@ -243,7 +243,7 @@ export const RoutinesApiPage = () => {
       <section className="empty-resource-state">
         <CalendarClock aria-hidden="true" size={34} />
         <h2>尚未选择陪伴对象</h2>
-        <p>日程和待办都严格归属于一位陪伴对象。</p>
+        <p>请先创建并选择一位长者。</p>
       </section>
     );
   }
@@ -252,8 +252,8 @@ export const RoutinesApiPage = () => {
     <div className="resource-page">
       <section className="resource-toolbar">
         <div>
-          <strong>确定性日程与家庭待办</strong>
-          <p>提醒内容由家属原样录入，完成状态只能走明确命令接口。</p>
+          <strong>日程与家庭待办</strong>
+          <p>安排提醒并处理待办事项。</p>
         </div>
         <div>
           <button
@@ -386,7 +386,7 @@ export const RoutinesApiPage = () => {
             <div className="compact-empty">
               <CalendarClock aria-hidden="true" size={28} />
               <strong>暂无日程</strong>
-              <p>新建后，服务器会按时区物化待执行事项。</p>
+              <p>新建日程后，提醒将按设定时间生成。</p>
             </div>
           ) : (
             <div className="api-routine-list">
@@ -400,7 +400,7 @@ export const RoutinesApiPage = () => {
                     <p>{routine.instructions}</p>
                     <small>
                       {routine.contentProvenance === "FAMILY_ENTERED_VERBATIM"
-                        ? "家属原文"
+                        ? "家属录入"
                         : routine.contentProvenance}
                     </small>
                   </div>
@@ -425,7 +425,7 @@ export const RoutinesApiPage = () => {
             <div className="compact-empty">
               <CheckCircle2 aria-hidden="true" size={28} />
               <strong>暂无待办</strong>
-              <p>这不等于系统作出安全判断，只表示没有待人工处理事项。</p>
+              <p>当前没有需要处理的事项。</p>
             </div>
           ) : (
             <div className="family-task-list">
@@ -466,7 +466,7 @@ export const RoutinesApiPage = () => {
           <div className="panel-heading">
             <div>
               <p className="eyebrow">日程实例</p>
-              <h2>提醒与确认闭环</h2>
+              <h2>提醒记录</h2>
             </div>
             <span className="count-badge attention">
               {
@@ -482,7 +482,7 @@ export const RoutinesApiPage = () => {
             <div className="compact-empty">
               <CalendarClock aria-hidden="true" size={28} />
               <strong>暂无近期实例</strong>
-              <p>服务端物化规则后，这里会显示提醒、本人确认和家属核验状态。</p>
+              <p>暂无提醒记录。</p>
             </div>
           ) : (
             <div className="family-task-list">
@@ -501,7 +501,7 @@ export const RoutinesApiPage = () => {
                       )}{" "}
                       · {occurrence.instructions}
                     </p>
-                    <small>内容来源：家属原文；系统不据此作医疗判断。</small>
+                    <small>家属填写的提醒内容</small>
                   </div>
                   {occurrence.status === "NEEDS_FAMILY_REVIEW" && (
                     <div className="task-actions">
@@ -530,8 +530,8 @@ export const RoutinesApiPage = () => {
         <section className="panel-card">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">审计时间线</p>
-              <h2>近期照护事件</h2>
+              <p className="eyebrow">动态</p>
+              <h2>最近动态</h2>
             </div>
             <span className="count-badge">{events.length}</span>
           </div>
@@ -541,7 +541,7 @@ export const RoutinesApiPage = () => {
             <div className="compact-empty">
               <ClipboardCheck aria-hidden="true" size={28} />
               <strong>暂无事件</strong>
-              <p>提醒状态变化、本人确认和家属核验会形成可追溯事件。</p>
+              <p>暂无动态。</p>
             </div>
           ) : (
             <div className="api-routine-list">

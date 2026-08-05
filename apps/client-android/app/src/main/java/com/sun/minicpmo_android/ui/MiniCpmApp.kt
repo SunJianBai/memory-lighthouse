@@ -508,12 +508,14 @@ private fun AppTopBar(
                 Icon(Icons.Rounded.DeleteOutline, contentDescription = "清空对话")
             }
         }
-        IconButton(
-            onClick = onOpenSettings,
-            enabled = settingsEnabled,
-            modifier = Modifier.size(48.dp),
-        ) {
-            Icon(Icons.Rounded.Settings, contentDescription = "打开设置")
+        if (!embeddedInLighthouse) {
+            IconButton(
+                onClick = onOpenSettings,
+                enabled = settingsEnabled,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(Icons.Rounded.Settings, contentDescription = "打开设置")
+            }
         }
     }
 }
@@ -669,7 +671,7 @@ private fun EmptyChatHero(
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            text = "连接 MiniCPM-o 4.5 Realtime API\n开始自然的多模态实时对话",
+            text = "开始语音、视频或文字陪伴",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -679,7 +681,7 @@ private fun EmptyChatHero(
             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            listOf("介绍一下你自己", "给我一个今日灵感", "解释多模态模型").forEach { text ->
+            listOf("今天有什么安排？", "给我讲个故事", "帮我联系家人").forEach { text ->
                 AssistChip(
                     onClick = { onSuggestion(text) },
                     label = { Text(text) },

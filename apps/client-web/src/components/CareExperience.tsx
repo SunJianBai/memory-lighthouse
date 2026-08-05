@@ -250,10 +250,10 @@ export const CareExperience = forwardRef<
           });
         }
         record(
-          accepted ? `${routine.title}已到期` : `${routine.title}触发失败`,
+          accepted ? `${routine.title}提醒已发送` : `${routine.title}提醒发送失败`,
           accepted
-            ? "确定性日程规则已触发，真实模型已完整返回提醒。"
-            : "确定性日程规则已触发，但真实模型没有接受提醒请求。",
+            ? "提醒已发送。"
+            : "提醒发送失败，请稍后重试。",
           "routine_due",
           accepted ? "info" : "attention",
           "open",
@@ -570,13 +570,10 @@ export const CareExperience = forwardRef<
           </button>
         </div>
 
-        <p className="care-boundary">
-          {serverBackedMode
-            ? "真实会话使用服务器 Prompt 与 Consent Snapshot；联系家人会生成可追踪的家属待办，不会直接开启摄像头或麦克风。"
-            : state.provider.provider === "cloud"
-              ? "守忆灯塔不识别药片、剂量或诊断健康状况。ModelBest 官方双工协议不返回用户转写，完成与联系家人请点击按钮留痕。"
-              : "守忆灯塔只复述家属录入的信息，不识别药片、剂量或诊断健康状况。"}
-        </p>
+        <details className="care-boundary">
+          <summary>陪伴说明</summary>
+          <p>守忆灯塔不会识别药片或剂量。</p>
+        </details>
       </section>
     </div>
   );

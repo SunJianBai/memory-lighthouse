@@ -368,7 +368,7 @@ internal fun FamilyManagementContent(
     memoryDelete?.let { memory ->
         ConfirmDeleteDialog(
             title = "删除记忆",
-            body = "确认删除“${memory.title}”吗？删除后不会再进入新的模型上下文。",
+            body = "确认删除“${memory.title}”吗？删除后将无法在陪伴中使用。",
             busy = state.busy,
             onDismiss = { memoryDelete = null },
             onConfirm = {
@@ -579,7 +579,7 @@ private fun OverviewSection(
                 ActionNotice(
                     icon = Icons.Rounded.Security,
                     title = "请先验证邮箱",
-                    body = "创建家庭、激活设备和远程通话前，服务器要求至少一个已验证邮箱。",
+                    body = "验证邮箱后即可创建家庭和添加设备。",
                     actionLabel = "发送邮箱验证码",
                     onAction = onRequestEmailVerification,
                 )
@@ -590,7 +590,7 @@ private fun OverviewSection(
                 SetupCard(
                     icon = Icons.Rounded.Home,
                     title = "创建第一个家庭",
-                    body = "家庭是成员、长者、记忆、日程和设备授权的边界。创建者成为家庭所有者。",
+                    body = "填写家庭名称和所在时区。",
                     actionLabel = "创建家庭",
                     onAction = onAddHousehold,
                 )
@@ -599,7 +599,7 @@ private fun OverviewSection(
                 SetupCard(
                     icon = Icons.Rounded.Person,
                     title = "添加陪伴对象",
-                    body = "一台陪伴设备只绑定一位长者；称呼和家庭位置用于最小必要上下文。",
+                    body = "填写长者的称呼、位置和时区。",
                     actionLabel = "添加长者",
                     onAction = onAddRecipient,
                 )
@@ -646,7 +646,7 @@ private fun OverviewSection(
                                 if (binding == null) {
                                     Text("尚未绑定设备", style = MaterialTheme.typography.titleMedium)
                                     Text(
-                                        "生成二维码或动态码后，陪伴设备认领仍需家属明确批准。",
+                                        "生成激活码后，在此确认设备。",
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                     Button(
@@ -682,7 +682,7 @@ private fun OverviewSection(
                                         Text("呼叫陪伴设备")
                                     }
                                     Text(
-                                        "通话需陪伴设备现场明确接听；不会录音或转写。",
+                                        "需要陪伴设备现场接听。",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -741,15 +741,11 @@ private fun AuthoritySection(
     ) {
         item {
             SectionHeading("成员照护权限", Icons.Rounded.VerifiedUser)
-            Text(
-                "家庭角色与长者级照护权限分别校验；服务端始终按当前身份重新授权。",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
         if (!canManageMembers) {
             item {
                 Text(
-                    "只有家庭所有者可以查看或修改成员角色与长者级照护权限。",
+                    "仅家庭所有者可以管理成员权限。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -882,7 +878,7 @@ private fun HouseholdMemberRoleDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "角色决定家庭级权限。服务端会确认当前操作者仍是家庭所有者，并保护最后一位所有者。",
+                    "选择该成员的家庭角色。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 HOUSEHOLD_ROLE_OPTIONS.forEach { (code, label) ->
@@ -897,7 +893,7 @@ private fun HouseholdMemberRoleDialog(
                     value = currentPassword,
                     onValueChange = { currentPassword = it },
                     label = { Text("当前账号密码") },
-                    supportingText = { Text("原样发送，仅用于本次角色变更") },
+                    supportingText = { Text("用于确认身份") },
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     singleLine = true,
@@ -943,13 +939,13 @@ private fun RemoveHouseholdMemberDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
-                    "移除后，该成员的家庭角色、长者级照护权限、待接远程通话和未接受邀请都会由服务器同步撤销。",
+                    "移除后，该成员将无法再访问此家庭。",
                 )
                 OutlinedTextField(
                     value = currentPassword,
                     onValueChange = { currentPassword = it },
                     label = { Text("当前账号密码") },
-                    supportingText = { Text("原样发送，仅用于本次移除") },
+                    supportingText = { Text("用于确认身份") },
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     singleLine = true,
@@ -1042,7 +1038,7 @@ private fun CareAuthorityEditorDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
-                    "高风险能力按长者单独授权；提交时由服务器再次校验你的角色、权限与当前密码。",
+                    "为该成员选择可以使用的功能。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedTextField(
@@ -1082,7 +1078,7 @@ private fun CareAuthorityEditorDialog(
                     value = currentPassword,
                     onValueChange = { currentPassword = it },
                     label = { Text("当前账号密码") },
-                    supportingText = { Text("仅随本次请求发送，不会保存") },
+                    supportingText = { Text("用于确认身份") },
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     singleLine = true,
@@ -1160,7 +1156,7 @@ private fun RevokeBindingDialog(
         title = { Text("解绑 ${binding.displayName}") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("解绑后该设备的全部凭据立即失效，长者需要重新走现场激活与家属批准流程。")
+                Text("解绑后，此设备需要重新激活才能使用。")
                 OutlinedTextField(
                     value = reasonCode,
                     onValueChange = { reasonCode = it.take(64) },
@@ -1172,7 +1168,7 @@ private fun RevokeBindingDialog(
                     value = currentPassword,
                     onValueChange = { currentPassword = it },
                     label = { Text("当前账号密码") },
-                    supportingText = { Text("仅随本次请求发送，不会保存") },
+                    supportingText = { Text("用于确认身份") },
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     singleLine = true,
@@ -1242,14 +1238,14 @@ private fun MemoriesSection(
         item {
             ResourceToolbar(
                 title = "${selectedRecipient.preferredName}的记忆档案",
-                subtitle = "只录入本人或家属确认的信息；模型推测不得写回记忆。",
+                subtitle = "记录本人或家属已确认的生活信息。",
                 actionLabel = "新增记忆",
                 onAction = onAdd,
             )
         }
         if (state.memories.isEmpty()) {
             item {
-                InlineEmpty("还没有服务器记忆", "新增后，只有已授权的记忆才会进入新的陪伴上下文。")
+                InlineEmpty("还没有记忆", "点击新增开始记录。")
             }
         } else {
             items(state.memories, key = { it.id }) { memory ->
@@ -1331,15 +1327,15 @@ private fun CareSection(
     ) {
         item {
             ResourceToolbar(
-                title = "确定性日程与家庭待办",
-                subtitle = "提醒内容按家属原文执行，完成状态只通过明确命令变更。",
+                title = "日程与家庭待办",
+                subtitle = "管理提醒和家庭待办。",
                 actionLabel = "新增日程",
                 onAction = onAddRoutine,
             )
         }
         item { SectionHeading("日程规则", Icons.Rounded.Schedule) }
         if (state.routines.isEmpty()) {
-            item { InlineEmpty("暂无日程", "新建后，服务器会按时区生成待执行实例。") }
+            item { InlineEmpty("暂无日程", "点击新增开始安排。") }
         } else {
             items(state.routines, key = { "routine-${it.id}" }) { routine ->
                 RoutineCard(routine, onEditRoutine, onDeleteRoutine)
@@ -1347,7 +1343,7 @@ private fun CareSection(
         }
         item { SectionHeading("需要家属处理", Icons.AutoMirrored.Rounded.Assignment) }
         if (state.familyTasks.isEmpty()) {
-            item { InlineEmpty("暂无家庭待办", "这只表示当前没有待人工处理事项，不代表系统作出安全判断。") }
+            item { InlineEmpty("暂无家庭待办", "当前没有需要处理的事项。") }
         } else {
             items(state.familyTasks, key = { "task-${it.id}" }) { task ->
                 TaskCard(
@@ -1360,7 +1356,7 @@ private fun CareSection(
         }
         item { SectionHeading("近期日程实例", Icons.AutoMirrored.Rounded.EventNote) }
         if (state.occurrences.isEmpty()) {
-            item { InlineEmpty("暂无近期实例", "服务端生成实例后，这里会显示提醒和确认状态。") }
+            item { InlineEmpty("暂无近期实例", "暂无提醒记录。") }
         } else {
             items(state.occurrences, key = { "occurrence-${it.id}" }) { occurrence ->
                 OccurrenceCard(occurrence, onVerifyOccurrence)
@@ -1368,7 +1364,7 @@ private fun CareSection(
         }
         item { SectionHeading("照护事件", Icons.Rounded.TaskAlt) }
         if (state.careEvents.isEmpty()) {
-            item { InlineEmpty("暂无事件", "状态变化、本人确认和家属核验会形成可追溯事件。") }
+            item { InlineEmpty("暂无事件", "暂无动态。") }
         } else {
             items(state.careEvents, key = { "event-${it.id}" }) { event ->
                 OutlinedCard(Modifier.fillMaxWidth()) {
@@ -1399,7 +1395,7 @@ private fun PrivacySection(
     onDecide: (ConsentScopeDefinition, Boolean) -> Unit,
 ) {
     if (state.selectedRecipient == null) {
-        ResourceEmpty(Icons.Rounded.PrivacyTip, "尚未选择陪伴对象", "授权按具体长者分别管理，不使用全局默认授权。")
+        ResourceEmpty(Icons.Rounded.PrivacyTip, "尚未选择陪伴对象", "请先选择要管理的长者。")
         return
     }
     LazyColumn(
@@ -1410,8 +1406,8 @@ private fun PrivacySection(
         item {
             ActionNotice(
                 icon = Icons.Rounded.VerifiedUser,
-                title = "默认拒绝，逐项授权，随时撤回",
-                body = "每次决定都会形成不可变授权事件；真正的准入始终由服务器当前状态决定。",
+                title = "授权管理",
+                body = "选择可以使用的陪伴功能。",
             )
         }
         items(ConsentCatalog.entries, key = { it.scope }) { definition ->
@@ -1617,7 +1613,7 @@ private fun OccurrenceCard(
             Text(occurrence.routineTitle, style = MaterialTheme.typography.titleMedium)
             Text(occurrence.instructions, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
-                "内容来源：家属原文；系统不据此作医疗判断。",
+                "家属录入的提醒内容",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1820,7 +1816,6 @@ private fun HouseholdEditorDialog(
         title = { Text("创建家庭") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("创建者将成为家庭所有者。家庭是资料、成员和设备权限的边界。")
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it.take(100) },
@@ -2287,9 +2282,9 @@ private fun TaskDecisionDialog(
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
                     if (decision.resolve) {
-                        "服务器将记录处理结果 FAMILY_CONFIRMED。"
+                        "将标记为已处理。"
                     } else {
-                        "服务器将记录处理结果 NOT_ACTIONABLE；请确认该事项确实无需处理。"
+                        "将标记为无需处理，请确认该事项确实无需处理。"
                     },
                 )
                 OutlinedTextField(
@@ -2335,9 +2330,9 @@ private fun ConsentDecisionDialog(
                 Text(decision.definition.detail, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(
                     if (decision.grant) {
-                        "确认后授权立即生效，并形成不可变授权事件。"
+                        "授权后立即生效。"
                     } else {
-                        "撤回后，相关能力会在新的请求中立即被服务器拒绝。"
+                        "撤回后将停止使用此功能。"
                     },
                     fontWeight = FontWeight.SemiBold,
                 )

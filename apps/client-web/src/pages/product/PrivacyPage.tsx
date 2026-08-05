@@ -92,7 +92,7 @@ export const PrivacyPage = () => {
     <div className="privacy-api-page">
       <section className="privacy-principles">
         <ShieldCheck aria-hidden="true" size={27} />
-        <div><h2>默认拒绝，逐项授权，随时撤回</h2><p>每次决定都会形成不可变授权事件。页面显示结果，真正的准入由服务器当前状态决定。</p></div>
+        <div><h2>授权管理</h2><details><summary>了解授权规则</summary><p>你可以逐项授权或撤回功能。</p></details></div>
         <button className="secondary-button" type="button" disabled={loading} onClick={() => void load()}><RefreshCw aria-hidden="true" size={18} /> 刷新状态</button>
       </section>
 
@@ -106,8 +106,8 @@ export const PrivacyPage = () => {
           <span className="admin-access-heading-icon"><Bell aria-hidden="true" size={23} /></span>
           <div>
             <p className="eyebrow">站内隐私通知</p>
-            <h2 id="admin-accesses-title">管理员访问记录 / 站内通知</h2>
-            <p>查看开发期管理员何时、因何种目的读取了本家庭的记忆或对话原文。</p>
+            <h2 id="admin-accesses-title">管理员访问记录</h2>
+            <p>查看管理员读取本家庭数据的记录。</p>
           </div>
           {adminAccesses.isOwner && (
             <button
@@ -130,8 +130,8 @@ export const PrivacyPage = () => {
           <div className="admin-access-owner-only">
             <ShieldCheck aria-hidden="true" size={24} />
             <div>
-              <strong>仅家庭 OWNER 可见</strong>
-              <p>当前角色不含 OWNER。为隔离家庭隐私，本页不会请求或展示管理员访问记录。</p>
+              <strong>仅家庭所有者可见</strong>
+              <p>当前账号不能查看这些记录。</p>
             </div>
           </div>
         ) : (
@@ -172,13 +172,13 @@ export const PrivacyPage = () => {
               <div className="admin-access-state is-error">
                 <CircleAlert aria-hidden="true" size={28} />
                 <strong>暂时无法确认访问记录</strong>
-                <span>请检查网络后重试；在请求成功前，系统不会宣称没有未读通知。</span>
+                <span>访问记录加载失败，请重试。</span>
               </div>
             ) : adminAccesses.page.items.length === 0 ? (
               <div className="admin-access-state">
                 <CheckCircle2 aria-hidden="true" size={28} />
                 <strong>暂无管理员访问记录</strong>
-                <span>管理员成功读取原文后，访问类别、原因与时间会显示在这里。</span>
+                <span>暂无管理员访问记录。</span>
               </div>
             ) : (
               <ol className="admin-access-list" aria-label="管理员访问记录">
@@ -241,7 +241,6 @@ export const PrivacyPage = () => {
                   <History aria-hidden="true" size={18} />
                   {adminAccesses.loadingMore ? "正在加载…" : "加载更早记录"}
                 </button>
-                <span>每次最多加载 20 条，已加载记录不会被后台刷新移除。</span>
               </div>
             )}
           </>
@@ -249,7 +248,7 @@ export const PrivacyPage = () => {
       </section>
 
       {!workspace.recipientId ? (
-        <section className="empty-resource-state"><ShieldCheck aria-hidden="true" size={34} /><h2>尚未选择陪伴对象</h2><p>授权按具体陪伴对象分别管理，不使用全局默认授权。</p></section>
+        <section className="empty-resource-state"><ShieldCheck aria-hidden="true" size={34} /><h2>尚未选择陪伴对象</h2><p>请先选择要管理的长者。</p></section>
       ) : (
         <>
           {error && <div className="inline-alert danger" role="alert"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
@@ -261,7 +260,7 @@ export const PrivacyPage = () => {
               return (
                 <article key={scope} className={`consent-card ${copy.sensitive ? "is-sensitive" : ""}`}>
                   <div className="consent-card-heading"><span><Icon aria-hidden="true" size={23} /></span><div><h2>{copy.title}</h2><p>{copy.description}</p></div></div>
-                  <p className="consent-detail">{copy.detail}</p>
+                  <details className="consent-detail"><summary>了解影响</summary><p>{copy.detail}</p></details>
                   <div className="consent-card-footer">
                     <span className={`status-pill ${granted ? "success" : "neutral"}`}><span className="status-dot" /> {granted ? "已授权" : state?.decision === "REVOKED" ? "已撤回" : "未授权"}</span>
                     <button className={granted ? "danger-outline-button" : "primary-button"} type="button" disabled={loading || busyScope === scope} onClick={() => void decide(scope, !granted)}>{busyScope === scope ? "正在提交…" : granted ? "撤回" : "查看并授权"}</button>

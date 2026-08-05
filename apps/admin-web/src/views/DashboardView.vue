@@ -79,7 +79,7 @@ onMounted(load)
       <div>
         <p class="eyebrow">Operations overview</p>
         <h1 id="page-title">运行概览</h1>
-        <p>平台关键元数据的实时快照，不包含长者记忆或对话原文。</p>
+        <p>平台运行数据概览。</p>
       </div>
       <button class="button button--secondary" type="button" :disabled="loading" @click="load">
         <AppIcon name="refresh" :size="18" />
@@ -89,7 +89,7 @@ onMounted(load)
 
     <div v-if="inspectionDisabledNotice" class="inline-alert inline-alert--info" role="status">
       <AppIcon name="lock" :size="20" />
-      <span>当前构建未启用开发期原文检查；生产环境会隐藏入口并由服务端拒绝相关接口。</span>
+      <span>原文检查：未启用</span>
     </div>
 
     <StatePanel
@@ -119,20 +119,11 @@ onMounted(load)
         </article>
       </section>
 
-      <section class="surface operational-note">
-        <div>
-          <p class="eyebrow">数据边界</p>
-          <h2>默认只看元数据</h2>
-          <p>
-            用户标识经过脱敏；远程会话不录音、不转写；模型对话原文只能在开发环境通过独立授权流程查看。
-          </p>
-        </div>
-        <dl class="snapshot-metadata">
-          <div><dt>快照时间</dt><dd>{{ formatDate(dashboard.generatedAt) }}</dd></div>
-          <div><dt>数据来源</dt><dd>server-api / MySQL</dd></div>
-          <div><dt>缓存策略</dt><dd>浏览器不缓存</dd></div>
-        </dl>
-      </section>
+      <details class="surface operational-note">
+        <summary>数据范围</summary>
+        <p>概览不包含长者记忆或对话原文。</p>
+        <p>快照时间：{{ formatDate(dashboard.generatedAt) }}</p>
+      </details>
     </template>
   </div>
 </template>

@@ -41,35 +41,35 @@ const productMeta: Partial<
 > = {
   "workspace-overview": {
     title: "家庭概览",
-    description: "选择家庭和陪伴对象，完成记忆、日程、设备与隐私配置。",
+    description: "管理家庭与陪伴配置。",
   },
   "workspace-memories": {
     title: "记忆档案",
-    description: "管理服务器加密保存、可追溯修订和可删除的陪伴记忆。",
+    description: "管理陪伴记忆。",
   },
   "workspace-routines": {
     title: "日程与待办",
-    description: "维护家属原样录入的确定性日程，并处理家庭协同事项。",
+    description: "管理日程与家庭待办。",
   },
   "workspace-devices": {
     title: "陪伴设备",
-    description: "通过二维码或动态码激活一人一设备绑定。",
+    description: "添加和管理陪伴设备。",
   },
   "workspace-privacy": {
-    title: "隐私与 Consent 中心",
-    description: "逐项查看、授权或撤回摄像头、麦克风、模型与远程协助能力。",
+    title: "隐私与授权",
+    description: "管理长者的隐私授权。",
   },
   "workspace-remote": {
     title: "远程关怀通话",
-    description: "呼叫陪伴设备，等待现场接听后进行不录音、不转写的实时对话。",
+    description: "呼叫陪伴设备并进行实时对话。",
   },
   "workspace-settings": {
     title: "账号与安全",
-    description: "验证邮箱、查看登录会话并撤销不再使用的设备。",
+    description: "管理邮箱与登录设备。",
   },
   "accept-invitation": {
     title: "家庭邀请",
-    description: "确认并接受家庭管理员发送的一次性成员邀请。",
+    description: "接受家庭邀请。",
   },
 };
 
@@ -81,8 +81,7 @@ const LoadingScreen = () => (
     aria-live="polite"
   >
     <span className="loading-beacon" />
-    <strong>正在恢复安全会话</strong>
-    <p>访问令牌只保存在当前页面内存中。</p>
+    <strong>正在恢复登录状态</strong>
   </main>
 );
 

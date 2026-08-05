@@ -323,7 +323,7 @@ export const RemoteCallPage = () => {
             {availability?.busy
               ? "远程媒体正忙"
               : availability?.companionActive
-                ? "AI 陪伴中，可呼叫并在现场接听后切换"
+                ? "陪伴中，可呼叫"
                 : "当前空闲"}
           </span>
           <button
@@ -337,10 +337,10 @@ export const RemoteCallPage = () => {
         </div>
         <ul className="media-summary">
           <li>
-            <Camera aria-hidden="true" size={18} /> 接听后查看陪伴端画面
+            <Camera aria-hidden="true" size={18} /> 接听后开启音视频
           </li>
           <li>
-            <Mic aria-hidden="true" size={18} /> 家属麦克风与陪伴端双向说话
+            <Mic aria-hidden="true" size={18} /> 与陪伴端实时通话
           </li>
           <li>
             <ShieldCheck aria-hidden="true" size={18} /> recording=false ·
@@ -410,15 +410,9 @@ export const RemoteCallPage = () => {
         )}
         {!availability?.online && (
           <p className="offline-hint">
-            <WifiOff aria-hidden="true" size={17} /> 陪伴端需保持网页或 Android
-            App 在线并持续发送心跳。
+            <WifiOff aria-hidden="true" size={17} /> 陪伴设备当前离线。
           </p>
         )}
-        <p className="dev-signal-note">
-          陪伴端通过受设备凭据保护的 current
-          接口发现来电；浏览器联调通道只用于同源标签页加速提示。媒体和会话状态均使用真实
-          API 与 LiveKit，不会伪造接通。
-        </p>
       </aside>
     </div>
   );

@@ -130,10 +130,10 @@ export const ProductShell = ({
             );
           })}
         </nav>
-        <div className="authority-note">
-          <ShieldCheck aria-hidden="true" size={19} />
-          <p>页面切换不会改变权限，每次操作都由服务器重新鉴权。</p>
-        </div>
+        <details className="authority-note">
+          <summary><ShieldCheck aria-hidden="true" size={19} /> 权限说明</summary>
+          <p>功能权限由家庭所有者管理。</p>
+        </details>
       </aside>
 
       <div className="product-column">

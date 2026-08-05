@@ -13,14 +13,14 @@ import { BrandMark } from "../components/BrandMark";
 const roleCards = [
   {
     title: "家属工作区",
-    description: "管理家庭、陪伴对象、记忆、日程、授权与远程关怀通话。",
+    description: "管理长者资料与陪伴安排。",
     route: "workspace-overview" as const,
     icon: HeartHandshake,
     tone: "green",
   },
   {
     title: "陪伴设备模式",
-    description: "使用家属账号进入，再由二维码或动态码激活独立设备身份。",
+    description: "在长者设备上开始陪伴。",
     route: "companion" as const,
     icon: BellRing,
     tone: "blue",
@@ -55,8 +55,7 @@ export const WelcomePage = () => {
             <span>也懂得何时轻声提醒。</span>
           </h1>
           <p>
-            守忆灯塔面向轻度认知障碍长者，在家属明确授权的日常任务中持续看、持续听，
-            通过自然语音陪伴、主动提醒和可解释记录，让每一次协助都有温度，也有边界。
+            记录生活、按时提醒，让家人随时了解陪伴情况。
           </p>
           <div className="hero-actions">
             <button
@@ -86,13 +85,14 @@ export const WelcomePage = () => {
               下载 Android 应用
             </a>
           </div>
-          <div className="trust-row" aria-label="产品安全原则">
+          <details className="trust-row">
+            <summary>隐私与安全</summary>
             <span>
-              <ShieldCheck aria-hidden="true" size={17} /> 服务器逐项鉴权
+              <ShieldCheck aria-hidden="true" size={17} /> 权限可随时管理
             </span>
             <span>不识别药片与剂量</span>
             <span>不把沉默判定为危险</span>
-          </div>
+          </details>
         </div>
 
         <div className="lighthouse-visual" aria-label="守忆灯塔交互状态示意">
@@ -120,7 +120,7 @@ export const WelcomePage = () => {
       <section className="role-section" aria-labelledby="role-title">
         <div className="section-heading">
           <p className="eyebrow">选择体验入口</p>
-          <h2 id="role-title">同一个账号，两种清晰模式</h2>
+          <h2 id="role-title">选择使用方式</h2>
         </div>
         <div className="role-grid">
           {roleCards.map((card) => {

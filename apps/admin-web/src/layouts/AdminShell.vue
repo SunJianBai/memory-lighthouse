@@ -194,7 +194,6 @@ async function signOut(): Promise<void> {
         <span class="environment-badge" :class="`environment-badge--${deploymentEnvironment}`">
           {{ deploymentEnvironment === 'development' ? '开发环境' : '生产环境' }}
         </span>
-        <p>API 数据实时读取，不使用演示数据。</p>
       </div>
     </aside>
 

@@ -162,10 +162,10 @@ export const DevicesPage = () => {
   return (
     <div className="device-page-grid">
       <section className="panel-card activation-panel">
-        <div className="panel-heading"><div><p className="eyebrow">两阶段激活</p><h2>添加陪伴设备</h2></div><QrCode aria-hidden="true" size={25} /></div>
+        <div className="panel-heading"><div><p className="eyebrow">设备激活</p><h2>添加陪伴设备</h2></div><QrCode aria-hidden="true" size={25} /></div>
         {!challenge ? (
           <div className="activation-intro">
-            <p>生成后，可让陪伴设备扫描二维码，或输入公开编号与 8 位动态码。设备 Claim 后仍不能访问家庭数据，必须由你再次批准。</p>
+            <p>让陪伴设备扫码或输入动态码，然后在这里确认。</p>
             <button className="primary-button" type="button" disabled={busy || !workspace.recipientId} onClick={() => void createChallenge()}>{busy ? "正在生成…" : "生成激活二维码与动态码"}</button>
           </div>
         ) : (
@@ -179,7 +179,7 @@ export const DevicesPage = () => {
             </div>
             <div className={`activation-status status-${status?.status.toLowerCase()}`} role="status">
               {status?.status === "CLAIMED" ? <Clock3 aria-hidden="true" size={21} /> : status?.status === "APPROVED" || status?.status === "CONSUMED" ? <CheckCircle2 aria-hidden="true" size={21} /> : ["EXPIRED", "CANCELLED", "ATTEMPTS_EXCEEDED"].includes(status?.status ?? "") ? <XCircle aria-hidden="true" size={21} /> : <RefreshCw aria-hidden="true" size={21} />}
-              <div><strong>{status?.status === "PENDING" ? "等待设备 Claim" : status?.status === "CLAIMED" ? "设备已证明持有安装私钥，等待你的批准" : status?.status === "APPROVED" ? "已批准，等待设备兑换凭据" : status?.status === "CONSUMED" ? "激活完成" : `状态：${status?.status}`}</strong><p>批准前请确认屏幕前正是要绑定的陪伴设备。</p></div>
+              <div><strong>{status?.status === "PENDING" ? "等待设备连接" : status?.status === "CLAIMED" ? "等待你的确认" : status?.status === "APPROVED" ? "正在完成激活" : status?.status === "CONSUMED" ? "激活完成" : `状态：${status?.status}`}</strong><p>确认前请核对要绑定的设备。</p></div>
             </div>
             {status?.status === "CLAIMED" && (
               <div className="activation-approval-details" aria-label="待批准设备信息">
@@ -207,7 +207,7 @@ export const DevicesPage = () => {
         {message && <div className="form-message success" role="status">{message}</div>}
         {bindingError && <div className="form-message error" role="alert">{bindingError}</div>}
         {workspace.bindings.length === 0 ? (
-          <div className="compact-empty"><MonitorSmartphone aria-hidden="true" size={30} /><strong>暂无已绑定设备</strong><p>完成 Claim、家属批准和凭据兑换后显示在这里。</p></div>
+          <div className="compact-empty"><MonitorSmartphone aria-hidden="true" size={30} /><strong>暂无已绑定设备</strong><p>点击上方添加设备。</p></div>
         ) : (
           <div className="binding-list">{workspace.bindings.map((binding) => <article key={binding.id}><span className="device-icon"><MonitorSmartphone aria-hidden="true" size={23} /></span><div><strong>{binding.displayName}</strong><p>陪伴对象：{workspace.recipients.find((item) => item.id === binding.recipientId)?.preferredName ?? binding.recipientId}</p><small>激活于 {new Date(binding.activatedAt).toLocaleString("zh-CN")}</small></div><span className={`status-pill ${binding.status === "ACTIVE" ? "success" : "neutral"}`}>{binding.status}</span>{binding.status !== "REVOKED" && <button className="danger-button compact" type="button" disabled={bindingBusyId === binding.id} onClick={() => void revokeBinding(binding.id, binding.displayName)}><Trash2 aria-hidden="true" size={16} /> {bindingBusyId === binding.id ? "正在撤销…" : "撤销"}</button>}</article>)}</div>
         )}

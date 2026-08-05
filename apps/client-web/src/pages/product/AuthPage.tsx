@@ -33,7 +33,7 @@ type AuthPageProps = {
 };
 
 const modeCopy: Record<AuthMode, { title: string; description: string }> = {
-  login: { title: "欢迎回来", description: "登录后进入家属工作区或已激活的陪伴设备模式。" },
+  login: { title: "欢迎回来", description: "登录守忆灯塔。" },
   register: { title: "创建守忆灯塔账号", description: "注册后输入邮件中的 6 位验证码，即可完成邮箱验证。" },
   "forgot-password": { title: "重置密码", description: "输入邮箱或用户名，我们会发送一次性重置链接。" },
   "reset-password": { title: "设置新密码", description: "此链接只能使用一次；提交后其他会话将失效。" },
@@ -169,14 +169,13 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
           <BrandMark />
         </button>
         <div>
-          <p className="eyebrow">一个账号 · 两个清晰工作区</p>
-          <h1>家属负责授权，陪伴设备只使用激活后的设备身份。</h1>
-          <p>前端切换只改变页面；家庭、记忆、摄像头与麦克风权限都由服务器核验。</p>
+          <p className="eyebrow">守忆灯塔</p>
+          <h1>登录后管理家人和陪伴设备。</h1>
         </div>
         <ul>
-          <li><ShieldCheck aria-hidden="true" size={20} /> 家属远程通话不录音、不转写</li>
-          <li><LockKeyhole aria-hidden="true" size={20} /> Web 刷新令牌仅放在 HttpOnly Cookie</li>
-          <li><KeyRound aria-hidden="true" size={20} /> 邮箱验证码不写入地址栏或浏览器存储</li>
+          <li><ShieldCheck aria-hidden="true" size={20} /> 管理家庭与长者资料</li>
+          <li><LockKeyhole aria-hidden="true" size={20} /> 安排提醒与家庭待办</li>
+          <li><KeyRound aria-hidden="true" size={20} /> 添加和管理陪伴设备</li>
         </ul>
       </section>
 
@@ -198,7 +197,7 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
                 <Mail aria-hidden="true" size={19} />
                 <input id="register-email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} />
               </div>
-              <p className="field-help">创建家庭与激活设备前必须完成邮箱验证。</p>
+              <p className="field-help">验证邮箱后即可创建家庭和添加设备。</p>
 
               <label htmlFor="register-username">用户名（可选）</label>
               <input id="register-username" minLength={3} maxLength={32} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} />

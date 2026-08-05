@@ -96,7 +96,7 @@ export const OverviewPage = () => {
         body: { targetEmail: inviteEmail.trim(), roleCode: inviteRole },
       });
       setInviteEmail("");
-      setInviteMessage("邀请邮件已发送。对方登录后，令牌会通过请求正文提交。 ");
+      setInviteMessage("邀请邮件已发送。 ");
     } catch (inviteError) {
       setError(readableError(inviteError));
     } finally {
@@ -110,7 +110,7 @@ export const OverviewPage = () => {
         <ShieldCheck aria-hidden="true" size={28} />
         <div>
           <h2>先完成邮箱验证</h2>
-          <p>为了防止匿名账号创建家庭或激活摄像头设备，请先在账号设置中输入邮件里的 6 位验证码。</p>
+          <p>验证邮箱后即可创建家庭和添加设备。</p>
           <button className="primary-button" type="button" onClick={() => navigate("workspace-settings")}>前往账号设置</button>
         </div>
       </section>
@@ -123,7 +123,7 @@ export const OverviewPage = () => {
         <div className="setup-copy">
           <span><House aria-hidden="true" size={30} /></span>
           <h2>创建第一个家庭</h2>
-          <p>家庭是成员、陪伴对象、记忆、日程和设备授权的边界。创建者成为家庭所有者。</p>
+          <p>填写家庭名称和所在时区。</p>
         </div>
         <form className="panel-card stack-form" onSubmit={(event) => void createHousehold(event)}>
           <label htmlFor="household-name">家庭名称</label>
@@ -142,7 +142,7 @@ export const OverviewPage = () => {
         <div className="setup-copy">
           <span><CircleUserRound aria-hidden="true" size={30} /></span>
           <h2>添加陪伴对象</h2>
-          <p>一台陪伴设备只绑定一位长者。称呼和家庭位置会用于陪伴界面与模型最小上下文。</p>
+          <p>填写长者的称呼、位置和时区。</p>
         </div>
         <form className="panel-card stack-form" onSubmit={(event) => void createRecipient(event)}>
           <label htmlFor="recipient-name">姓名</label>
@@ -160,8 +160,8 @@ export const OverviewPage = () => {
 
   const quickActions = [
     { icon: BookHeart, title: "建立记忆", copy: "录入称呼、人物、偏好和位置等可核验信息。", route: "workspace-memories" as const },
-    { icon: CalendarCheck, title: "安排日程", copy: "把提醒内容原样交给陪伴端，不做医疗推断。", route: "workspace-routines" as const },
-    { icon: MonitorSmartphone, title: "激活设备", copy: "二维码或动态码 Claim 后，仍需家属现场批准。", route: "workspace-devices" as const },
+    { icon: CalendarCheck, title: "安排日程", copy: "添加长者的提醒安排。", route: "workspace-routines" as const },
+    { icon: MonitorSmartphone, title: "激活设备", copy: "生成设备激活码。", route: "workspace-devices" as const },
   ];
 
   return (
@@ -173,7 +173,7 @@ export const OverviewPage = () => {
           <h2>{workspace.recipient?.preferredName}</h2>
           <p>{workspace.recipient?.homeLabel || "尚未填写家庭位置"} · {workspace.recipient?.timezone}</p>
         </div>
-        <span className="status-pill success"><ShieldCheck aria-hidden="true" size={17} /> 服务器授权生效</span>
+        <span className="status-pill success"><ShieldCheck aria-hidden="true" size={17} /> 配置正常</span>
       </section>
 
       <section className="metric-grid" aria-label="家庭配置摘要">
@@ -203,7 +203,7 @@ export const OverviewPage = () => {
             {members.map((member) => <article key={member.id}><span>{member.displayName.slice(0, 1)}</span><div><strong>{member.displayName}</strong><p>{member.roleCodes.join(" / ")} · {member.status}</p></div></article>)}
           </div>
           <form className="stack-form invite-form" onSubmit={(event) => void inviteMember(event)}>
-            <div><MailPlus aria-hidden="true" size={22} /><div><strong>邀请家属</strong><p>邮件中的一次性令牌不会放入路径或查询参数。</p></div></div>
+            <div><MailPlus aria-hidden="true" size={22} /><div><strong>邀请家属</strong><p>通过邮件邀请家人加入。</p></div></div>
             <label htmlFor="invite-email">对方邮箱</label>
             <input id="invite-email" type="email" required maxLength={320} value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} />
             <label htmlFor="invite-role">家庭角色</label>

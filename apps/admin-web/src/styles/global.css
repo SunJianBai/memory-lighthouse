@@ -852,6 +852,11 @@ h3 {
   padding: var(--space-6);
 }
 
+.operational-note summary {
+  cursor: pointer;
+  font-weight: 750;
+}
+
 .operational-note p:last-child {
   max-width: 720px;
   margin-bottom: 0;

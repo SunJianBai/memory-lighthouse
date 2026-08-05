@@ -94,7 +94,7 @@ export const resourceDefinitions: Record<string, ResourceDefinition> = {
   users: {
     endpoint: 'users',
     title: '用户',
-    description: '仅展示账号元数据与脱敏登录标识，不展示密码或认证凭据。',
+    description: '用户账号与状态。',
     searchPlaceholder: '搜索用户 ID、昵称或登录标识',
     statusOptions: ['ACTIVE', 'DISABLED'],
     columns: [
@@ -124,7 +124,7 @@ export const resourceDefinitions: Record<string, ResourceDefinition> = {
   households: {
     endpoint: 'households',
     title: '家庭',
-    description: '查看家庭空间、成员、长者与陪伴设备绑定数量。',
+    description: '家庭与成员统计。',
     searchPlaceholder: '搜索家庭 ID 或名称',
     statusOptions: ['ACTIVE', 'DISABLED'],
     columns: [
@@ -153,7 +153,7 @@ export const resourceDefinitions: Record<string, ResourceDefinition> = {
   devices: {
     endpoint: 'devices',
     title: '设备',
-    description: '查看陪伴端设备版本、在线心跳与一对一绑定状态。',
+    description: '设备绑定与在线状态。',
     searchPlaceholder: '搜索设备 ID、厂商或型号',
     statusOptions: ['ACTIVE', 'REVOKED', 'DISABLED'],
     columns: [
@@ -175,7 +175,7 @@ export const resourceDefinitions: Record<string, ResourceDefinition> = {
   'model-sessions': {
     endpoint: 'model-sessions',
     title: '模型会话',
-    description: '查看模型运行元数据与错误码；对话原文不在此列表中暴露。',
+    description: '模型会话与运行状态。',
     searchPlaceholder: '搜索会话 ID、模型、服务商或错误码',
     statusOptions: ['ACTIVE', 'ENDED', 'FAILED'],
     columns: [
@@ -205,7 +205,7 @@ export const resourceDefinitions: Record<string, ResourceDefinition> = {
   'remote-sessions': {
     endpoint: 'remote-sessions',
     title: '远程会话',
-    description: '仅展示现场接听式远程通话的连接元数据；不录音、不转写。',
+    description: '远程通话状态。',
     searchPlaceholder: '搜索会话、家庭、长者、设备绑定或结束原因',
     statusOptions: [
       'RINGING',
@@ -253,7 +253,7 @@ export const resourceDefinitions: Record<string, ResourceDefinition> = {
   'audit-logs': {
     endpoint: 'audit-logs',
     title: '审计日志',
-    description: '按时间倒序查看不可变审计链事件，哈希用于检测记录被篡改。',
+    description: '管理操作记录。',
     searchPlaceholder: '搜索日志 ID、动作、资源、请求号',
     statusOptions: ['ALLOW', 'DENY'],
     columns: [

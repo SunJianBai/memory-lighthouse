@@ -131,7 +131,7 @@ export const MemoriesApiPage = () => {
   };
 
   const remove = async (memory: MemoryView) => {
-    if (!householdId || !window.confirm(`确认删除“${memory.title}”吗？删除后不会再进入模型上下文。`)) return;
+    if (!householdId || !window.confirm(`确认删除“${memory.title}”吗？删除后将无法在陪伴中使用。`)) return;
     setBusy(true);
     setError("");
     try {
@@ -156,7 +156,7 @@ export const MemoriesApiPage = () => {
       <section className="resource-toolbar">
         <div>
           <strong>{recipient?.preferredName}的记忆档案</strong>
-          <p>这里只显示服务器中当前有效的加密记忆。</p>
+          <p>共 {items.length} 条记忆。</p>
         </div>
         <div>
           <button className="secondary-button" type="button" disabled={loading} onClick={() => void load()}>
@@ -170,7 +170,7 @@ export const MemoriesApiPage = () => {
 
       {formOpen && (
         <form className="panel-card resource-form" onSubmit={(event) => void create(event)}>
-          <div className="panel-heading"><div><p className="eyebrow">家属录入</p><h2>{editing ? "更新记忆并生成新修订" : "新增可核验记忆"}</h2></div></div>
+          <div className="panel-heading"><div><p className="eyebrow">家属录入</p><h2>{editing ? "编辑记忆" : "新增记忆"}</h2></div></div>
           <div className="form-grid two-columns">
             <label>类型
               <span className="select-wrap"><select value={kind} onChange={(event) => setKind(event.target.value)}>{Object.entries(kindLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><ChevronDown aria-hidden="true" size={17} /></span>
@@ -183,7 +183,7 @@ export const MemoriesApiPage = () => {
           <input id="memory-title" required maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} />
           <label htmlFor="memory-content">内容</label>
           <textarea id="memory-content" required maxLength={20_000} rows={5} value={content} onChange={(event) => setContent(event.target.value)} />
-          <p className="field-help"><ShieldCheck aria-hidden="true" size={16} /> 仅录入本人或家属确认的信息；模型不得把推测写回记忆。</p>
+          <p className="field-help"><ShieldCheck aria-hidden="true" size={16} /> 请填写本人或家属已确认的信息。</p>
           <div className="form-actions"><button className="secondary-button" type="button" onClick={closeForm}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? "正在保存…" : editing ? "保存新修订" : "保存记忆"}</button></div>
         </form>
       )}
@@ -192,7 +192,7 @@ export const MemoriesApiPage = () => {
       {loading ? (
         <div className="resource-skeleton" aria-label="正在加载记忆"><span /><span /><span /></div>
       ) : items.length === 0 ? (
-        <EmptyMemory title="还没有服务器记忆" copy="新增第一条记忆后，只有在已授权记忆存储时才会进入陪伴上下文。" />
+        <EmptyMemory title="还没有记忆" copy="点击新增开始记录。" />
       ) : (
         <section className="memory-api-grid" aria-label="记忆列表">
           {items.map((memory) => (

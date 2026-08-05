@@ -266,7 +266,7 @@ onBeforeUnmount(clearInspectionResult)
       <div>
         <p class="eyebrow eyebrow--danger">Development only · high risk</p>
         <h1 id="page-title">开发期原文检查</h1>
-        <p>仅用于模型能力验证与已登记问题排查；原文查看不是普通管理功能。</p>
+        <p>申请、审批并执行原文检查。</p>
       </div>
       <RouterLink class="button button--secondary" to="/audit-logs">
         <AppIcon name="audit" :size="18" />查看审计日志
@@ -276,16 +276,16 @@ onBeforeUnmount(clearInspectionResult)
     <section class="risk-banner" role="alert">
       <AppIcon name="warning" :size="26" />
       <div>
-        <strong>每次查看都会留下操作者、授权、资源与请求号水印，并写入哈希链审计日志。</strong>
-        <p>必须存在家庭/长者当前同意，且申请人不能自批。成功查看后，系统会向该家庭的 OWNER 发送站内通知；页面不会持久化原文，并在 60 秒后自动清屏。</p>
+        <strong>原文访问将被审计。</strong>
+        <p>需双人审批；访问后通知家庭所有者，内容将在 60 秒后清除。</p>
       </div>
     </section>
 
     <StatePanel
       v-if="!runtimeAvailable"
       kind="locked"
-      title="原文检查已由服务端关闭"
-      message="这是非开发环境的预期安全状态。前端入口与服务端接口必须同时显式启用，否则不能查看原文。"
+      title="原文检查未启用"
+      message="当前环境未启用原文检查。"
     />
 
     <template v-else>
@@ -301,7 +301,7 @@ onBeforeUnmount(clearInspectionResult)
       >
         <div class="section-heading">
           <span class="step-number">1</span>
-          <div><h2 id="grant-request-title">申请短期授权</h2><p>范围越小越好，最长 15 分钟。</p></div>
+          <div><h2 id="grant-request-title">申请短期授权</h2></div>
         </div>
 
         <form class="form-grid" @submit.prevent="submitGrantRequest">
@@ -324,6 +324,7 @@ onBeforeUnmount(clearInspectionResult)
           <label class="field fieldset-span">
             <span>具体原因 <b aria-hidden="true">*</b></span>
             <textarea v-model="requestForm.reason" required maxlength="1000" rows="3" placeholder="说明待验证的模型行为或问题；该原因会对家庭 OWNER 可见，请勿填写原文、内部工单号或无关隐私。"></textarea>
+            <small>请尽量缩小检查范围，授权最长 15 分钟。</small>
           </label>
           <label class="field">
             <span>工单/实验编号</span>
@@ -353,7 +354,7 @@ onBeforeUnmount(clearInspectionResult)
         <div class="section-heading section-heading--between">
           <div class="section-heading__title">
             <span class="step-number">2</span>
-            <div><h2 id="grant-list-title">审批与选择授权</h2><p>申请人与审批人必须是不同账号。</p></div>
+            <div><h2 id="grant-list-title">授权记录</h2></div>
           </div>
           <button class="button button--secondary" type="button" :disabled="grantsLoading" @click="loadGrants(grants?.page || 1)">
             <AppIcon name="refresh" :size="18" />刷新
@@ -412,7 +413,7 @@ onBeforeUnmount(clearInspectionResult)
       >
         <div class="section-heading">
           <span class="step-number step-number--danger">3</span>
-          <div><h2 id="original-title">按资源查看原文</h2><p>读取动作会立即产生审计记录；成功读取还会通知该家庭的所有 OWNER。</p></div>
+          <div><h2 id="original-title">查看原文</h2></div>
         </div>
 
         <form class="form-grid" @submit.prevent="inspectOriginal">
@@ -459,8 +460,7 @@ onBeforeUnmount(clearInspectionResult)
           <div class="inspection-family-notice" role="status">
             <AppIcon name="check" :size="20" />
             <div>
-              <strong>已通知家庭 OWNER</strong>
-              <p>本次成功访问的时间、实际数据类别与申请原因已进入该家庭的站内通知记录。</p>
+              <strong>已通知家庭所有者</strong>
             </div>
           </div>
           <div class="original-result__watermark" aria-hidden="true">

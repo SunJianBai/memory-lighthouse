@@ -359,6 +359,30 @@ h3 {
   font-size: 0.9rem;
 }
 
+.trust-row summary,
+.authority-note summary,
+.care-boundary summary,
+.privacy-principles summary,
+.consent-detail summary {
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.trust-row[open] summary,
+.authority-note[open] summary {
+  flex-basis: 100%;
+}
+
+.authority-note[open],
+.care-boundary[open] {
+  flex-wrap: wrap;
+}
+
+.care-boundary p,
+.consent-detail p {
+  margin: 8px 0 0;
+}
+
 .trust-row span {
   display: inline-flex;
   align-items: center;

@@ -28,7 +28,7 @@ describe("family session route boundary", () => {
       /if \(!deviceSession\.hasCredential\(\)\) return;[\s\S]*await lockToDeviceMode\(\);[\s\S]*await loadContext\(\)/,
     );
     const transition = companionPageSource.slice(
-      companionPageSource.indexOf('setNotice("家属已批准'),
+      companionPageSource.indexOf('setNotice("家属已确认'),
       companionPageSource.indexOf('setNotice("设备激活完成'),
     );
     const lockIndex = transition.indexOf("await lockToDeviceMode()");

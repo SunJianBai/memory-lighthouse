@@ -45,17 +45,9 @@ async function submit(): Promise<void> {
         <span><strong>守忆灯塔</strong><small>Memory Lighthouse</small></span>
       </div>
       <div>
-        <p class="eyebrow">平台运营与安全审计</p>
-        <h1 id="product-title">让每一次陪伴，都有边界、有记录、有回应。</h1>
-        <p class="login-introduction__copy">
-          管理端只展示履职所需元数据。开发期原文检查采用独立授权、双人审批与不可变审计，生产环境硬关闭。
-        </p>
+        <p class="eyebrow">平台运营</p>
+        <h1 id="product-title">守忆灯塔管理中心</h1>
       </div>
-      <ul class="trust-list" aria-label="安全能力">
-        <li><AppIcon name="check" :size="18" />账号会话采用短期访问令牌</li>
-        <li><AppIcon name="check" :size="18" />敏感原文不写入浏览器存储</li>
-        <li><AppIcon name="check" :size="18" />所有管理数据来自真实 API</li>
-      </ul>
     </section>
 
     <section class="login-panel" aria-labelledby="login-title">
@@ -107,7 +99,7 @@ async function submit(): Promise<void> {
         </button>
 
         <p class="login-card__privacy">
-          登录即表示你理解：管理操作可能被记录到安全审计日志中。
+          管理操作将记录在审计日志中。
         </p>
       </form>
     </section>

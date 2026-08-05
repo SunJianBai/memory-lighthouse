@@ -238,10 +238,10 @@ export const CareAuthorityPanel = ({
     return (
       <section className="panel-card authority-management-panel">
         <div className="panel-heading">
-          <div><p className="eyebrow">长者级权限</p><h2>{recipientName} 的 Care Authority</h2></div>
+          <div><p className="eyebrow">成员权限</p><h2>{recipientName} 的照护权限</h2></div>
           <ShieldCheck aria-hidden="true" size={24} />
         </div>
-        <p className="field-help">只有家庭 OWNER 可以查看和修改成员的长者级权限。</p>
+        <p className="field-help">仅家庭所有者可以管理成员权限。</p>
       </section>
     );
   }
@@ -249,14 +249,14 @@ export const CareAuthorityPanel = ({
   return (
     <section className="panel-card authority-management-panel">
       <div className="panel-heading">
-        <div><p className="eyebrow">成员角色与长者级权限</p><h2>{recipientName} 的 Care Authority</h2></div>
+        <div><p className="eyebrow">成员权限</p><h2>{recipientName} 的照护权限</h2></div>
         <UserCog aria-hidden="true" size={25} />
       </div>
       <p className="field-help">
-        家庭角色只给出基础边界；远程通话、设备激活、对话原文等高风险能力必须在此逐项授权。
+        为家庭成员选择可以使用的功能。
       </p>
       <label className="reauth-field" htmlFor="authority-current-password">
-        当前密码（每次敏感修改后立即清空）
+        当前密码（用于确认身份）
         <input
           id="authority-current-password"
           type="password"

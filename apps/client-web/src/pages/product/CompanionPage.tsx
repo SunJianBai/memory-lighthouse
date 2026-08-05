@@ -164,7 +164,7 @@ const runtimeStateFromContext = (
       preferredName: context.recipient.preferredName,
       birthday: "",
       homeLabel: "家庭陪伴设备",
-      communicationNotes: "仅使用服务器本次返回的最小陪伴上下文。",
+      communicationNotes: "请按照家属安排进行陪伴。",
     },
     trustedPeople: [],
     medications: [],
@@ -550,7 +550,7 @@ export const CompanionPage = () => {
 
   const claim = async (input: ActivationClaim) => {
     if (activationRecoveryRequired.current) {
-      setError("设备凭据仍在恢复中，请刷新本页继续恢复，不要用新的激活覆盖当前恢复句柄");
+      setError("正在恢复设备，请稍候。");
       return;
     }
     setBusy(true);
@@ -558,7 +558,7 @@ export const CompanionPage = () => {
     setNotice("");
     if (!activationExchange.current.reset()) {
       setBusy(false);
-      setError("设备凭据正在安全落盘，请等待本次激活完成后再发起新的激活");
+      setError("正在完成设备激活，请稍候。");
       return;
     }
     activationPollingEpoch.current += 1;
@@ -570,7 +570,7 @@ export const CompanionPage = () => {
       setChallengeId(nextChallengeId);
       persistPendingActivationChallenge(nextChallengeId);
       setChallengeStatus("CLAIMED");
-      setNotice("设备已完成 Claim。请回到家属端核对并批准此设备。 ");
+      setNotice("设备已连接，请回到家属端核对并确认。 ");
       stopScanner();
     } catch (claimError) {
       if (activationPollingEpoch.current === claimEpoch) {
@@ -641,11 +641,11 @@ export const CompanionPage = () => {
           status.approvedAt
         ) {
           await activationExchange.current.run(async () => {
-            setNotice("家属已批准，正在兑换短时访问令牌与轮换设备凭据…");
+            setNotice("家属已确认，正在完成激活…");
             await lockToDeviceMode();
             if (!deviceSession.hasCredential()) {
               if (status.status === "CONSUMED" && !status.recoveryToken) {
-                throw new Error("服务端未签发设备凭据恢复证明，请稍后重试");
+                throw new Error("设备恢复失败，请稍后重试");
               }
               await deviceSession.exchange(
                 challengeId,
@@ -670,7 +670,7 @@ export const CompanionPage = () => {
           stopped = true;
           activationRecoveryRequired.current = true;
           persistActivationRecoveryRequired(true);
-          setNotice("恢复句柄已保留；刷新本页后会使用服务端的新恢复令牌继续落盘。 ");
+          setNotice("设备恢复尚未完成，请刷新后继续。 ");
           setError(readableError(statusError));
           return;
         }
@@ -684,7 +684,7 @@ export const CompanionPage = () => {
           setNotice("");
           setError(
             isActivationRecoveryConflict(statusError)
-              ? "设备凭据恢复多次冲突，请重新扫描二维码或输入新的动态激活码"
+              ? "设备恢复失败，请重新扫描二维码或输入新的动态激活码"
               : readableError(statusError),
           );
           return;
@@ -851,8 +851,7 @@ export const CompanionPage = () => {
           <p>绑定编号末 6 位：{context?.bindingId.slice(-6)}</p>
         </div>
         <div className="inline-boundary">
-          <PhoneCall aria-hidden="true" size={18} /> 来电状态由服务端设备会话接口持续同步；
-          现场接听前，陪伴模型继续运行，远程通话不会占用摄像头或麦克风。
+          <PhoneCall aria-hidden="true" size={18} /> 等待家人来电
         </div>
       </div>
       {error && (
@@ -883,7 +882,7 @@ export const CompanionPage = () => {
           <span />
           <span />
         </div>
-        <p>正在读取陪伴设备安全存储…</p>
+        <p>正在加载陪伴设备…</p>
       </main>
     );
   }
@@ -928,15 +927,11 @@ export const CompanionPage = () => {
             </span>
             <p className="eyebrow">首次使用</p>
             <h1>把此浏览器激活为陪伴设备</h1>
-            <p>
-              此步骤会在浏览器安全存储中生成独立 Ed25519
-              安装密钥。一台设备只绑定一位长者，换人需要重新激活。
-            </p>
+            <p>扫描家属端二维码以激活此设备。</p>
             <ol>
-              <li>家属端为目标长者生成挑战</li>
-              <li>本设备扫码或输入动态码完成 Claim</li>
-              <li>家属核对设备后现场批准</li>
-              <li>本设备证明私钥持有并兑换凭据</li>
+              <li>扫码或输入动态码</li>
+              <li>家属核对并确认</li>
+              <li>激活完成</li>
             </ol>
           </div>
           <div className="activation-methods">
@@ -1065,7 +1060,7 @@ export const CompanionPage = () => {
           <p className="eyebrow">家庭成员来电</p>
           <h1>{context?.recipient.preferredName}，家人想和你说话</h1>
           <p>
-            现场接听前，当前陪伴对话继续运行；只有点击接听后，摄像头和麦克风才会切换给这次实时通话。通话不会录音，也不会转写。
+            接听后将开启摄像头和麦克风。本次通话不会录制。
           </p>
           <div
             className={`device-call-media ${

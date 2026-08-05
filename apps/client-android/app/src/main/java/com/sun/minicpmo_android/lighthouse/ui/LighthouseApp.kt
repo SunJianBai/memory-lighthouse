@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.view.WindowManager
+import com.sun.minicpmo_android.BuildConfig
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -475,7 +476,7 @@ private fun AuthScreen(
                 modifier = Modifier.semantics { heading() },
             )
             Text(
-                "让陪伴有温度，让家人更安心",
+                "家庭关怀与 AI 陪伴",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
@@ -593,29 +594,31 @@ private fun AuthScreen(
                 }
                 Spacer(Modifier.height(8.dp))
             }
-            TextButton(
-                onClick = { showServerSettings = !showServerSettings },
-                modifier = Modifier.height(48.dp),
-            ) {
-                Icon(Icons.Rounded.Settings, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("开发服务器设置")
-            }
-            if (showServerSettings) {
-                OutlinedCard(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedTextField(
-                            value = serverDraft,
-                            onValueChange = { serverDraft = it },
-                            label = { Text("API Base URL") },
-                            supportingText = { Text("正式环境仅允许 HTTPS；Debug 可连接本机 HTTP") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        OutlinedButton(
-                            onClick = { onSaveApiBase(serverDraft) },
-                            modifier = Modifier.fillMaxWidth().height(52.dp),
-                        ) { Text("保存服务器地址") }
+            if (BuildConfig.DEBUG) {
+                TextButton(
+                    onClick = { showServerSettings = !showServerSettings },
+                    modifier = Modifier.height(48.dp),
+                ) {
+                    Icon(Icons.Rounded.Settings, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("开发服务器设置")
+                }
+                if (showServerSettings) {
+                    OutlinedCard(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            OutlinedTextField(
+                                value = serverDraft,
+                                onValueChange = { serverDraft = it },
+                                label = { Text("API Base URL") },
+                                supportingText = { Text("仅用于开发调试") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            OutlinedButton(
+                                onClick = { onSaveApiBase(serverDraft) },
+                                modifier = Modifier.fillMaxWidth().height(52.dp),
+                            ) { Text("保存服务器地址") }
+                        }
                     }
                 }
             }
@@ -624,7 +627,7 @@ private fun AuthScreen(
                 Icon(Icons.Rounded.Security, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "令牌由 Android Keystore 加密保存",
+                    "安全登录",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -838,7 +841,7 @@ private fun AppHeader(
             ) {
                 Icon(Icons.Rounded.Lock, contentDescription = null, Modifier.size(18.dp))
                 Text(
-                        "专用陪伴模式 · 家属账号未保留",
+                        "专用陪伴模式",
                         style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -996,7 +999,7 @@ private fun DeviceCallAction(binding: CompanionBindingView, onRequestCall: (Stri
         Text("呼叫陪伴设备")
     }
     Text(
-        "需要长者设备现场明确接听；通话不录制、不转写。",
+        "需要长者设备现场接听。",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -1093,9 +1096,9 @@ private fun CompanionScreen(
         }
         OutlinedCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("隐私提示", fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                Text("使用提示", fontSize = 21.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    "摄像头和麦克风只会在您点击开始或现场接听后开启。家属不能静默接入。",
+                    "点击开始后将开启摄像头和麦克风。",
                     fontSize = 18.sp,
                     lineHeight = 28.sp,
                 )
@@ -1131,7 +1134,7 @@ private fun DeviceActivationScreen(
     ) {
         SectionTitle("激活陪伴设备", Icons.Rounded.Key)
         Text(
-            "请使用家属端生成的二维码完成绑定。家属确认前，本设备不会读取长者资料。",
+            "扫描家属端二维码以激活此设备。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         state.pendingDeviceActivation?.let { pending ->
@@ -1300,8 +1303,8 @@ private fun RemoteCallScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             NoticeCard(
-                title = "隐私保护已开启",
-                body = "本次通话不录音、不录像、不转写。摄像头和麦克风状态会明确显示。",
+                title = "本次通话不会录制",
+                body = "摄像头和麦克风状态会显示在屏幕上。",
             )
             if (familyPresentation?.mediaFailed == true) {
                 OutlinedCard(
@@ -1525,7 +1528,7 @@ private fun ActivationDialog(
                 Text("动态激活码", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(activation.dynamicCode, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    "请在陪伴设备上扫码或输入动态码，再核对设备信息并批准。凭据短时有效且仅可使用一次。",
+                    "在陪伴设备上扫码或输入动态码，然后核对设备信息。",
                     textAlign = TextAlign.Center,
                 )
                 if (approvalDetails == null) {
