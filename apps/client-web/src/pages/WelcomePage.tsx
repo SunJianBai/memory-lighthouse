@@ -1,6 +1,7 @@
 import {
   ArrowRight,
   BellRing,
+  Download,
   HeartHandshake,
   ShieldCheck,
   Sparkles,
@@ -76,6 +77,14 @@ export const WelcomePage = () => {
               <BellRing aria-hidden="true" size={20} />
               进入陪伴设备模式
             </button>
+            <a
+              className="secondary-button large"
+              href="https://github.com/SunJianBai/memory-lighthouse/releases/latest/download/memory-lighthouse-android.apk"
+              download
+            >
+              <Download aria-hidden="true" size={20} />
+              下载 Android 应用
+            </a>
           </div>
           <div className="trust-row" aria-label="产品安全原则">
             <span>

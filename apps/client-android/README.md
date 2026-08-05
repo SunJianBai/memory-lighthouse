@@ -27,6 +27,12 @@ cd D:\Codes\AI\OpenBMB\projects\memory-lighthouse\apps\client-android
 
 APK 输出：`app/build/outputs/apk/debug/app-debug.apk`。
 
+面向用户的最新安装包发布在 GitHub Releases，固定下载地址：
+
+```text
+https://github.com/SunJianBai/memory-lighthouse/releases/latest/download/memory-lighthouse-android.apk
+```
+
 默认 API Base URL 为：
 
 ```text
