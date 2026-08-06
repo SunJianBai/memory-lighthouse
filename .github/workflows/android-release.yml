@@ -71,12 +71,14 @@ jobs:
           install -d -m 0700 "$output_dir"
           install -m 0600 "$source_apk" "$output_apk"
 
-          apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          apksigner="$ANDROID_HOME/build-tools/35.0.1/apksigner"
           [[ -x "$apksigner" ]] || { echo '::error::apksigner is unavailable'; exit 1; }
-          cert_sha256="$($apksigner verify --print-certs "$output_apk" 2>&1 \
-            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
-            | tr -d '\r[:space:]')"
-          [[ "$cert_sha256" == "$EXPECTED_CERT_SHA256" ]] || {
+          "$apksigner" verify "$output_apk"
+          cert_sha256="$($apksigner verify --print-certs "$output_apk" \
+            | sed -n 's/^.* certificate SHA-256 digest: //p' \
+            | tr -d '\r[:space:]' \
+            | sort -u)"
+          printf '%s\n' "$cert_sha256" | grep -Fxq "$EXPECTED_CERT_SHA256" || {
             echo "::error::Release signing certificate mismatch: $cert_sha256"
             exit 1
           }
