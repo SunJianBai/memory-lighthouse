@@ -73,7 +73,7 @@ jobs:
 
           apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
           [[ -x "$apksigner" ]] || { echo '::error::apksigner is unavailable'; exit 1; }
-          cert_sha256="$($apksigner verify --print-certs "$output_apk" \
+          cert_sha256="$($apksigner verify --print-certs "$output_apk" 2>&1 \
             | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
             | tr -d '\r[:space:]')"
           [[ "$cert_sha256" == "$EXPECTED_CERT_SHA256" ]] || {
