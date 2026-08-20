@@ -42,6 +42,60 @@ data class CoordinatedRemoteCallState(
     val failureMessage: String? = null,
 )
 
+internal data class RemoteHeartbeatFailurePresentation(
+    val title: String,
+    val message: String,
+)
+
+internal fun remoteHeartbeatFailurePresentation(
+    error: Throwable?,
+): RemoteHeartbeatFailurePresentation? = when {
+    error is LighthouseApiException && (
+        error.status == 401 ||
+            error.status == 403 ||
+            error.code in setOf(
+                "AUTH_SESSION_REVOKED",
+                "DEVICE_NOT_ACTIVATED",
+                "DEVICE_REVOKED",
+                "REMOTE_CALL_NOT_ALLOWED",
+            )
+        ) -> RemoteHeartbeatFailurePresentation(
+        title = "通话授权已失效",
+        message = "服务器已撤销或拒绝本次通话授权，摄像头和麦克风已关闭。" +
+            "请由家属确认授权后重新发起。",
+    )
+    error is RemoteHeartbeatRetryExhaustedException -> RemoteHeartbeatFailurePresentation(
+        title = "通话已断开",
+        message = "网络连接未能在安全时限内恢复，摄像头和麦克风已关闭。" +
+            "请让家属重新发起通话。",
+    )
+    else -> null
+}
+
+internal fun remotePermissionFailurePresentation(
+    error: Throwable?,
+): RemoteHeartbeatFailurePresentation? =
+    if (error is RemoteCallPermissionsMissingException) {
+        RemoteHeartbeatFailurePresentation(
+            title = "权限未就绪，通话已断开",
+            message = "通知、摄像头或麦克风权限不完整；本次系统接听已安全断开。" +
+                "请打开应用补全权限后，让家属重新发起通话。",
+        )
+    } else {
+        null
+    }
+
+internal suspend fun <Accepted> acceptIncomingFromAppWithTelecom(
+    ensureTelecomSession: () -> Unit,
+    acceptOnServer: suspend () -> Accepted,
+    answerTelecom: suspend () -> Unit,
+): Accepted {
+    ensureTelecomSession()
+    val accepted = acceptOnServer()
+    answerTelecom()
+    return accepted
+}
+
 internal interface CompanionCallRuntime {
     fun showDiscovery()
     fun showIncoming(session: RemoteSessionView)
@@ -64,6 +118,10 @@ class RemoteCallCoordinator(
     private val liveKit = LiveKitCallController(appContext, scope)
     private val _state = MutableStateFlow(CoordinatedRemoteCallState())
     val state: StateFlow<CoordinatedRemoteCallState> = _state.asStateFlow()
+    private val _heartbeatConnectionState =
+        MutableStateFlow<RemoteHeartbeatConnectionState?>(null)
+    val heartbeatConnectionState: StateFlow<RemoteHeartbeatConnectionState?> =
+        _heartbeatConnectionState.asStateFlow()
     val liveCallState: StateFlow<LiveCallState> = liveKit.state
     val companionMediaHandoffState: StateFlow<CompanionMediaHandoffState> = mediaHandoff.state
 
@@ -71,6 +129,8 @@ class RemoteCallCoordinator(
     private var runtime: CompanionCallRuntime? = null
     private var discoveryJob: Job? = null
     private var heartbeatJob: Job? = null
+    private var heartbeatLeaseFailure: Throwable? = null
+    private var callFailure: Throwable? = null
     private val mediaStarts = mutableMapOf<String, CompletableDeferred<Boolean>>()
     private val locallyTerminatedSessionIds = ConcurrentHashMap.newKeySet<String>()
     private var handlingLiveKitFailure = false
@@ -97,7 +157,12 @@ class RemoteCallCoordinator(
         onSetInactive = { sessionId ->
             withTimeout(4_500) { endCompanionCall(sessionId, true, "telecom_inactive") }
         },
-        onFailure = { sessionId, error -> failCompanionCall(sessionId, error) },
+        onFailure = { sessionId, error ->
+            if (error is RemoteCallPermissionsMissingException) {
+                CompanionCallService.openIncomingUi(appContext, sessionId)
+            }
+            failCompanionCall(sessionId, error)
+        },
     )
 
     init {
@@ -234,13 +299,26 @@ class RemoteCallCoordinator(
                 check(startMediaForeground(remote)) {
                     "无法启动摄像头和麦克风前台服务；本次来电已结束，请让家属重新发起"
                 }
-                val accepted = if (remote.status == "RINGING") {
-                    repository.acceptDeviceRemoteSession(remote.id)
-                } else {
-                    remote
+                val acceptOnServer: suspend () -> RemoteSessionView = {
+                    if (remote.status == "RINGING") {
+                        repository.acceptDeviceRemoteSession(remote.id)
+                    } else {
+                        remote
+                    }.also { acceptedForCleanup = it }
                 }
-                acceptedForCleanup = accepted
-                if (!fromTelecom) telecom.answer(remote.id)
+                val accepted = if (fromTelecom) {
+                    acceptOnServer()
+                } else {
+                    acceptIncomingFromAppWithTelecom(
+                        ensureTelecomSession = {
+                            runtime?.showIncoming(remote)
+                            telecom.presentIncoming(remote)
+                        },
+                        acceptOnServer = acceptOnServer,
+                        answerTelecom = { telecom.answer(remote.id) },
+                    )
+                }
+                val joinTicketRenewalStartedAtMillis = monotonicNowMillis()
                 val ticket = repository.deviceJoinTicket(remote.id)
                 _state.value = _state.value.copy(
                     incoming = null,
@@ -250,7 +328,10 @@ class RemoteCallCoordinator(
                 )
                 runtime?.showOngoing(accepted)
                 liveKit.connect(ticket, CallSide.DEVICE)
-                startHeartbeat(remote.id)
+                startHeartbeat(
+                    sessionId = remote.id,
+                    initialSuccessfulRenewalAtMillis = joinTicketRenewalStartedAtMillis,
+                )
             } catch (error: Throwable) {
                 terminateLocalFirst(
                     sessionId,
@@ -414,11 +495,14 @@ class RemoteCallCoordinator(
         val lifecycle = CallLifecyclePolicy.initial().transition(
             CallLifecycleEvent.IncomingDiscovered(remote.id),
         )
+        _heartbeatConnectionState.value = null
         _state.value = CoordinatedRemoteCallState(incoming = remote, lifecycle = lifecycle)
         // The CallStyle notification is posted before addCall, satisfying Core
         // Telecom's five-second foreground-notification requirement.
         runtime?.showIncoming(remote)
-        telecom.presentIncoming(remote)
+        if (telecom.canPresentIncoming(remote)) {
+            telecom.presentIncoming(remote)
+        }
     }
 
     private suspend fun startMediaForeground(remote: RemoteSessionView): Boolean {
@@ -436,16 +520,28 @@ class RemoteCallCoordinator(
         }
     }
 
-    private fun startHeartbeat(sessionId: String) {
+    private fun startHeartbeat(
+        sessionId: String,
+        initialSuccessfulRenewalAtMillis: Long,
+    ) {
         heartbeatJob?.cancel()
+        heartbeatLeaseFailure = null
+        _heartbeatConnectionState.value = RemoteHeartbeatConnectionState.CONNECTED
         val leaseGuard = RemoteHeartbeatLeaseGuard(
             renewHeartbeat = repository::remoteHeartbeat,
             onLeaseLost = { failedSessionId, error ->
                 // Clear the field before failCompanionCall tears down media so
                 // releaseLocal does not cancel the coroutine performing teardown.
                 heartbeatJob = null
+                heartbeatLeaseFailure = error
                 failCompanionCall(failedSessionId, error)
             },
+            onConnectionStateChanged = { connectionState ->
+                if (_state.value.active?.id == sessionId) {
+                    _heartbeatConnectionState.value = connectionState
+                }
+            },
+            initialSuccessfulRenewalAtMillis = initialSuccessfulRenewalAtMillis,
         )
         heartbeatJob = scope.launch {
             while (isActive && _state.value.active?.id == sessionId) {
@@ -455,10 +551,13 @@ class RemoteCallCoordinator(
         }
     }
 
+    private fun monotonicNowMillis(): Long = System.nanoTime() / 1_000_000L
+
     private suspend fun failCompanionCall(sessionId: String, error: Throwable) {
         val current = _state.value.active ?: _state.value.incoming
         if (current?.id != sessionId || handlingLiveKitFailure) return
         handlingLiveKitFailure = true
+        callFailure = error
         try {
             terminateLocalFirst(
                 sessionId,
@@ -472,6 +571,7 @@ class RemoteCallCoordinator(
                 }
             }
         } finally {
+            callFailure = null
             handlingLiveKitFailure = false
         }
     }
@@ -501,15 +601,24 @@ class RemoteCallCoordinator(
         heartbeatJob?.cancel()
         heartbeatJob = null
         val current = _state.value
-        val failureTitle = if (event is CallLifecycleEvent.Failed) {
-            current.lifecycle.remoteFailureTitle()
-        } else {
-            null
+        val heartbeatDisconnected = event is CallLifecycleEvent.Failed &&
+            _heartbeatConnectionState.value == RemoteHeartbeatConnectionState.DISCONNECTED
+        val heartbeatFailurePresentation = heartbeatLeaseFailure
+            .takeIf { heartbeatDisconnected }
+            .let(::remoteHeartbeatFailurePresentation)
+        val permissionFailurePresentation = callFailure
+            .takeIf { event is CallLifecycleEvent.Failed }
+            .let(::remotePermissionFailurePresentation)
+        val failureOverride = permissionFailurePresentation ?: heartbeatFailurePresentation
+        val failureTitle = when {
+            failureOverride != null -> failureOverride.title
+            event is CallLifecycleEvent.Failed -> current.lifecycle.remoteFailureTitle()
+            else -> null
         }
-        val failureMessage = if (event is CallLifecycleEvent.Failed) {
-            current.lifecycle.remoteFailureMessage()
-        } else {
-            null
+        val failureMessage = when {
+            failureOverride != null -> failureOverride.message
+            event is CallLifecycleEvent.Failed -> current.lifecycle.remoteFailureMessage()
+            else -> null
         }
         val lifecycle = current.lifecycle.transition(event)
         _state.value = _state.value.copy(
@@ -526,6 +635,8 @@ class RemoteCallCoordinator(
         } else {
             telecom.forget(sessionId)
         }
+        heartbeatLeaseFailure = null
+        if (!heartbeatDisconnected) _heartbeatConnectionState.value = null
         runtime?.showDiscovery()
     }
 

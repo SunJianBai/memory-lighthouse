@@ -39,6 +39,7 @@ import {
   useOmniSession,
   type OmniSessionStartOverrides,
 } from "../hooks/use-omni-session";
+import { isCompanionStartCancelledError } from "../realtime/companion-start-lifecycle";
 import { useAppState } from "../state/app-state";
 import { formatClock, formatLongDate } from "../utils/format";
 
@@ -163,6 +164,7 @@ export const CareExperience = forwardRef<
           state.consent.cameraApproved ? "AUDIO_VIDEO" : "AUDIO",
         );
       } catch (error) {
+        if (isCompanionStartCancelledError(error)) return;
         setCoordinatorError(
           error instanceof Error ? error.message : "服务器未能创建陪伴会话",
         );

@@ -21,6 +21,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.createBitmap
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.sun.minicpmo_android.camera.CameraBindingLease
+import com.sun.minicpmo_android.camera.releaseCameraUseCases
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
@@ -62,42 +64,55 @@ fun QrScannerView(
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
-    val executor = remember { Executors.newSingleThreadExecutor() }
-    val analyzer = remember {
-        QrAnalyzer { value ->
-            ContextCompat.getMainExecutor(context).execute { currentOnQr(value) }
-        }
-    }
-
     AndroidView(factory = { previewView }, modifier = modifier)
 
     DisposableEffect(lifecycleOwner) {
+        val bindingLease = CameraBindingLease()
+        val executor = Executors.newSingleThreadExecutor()
+        val analyzer = QrAnalyzer { value ->
+            ContextCompat.getMainExecutor(context).execute {
+                bindingLease.runIfActive { currentOnQr(value) }
+            }
+        }
         val future = ProcessCameraProvider.getInstance(context)
         var provider: ProcessCameraProvider? = null
+        var preview: Preview? = null
+        var analysis: ImageAnalysis? = null
         future.addListener(
             {
                 runCatching {
-                    provider = future.get()
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
+                    bindingLease.runIfActive {
+                        val cameraProvider = future.get()
+                        val cameraPreview = Preview.Builder().build().also {
+                            it.surfaceProvider = previewView.surfaceProvider
+                        }
+                        val cameraAnalysis = ImageAnalysis.Builder()
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
+                            .also { it.setAnalyzer(executor, analyzer) }
+                        provider = cameraProvider
+                        preview = cameraPreview
+                        analysis = cameraAnalysis
+                        cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            CameraSelector.DEFAULT_BACK_CAMERA,
+                            cameraPreview,
+                            cameraAnalysis,
+                        )
                     }
-                    val analysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-                        .also { it.setAnalyzer(executor, analyzer) }
-                    provider?.unbindAll()
-                    provider?.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        analysis,
-                    )
-                }.onFailure { currentOnError(it.message ?: "摄像头启动失败") }
+                }.onFailure {
+                    releaseCameraUseCases(provider, preview, analysis)
+                    bindingLease.runIfActive {
+                        currentOnError(it.message ?: "摄像头启动失败")
+                    }
+                }
             },
             ContextCompat.getMainExecutor(context),
         )
         onDispose {
-            runCatching { provider?.unbindAll() }
+            bindingLease.dispose {
+                releaseCameraUseCases(provider, preview, analysis)
+            }
             executor.shutdownNow()
         }
     }

@@ -8,6 +8,9 @@ readonly runtime_mode=/usr/local/sbin/openbmb-runtime-mode
 readonly upstream_helper=/usr/local/libexec/openbmb-switch-api-upstream
 readonly api_deployer=/usr/local/sbin/openbmb-deploy-native-api
 readonly web_deployer=/usr/local/sbin/openbmb-web-release
+readonly node_bin=/opt/openbmb/runtime/node-v22.19.0-linux-x64/bin/node
+readonly current_api_pointer=/opt/openbmb/current-api
+readonly api_releases_root=/opt/openbmb/hybrid/api-releases
 
 fail() {
   printf 'PROMOTION GUARD: %s\n' "$*" >&2
@@ -18,7 +21,7 @@ fail() {
 [[ "$#" -ge 1 ]] || fail 'missing component'
 component="$1"
 
-for command_name in awk basename chown chmod curl df dirname find flock grep id sha256sum stat; do
+for command_name in awk basename chown chmod curl df dirname find flock grep id readlink sha256sum stat; do
   command -v "$command_name" >/dev/null || fail "missing command: $command_name"
 done
 for trusted_binary in "$runtime_mode" "$upstream_helper" "$api_deployer" "$web_deployer"; do
@@ -80,7 +83,96 @@ assert_hybrid_runtime() {
     fail 'the active native API slot is not ready'
 }
 
+read_api_baseline() {
+  local status current_app current_api release_target manifest source_sha
+  local -a lines=()
+  assert_hybrid_runtime
+  status="$($api_deployer status)" || fail 'could not read native API status under the shared lock'
+  mapfile -t lines <<<"$status"
+  [[ "${#lines[@]}" -eq 5 ]] || fail 'native API baseline status has an unexpected shape'
+  [[ "${lines[0]}" =~ ^current-app=(git-[0-9a-f]{12})$ ]] || \
+    fail 'native API baseline has an invalid current-app pointer'
+  current_app="${BASH_REMATCH[1]}"
+  [[ "${lines[1]}" =~ ^current-api=(git-[0-9a-f]{12})$ ]] || \
+    fail 'native API baseline has an invalid current-api pointer'
+  current_api="${BASH_REMATCH[1]}"
+  [[ "${lines[2]}" =~ ^previous-api=(none|git-[0-9a-f]{12})$ ]] || \
+    fail 'native API baseline has an invalid previous pointer'
+  [[ "${lines[3]}" == "upstream=$active_upstream" && "${lines[4]}" == pending=no ]] || \
+    fail 'native API baseline is not a settled active release'
+  [[ "$current_app" =~ ^git-[0-9a-f]{12}$ ]]
+
+  [[ -L "$current_api_pointer" ]] || fail 'native API baseline pointer is unavailable'
+  release_target="$(readlink -f -- "$current_api_pointer")" || \
+    fail 'native API baseline pointer cannot be resolved'
+  [[ "$(dirname -- "$release_target")" == "$api_releases_root" && \
+     "$(basename -- "$release_target")" == "$current_api" ]] || \
+    fail 'native API baseline pointer leaves the immutable release root'
+  [[ -d "$release_target" && ! -L "$release_target" && \
+     "$(stat -c %u -- "$release_target")" == 0 ]] || \
+    fail 'native API baseline release is unsafe'
+  [[ -z "$(find "$release_target" -maxdepth 0 -perm /0022 -print -quit)" ]] || \
+    fail 'native API baseline release is writable by group or other users'
+
+  manifest="$release_target/manifest.json"
+  [[ -f "$manifest" && ! -L "$manifest" && "$(stat -c %u -- "$manifest")" == 0 ]] || \
+    fail 'native API baseline manifest is unsafe'
+  [[ -z "$(find "$manifest" -maxdepth 0 -perm /0022 -print -quit)" ]] || \
+    fail 'native API baseline manifest is writable by group or other users'
+  [[ -f "$node_bin" && ! -L "$node_bin" && -x "$node_bin" && \
+     "$(stat -c %u -- "$node_bin")" == 0 ]] || \
+    fail 'fixed Node runtime is unavailable for API baseline verification'
+  [[ -z "$(find "$node_bin" -maxdepth 0 -perm /0022 -print -quit)" ]] || \
+    fail 'fixed Node runtime is writable by group or other users'
+
+  source_sha="$("$node_bin" -e '
+    const fs = require("node:fs");
+    const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (typeof manifest.sourceSha !== "string" || typeof manifest.releaseId !== "string") {
+      process.exit(65);
+    }
+    process.stdout.write(`${manifest.sourceSha}\t${manifest.releaseId}`);
+  ' "$manifest")" || fail 'native API baseline manifest cannot be parsed'
+  [[ "$source_sha" =~ ^([0-9a-f]{40})$'\t'(git-[0-9a-f]{12})$ ]] || \
+    fail 'native API baseline manifest identity is invalid'
+  [[ "${BASH_REMATCH[2]}" == "$current_api" && \
+     "$current_api" == "git-${BASH_REMATCH[1]:0:12}" ]] || \
+    fail 'native API baseline manifest does not match the active release'
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+read_web_baseline() {
+  local status current_release source_sha archive_sha
+  local -a lines=()
+  assert_hybrid_runtime
+  status="$($web_deployer status)" || fail 'could not read Web status under the shared lock'
+  mapfile -t lines <<<"$status"
+  [[ "${#lines[@]}" -eq 4 ]] || fail 'Web baseline status has an unexpected shape'
+  [[ "${lines[0]}" =~ ^current_release=(web-[0-9a-f]{40}-[0-9a-f]{16})$ ]] || \
+    fail 'Web baseline has an invalid current release'
+  current_release="${BASH_REMATCH[1]}"
+  [[ "${lines[1]}" =~ ^previous_release=(|web-[0-9a-f]{40}-[0-9a-f]{16})$ ]] || \
+    fail 'Web baseline has an invalid previous release'
+  [[ "${lines[2]}" =~ ^source_sha=([0-9a-f]{40})$ ]] || \
+    fail 'Web baseline source SHA is invalid'
+  source_sha="${BASH_REMATCH[1]}"
+  [[ "${lines[3]}" =~ ^archive_sha256=([0-9a-f]{64})$ ]] || \
+    fail 'Web baseline archive digest is invalid'
+  archive_sha="${BASH_REMATCH[1]}"
+  [[ "$current_release" == "web-$source_sha-${archive_sha:0:16}" ]] || \
+    fail 'Web baseline metadata does not match the active release'
+  printf '%s\n' "$source_sha"
+}
+
 case "$component" in
+  baseline)
+    [[ "$#" -eq 2 ]] || fail 'usage: remote-promotion-guard.sh baseline api|web'
+    case "$2" in
+      api) read_api_baseline ;;
+      web) read_web_baseline ;;
+      *) fail 'baseline component must be api or web' ;;
+    esac
+    ;;
   upload-preflight)
     [[ "$#" -eq 3 ]] || \
       fail 'usage: remote-promotion-guard.sh upload-preflight api|web REQUIRED_BYTES'

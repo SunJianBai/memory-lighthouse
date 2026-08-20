@@ -7,10 +7,23 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { apiClient, readableError } from "../../api/api-client";
 import type { MemoryView } from "../../api/types";
 import { useWorkspace } from "../../workspace/workspace-context";
+import { LatestScopedRequest } from "../../workspace/workspace-scope";
+import {
+  createMemoryFormScope,
+  isMemoryFormScopeCurrent,
+  mergeMemoryPage,
+  type MemoryFormScope,
+} from "./memory-page-state";
 
 const kindLabels: Record<string, string> = {
   PERSON: "人物",
@@ -21,36 +34,88 @@ const kindLabels: Record<string, string> = {
 };
 
 export const MemoriesApiPage = () => {
-  const { householdId, recipientId, recipient } = useWorkspace();
+  const {
+    householdId,
+    recipientId,
+    recipient,
+    workspaceScopeKey,
+  } = useWorkspace();
   const [items, setItems] = useState<MemoryView[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<MemoryView | null>(null);
+  const [formScope, setFormScope] = useState<MemoryFormScope | null>(null);
   const [kind, setKind] = useState("PREFERENCE");
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [sensitivity, setSensitivity] = useState("SENSITIVE");
+  const loadRequests = useRef(new LatestScopedRequest());
+  const currentScopeKey = useRef(workspaceScopeKey);
+  currentScopeKey.current = workspaceScopeKey;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (cursor: string | null = null) => {
     if (!householdId || !recipientId) {
       setItems([]);
+      setNextCursor(null);
       return;
     }
-    setLoading(true);
+    const append = Boolean(cursor);
+    const requestScopeKey = workspaceScopeKey;
+    const request = loadRequests.current.begin(requestScopeKey);
+    if (append) setLoadingMore(true);
+    else setLoading(true);
     setError("");
     try {
+      const query = new URLSearchParams({ limit: "50" });
+      if (cursor) query.set("cursor", cursor);
       const result = await apiClient.request<{ items: MemoryView[]; nextCursor: string | null }>(
-        `/households/${householdId}/care-recipients/${recipientId}/memories?limit=50`,
+        `/households/${householdId}/care-recipients/${recipientId}/memories?${query.toString()}`,
       );
-      setItems(result.items);
+      if (
+        !loadRequests.current.isCurrent(request) ||
+        currentScopeKey.current !== requestScopeKey
+      )
+        return;
+      setItems((current) => mergeMemoryPage(current, result.items, append));
+      setNextCursor(result.nextCursor);
     } catch (loadError) {
-      setError(readableError(loadError));
+      if (
+        loadRequests.current.isCurrent(request) &&
+        currentScopeKey.current === requestScopeKey
+      ) {
+        setError(readableError(loadError));
+      }
     } finally {
-      setLoading(false);
+      if (
+        loadRequests.current.isCurrent(request) &&
+        currentScopeKey.current === requestScopeKey
+      ) {
+        if (append) setLoadingMore(false);
+        else setLoading(false);
+      }
     }
-  }, [householdId, recipientId]);
+  }, [householdId, recipientId, workspaceScopeKey]);
+
+  useEffect(() => {
+    loadRequests.current.invalidate();
+    setLoading(false);
+    setLoadingMore(false);
+    setBusy(false);
+    setItems([]);
+    setNextCursor(null);
+    setFormOpen(false);
+    setEditing(null);
+    setFormScope(null);
+    setKind("PREFERENCE");
+    setSensitivity("SENSITIVE");
+    setTitle("");
+    setContent("");
+    setError("");
+  }, [workspaceScopeKey]);
 
   useEffect(() => {
     void load();
@@ -58,13 +123,18 @@ export const MemoriesApiPage = () => {
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
-    if (!householdId || !recipientId) return;
+    if (!isMemoryFormScopeCurrent(formScope, workspaceScopeKey)) {
+      setError("陪伴对象已切换，请重新打开记忆表单后再保存。");
+      return;
+    }
+    const submissionScope = formScope;
+    const editingAtSubmit = editing;
     setBusy(true);
     setError("");
     try {
-      const saved = editing
+      const saved = editingAtSubmit
         ? await apiClient.request<MemoryView>(
-            `/households/${householdId}/memories/${editing.id}`,
+            `/households/${submissionScope.householdId}/memories/${editingAtSubmit.id}`,
             {
               method: "PATCH",
               body: {
@@ -72,14 +142,14 @@ export const MemoriesApiPage = () => {
                 title: title.trim(),
                 content: content.trim(),
                 sensitivity,
-                verificationStatus: editing.verificationStatus,
+                verificationStatus: editingAtSubmit.verificationStatus,
                 changeReason: "家属在 Web 记忆档案中更新",
-                version: editing.version,
+                version: editingAtSubmit.version,
               },
             },
           )
         : await apiClient.request<MemoryView>(
-            `/households/${householdId}/care-recipients/${recipientId}/memories`,
+            `/households/${submissionScope.householdId}/care-recipients/${submissionScope.recipientId}/memories`,
             {
               method: "POST",
               body: {
@@ -92,22 +162,31 @@ export const MemoriesApiPage = () => {
               },
             },
           );
-      setItems((current) => editing
-        ? current.map((item) => item.id === saved.id ? saved : item)
-        : [saved, ...current]);
+      if (currentScopeKey.current !== submissionScope.key) return;
+      setItems((current) =>
+        editingAtSubmit
+          ? current.map((item) => (item.id === saved.id ? saved : item))
+          : [saved, ...current.filter((item) => item.id !== saved.id)],
+      );
       setTitle("");
       setContent("");
       setEditing(null);
+      setFormScope(null);
       setFormOpen(false);
     } catch (createError) {
-      setError(readableError(createError));
+      if (currentScopeKey.current === submissionScope.key) {
+        setError(readableError(createError));
+      }
     } finally {
-      setBusy(false);
+      if (currentScopeKey.current === submissionScope.key) setBusy(false);
     }
   };
 
   const openCreate = () => {
     setEditing(null);
+    setFormScope(
+      createMemoryFormScope(workspaceScopeKey, householdId, recipientId),
+    );
     setKind("PREFERENCE");
     setSensitivity("SENSITIVE");
     setTitle("");
@@ -117,6 +196,9 @@ export const MemoriesApiPage = () => {
 
   const openEdit = (memory: MemoryView) => {
     setEditing(memory);
+    setFormScope(
+      createMemoryFormScope(workspaceScopeKey, householdId, recipientId),
+    );
     setKind(memory.kind);
     setSensitivity(memory.sensitivity);
     setTitle(memory.title);
@@ -128,22 +210,29 @@ export const MemoriesApiPage = () => {
   const closeForm = () => {
     setFormOpen(false);
     setEditing(null);
+    setFormScope(null);
   };
 
   const remove = async (memory: MemoryView) => {
     if (!householdId || !window.confirm(`确认删除“${memory.title}”吗？删除后将无法在陪伴中使用。`)) return;
+    const submissionScopeKey = workspaceScopeKey;
+    const submissionHouseholdId = householdId;
     setBusy(true);
     setError("");
     try {
       await apiClient.request(
-        `/households/${householdId}/memories/${memory.id}?version=${memory.version}`,
+        `/households/${submissionHouseholdId}/memories/${memory.id}?version=${memory.version}`,
         { method: "DELETE" },
       );
-      setItems((current) => current.filter((item) => item.id !== memory.id));
+      if (currentScopeKey.current === submissionScopeKey) {
+        setItems((current) => current.filter((item) => item.id !== memory.id));
+      }
     } catch (removeError) {
-      setError(readableError(removeError));
+      if (currentScopeKey.current === submissionScopeKey) {
+        setError(readableError(removeError));
+      }
     } finally {
-      setBusy(false);
+      if (currentScopeKey.current === submissionScopeKey) setBusy(false);
     }
   };
 
@@ -156,11 +245,17 @@ export const MemoriesApiPage = () => {
       <section className="resource-toolbar">
         <div>
           <strong>{recipient?.preferredName}的记忆档案</strong>
-          <p>共 {items.length} 条记忆。</p>
+          <p>已加载 {items.length} 条记忆。</p>
         </div>
         <div>
-          <button className="secondary-button" type="button" disabled={loading} onClick={() => void load()}>
-            <RefreshCw aria-hidden="true" size={18} /> 刷新
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={loading || loadingMore}
+            onClick={() => void load()}
+          >
+            <RefreshCw aria-hidden="true" size={18} />
+            {loading ? "正在刷新…" : "刷新"}
           </button>
           <button className="primary-button" type="button" onClick={() => formOpen ? closeForm() : openCreate()} aria-expanded={formOpen}>
             <Plus aria-hidden="true" size={18} /> 新增记忆
@@ -213,6 +308,19 @@ export const MemoriesApiPage = () => {
             </article>
           ))}
         </section>
+      )}
+      {nextCursor && !loading && (
+        <div className="form-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={loadingMore || busy}
+            onClick={() => void load(nextCursor)}
+          >
+            <RefreshCw aria-hidden="true" size={18} />
+            {loadingMore ? "正在加载更多…" : "加载更多记忆"}
+          </button>
+        </div>
       )}
     </div>
   );

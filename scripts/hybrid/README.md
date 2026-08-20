@@ -90,6 +90,23 @@ what changed. The change detector evaluates:
 - `apps/client-web`, `apps/admin-web`, `design-system`, `packages/api-contracts`,
   `packages/event-contracts`
 
+Each component is reconciled from its currently promoted full source SHA. A
+non-production planning job reads that SHA only from an explicit successful
+`DEPLOYED` or `RECONCILED` marker written by a completed protected delivery; it
+never treats a successful CI run or GitHub's automatic deployment SHA as proof
+of promotion. When relevant changes exist, the protected job independently
+reads immutable production release metadata while the server operation lock is
+held and reconciles again before it builds. An unavailable, malformed,
+non-ancestor, or otherwise untrusted marker or server baseline fails open and
+publishes the component. A manual dispatch always forces publication.
+
+The workflow summary reports `DEPLOYED`, `SKIPPED`, or `FAILED`. A normal
+no-change decision completes in the planning job, so it does not open the
+protected `production` environment or create a production deployment record.
+During marker bootstrap or recovery, the protected job may discover that the
+locked server is already current; that one run is reported as `SKIPPED` and
+writes a `RECONCILED` marker for later planning runs.
+
 Immediately before either promotion, the runner rechecks the current remote `main`
 SHA. The server then
 holds `/run/lock/openbmb-operation.lock`, requires exactly `mode=hybrid`, a

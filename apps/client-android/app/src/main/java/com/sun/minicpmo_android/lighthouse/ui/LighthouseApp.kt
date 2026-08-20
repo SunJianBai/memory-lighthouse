@@ -3,8 +3,11 @@ package com.sun.minicpmo_android.lighthouse.ui
 import android.Manifest
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import android.view.WindowManager
 import com.sun.minicpmo_android.BuildConfig
 import androidx.activity.compose.BackHandler
@@ -117,11 +120,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sun.minicpmo_android.MainViewModel
 import com.sun.minicpmo_android.lighthouse.LighthouseViewModel
 import com.sun.minicpmo_android.lighthouse.call.CompanionMediaHandoffState
 import com.sun.minicpmo_android.lighthouse.call.CompanionMediaStopReason
+import com.sun.minicpmo_android.lighthouse.call.RemoteHeartbeatConnectionState
 import com.sun.minicpmo_android.lighthouse.camera.QrCodeImage
 import com.sun.minicpmo_android.lighthouse.camera.QrScannerView
 import com.sun.minicpmo_android.lighthouse.model.ActivationPresentation
@@ -149,12 +156,15 @@ fun LighthouseRoute(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val callState by viewModel.callState.collectAsStateWithLifecycle()
+    val heartbeatConnectionState by viewModel.heartbeatConnectionState.collectAsStateWithLifecycle()
     val mediaHandoffState by viewModel.companionMediaHandoffState.collectAsState()
     val updateState by updateManager.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var pendingPermissionAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var permissionRevision by remember { mutableStateOf(0) }
     val remoteHandoffInProgress = mediaHandoffState !is CompanionMediaHandoffState.Idle
     val familyActions = remember(viewModel) {
         FamilyUiActions(
@@ -193,9 +203,12 @@ fun LighthouseRoute(
         if (result.values.all { it }) {
             pendingPermissionAction?.invoke()
         } else {
-            scope.launch { snackbar.showSnackbar("需要相应权限才能执行此操作；应用不会静默开启摄像头或麦克风") }
+            scope.launch {
+                snackbar.showSnackbar(permissionRecoveryMessage(result.filterValues { !it }.keys))
+            }
         }
         pendingPermissionAction = null
+        permissionRevision += 1
     }
 
     fun withPermissions(permissions: List<String>, action: () -> Unit) {
@@ -205,6 +218,48 @@ fun LighthouseRoute(
             pendingPermissionAction = action
             permissionLauncher.launch(missing.toTypedArray())
         }
+    }
+
+    val permissionReadiness = remember(permissionRevision) {
+        companionPermissionReadiness(
+            notificationGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                context.hasPermission(Manifest.permission.POST_NOTIFICATIONS),
+            microphoneGranted = context.hasPermission(Manifest.permission.RECORD_AUDIO),
+            cameraGranted = context.hasPermission(Manifest.permission.CAMERA),
+        )
+    }
+
+    fun requestCompanionPermissions() {
+        val missing = buildList {
+            if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                !context.hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+            ) add(Manifest.permission.POST_NOTIFICATIONS)
+            if (!context.hasPermission(Manifest.permission.RECORD_AUDIO)) {
+                add(Manifest.permission.RECORD_AUDIO)
+            }
+            if (!context.hasPermission(Manifest.permission.CAMERA)) {
+                add(Manifest.permission.CAMERA)
+            }
+        }
+        withPermissions(missing) {}
+    }
+
+    fun openPermissionSettings() {
+        context.startActivity(
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", context.packageName, null),
+            ),
+        )
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) permissionRevision += 1
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     DisposableEffect(viewModel) {
@@ -237,7 +292,7 @@ fun LighthouseRoute(
             state.deviceActivated &&
             !context.hasPermission(Manifest.permission.POST_NOTIFICATIONS)
         ) {
-            permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+            withPermissions(listOf(Manifest.permission.POST_NOTIFICATIONS)) {}
         }
     }
 
@@ -248,10 +303,11 @@ fun LighthouseRoute(
         val sessionId = state.pendingSystemAnswerSessionId ?: return@LaunchedEffect
         val incoming = state.incomingRemoteSession?.takeIf { it.id == sessionId }
             ?: return@LaunchedEffect
-        val permissions = buildList {
-            if (incoming.media.receiveDeviceAudio) add(Manifest.permission.RECORD_AUDIO)
-            if (incoming.media.receiveDeviceVideo) add(Manifest.permission.CAMERA)
-        }
+        val permissions = incomingCallPermissions(
+            sdkInt = Build.VERSION.SDK_INT,
+            needsMicrophone = incoming.media.receiveDeviceAudio,
+            needsCamera = incoming.media.receiveDeviceVideo,
+        )
         withPermissions(permissions) {
             viewModel.acceptIncomingCall(sessionId)
             viewModel.consumeSystemAnswerIntent()
@@ -298,14 +354,11 @@ fun LighthouseRoute(
             incoming?.let {
                 IncomingCallDialog(
                     onAccept = {
-                        val permissions = buildList {
-                            if (incoming.media.receiveDeviceAudio) {
-                                add(Manifest.permission.RECORD_AUDIO)
-                            }
-                            if (incoming.media.receiveDeviceVideo) {
-                                add(Manifest.permission.CAMERA)
-                            }
-                        }
+                        val permissions = incomingCallPermissions(
+                            sdkInt = Build.VERSION.SDK_INT,
+                            needsMicrophone = incoming.media.receiveDeviceAudio,
+                            needsCamera = incoming.media.receiveDeviceVideo,
+                        )
                         withPermissions(permissions) {
                             viewModel.acceptIncomingCall()
                         }
@@ -367,6 +420,8 @@ fun LighthouseRoute(
                 else -> SignedInShell(
                     state = state,
                     callState = callState,
+                    heartbeatConnectionState = heartbeatConnectionState,
+                    permissionReadiness = permissionReadiness,
                     onSwitchRole = viewModel::switchRole,
                     onLogout = viewModel::logout,
                     onRequireFamilyAuthentication = viewModel::requireFamilyAuthentication,
@@ -386,12 +441,15 @@ fun LighthouseRoute(
                         }
                     },
                     onOpenAi = viewModel::openAiCompanion,
+                    onRequestCompanionPermissions = ::requestCompanionPermissions,
+                    onOpenPermissionSettings = ::openPermissionSettings,
                     onAcceptCall = {
                         val media = state.incomingRemoteSession?.media
-                        val permissions = buildList {
-                            if (media?.receiveDeviceAudio != false) add(Manifest.permission.RECORD_AUDIO)
-                            if (media?.receiveDeviceVideo != false) add(Manifest.permission.CAMERA)
-                        }
+                        val permissions = incomingCallPermissions(
+                            sdkInt = Build.VERSION.SDK_INT,
+                            needsMicrophone = media?.receiveDeviceAudio != false,
+                            needsCamera = media?.receiveDeviceVideo != false,
+                        )
                         withPermissions(permissions) { viewModel.acceptIncomingCall() }
                     },
                     onDeclineCall = viewModel::declineIncomingCall,
@@ -653,6 +711,8 @@ private fun AuthScreen(
 private fun SignedInShell(
     state: LighthouseUiState,
     callState: LiveCallState,
+    heartbeatConnectionState: RemoteHeartbeatConnectionState?,
+    permissionReadiness: CompanionPermissionReadiness,
     onSwitchRole: (AppRole) -> Unit,
     onLogout: () -> Unit,
     onRequireFamilyAuthentication: () -> Unit,
@@ -664,6 +724,8 @@ private fun SignedInShell(
     onClaimDynamic: (String, String) -> Unit,
     onOpenScanner: () -> Unit,
     onOpenAi: () -> Unit,
+    onRequestCompanionPermissions: () -> Unit,
+    onOpenPermissionSettings: () -> Unit,
     onAcceptCall: () -> Unit,
     onDeclineCall: () -> Unit,
     onDismissRemoteCallFailure: () -> Unit,
@@ -682,6 +744,7 @@ private fun SignedInShell(
             role = state.role,
             session = activeCall,
             callState = callState,
+            heartbeatConnectionState = heartbeatConnectionState,
             familyFailureLatched = state.remoteCallFailureSessionId == activeCall.id,
             onConnect = if (state.role == AppRole.FAMILY) onConnectFamilyCall else onConnectDeviceCall,
             onCancel = onCancelCall,
@@ -719,9 +782,12 @@ private fun SignedInShell(
                 } else {
                     CompanionScreen(
                         state,
+                        permissionReadiness,
                         onClaimDynamic,
                         onOpenScanner,
                         onOpenAi,
+                        onRequestCompanionPermissions,
+                        onOpenPermissionSettings,
                         onAcceptCall,
                         onDeclineCall,
                         onDismissRemoteCallFailure,
@@ -1094,9 +1160,12 @@ private fun DeviceCallAction(binding: CompanionBindingView, onRequestCall: (Stri
 @Composable
 private fun CompanionScreen(
     state: LighthouseUiState,
+    permissionReadiness: CompanionPermissionReadiness,
     onClaimDynamic: (String, String) -> Unit,
     onOpenScanner: () -> Unit,
     onOpenAi: () -> Unit,
+    onRequestPermissions: () -> Unit,
+    onOpenPermissionSettings: () -> Unit,
     onAcceptCall: () -> Unit,
     onDeclineCall: () -> Unit,
     onDismissRemoteCallFailure: () -> Unit,
@@ -1139,6 +1208,52 @@ private fun CompanionScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
+        OutlinedCard(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.outlinedCardColors(
+                containerColor = if (permissionReadiness.fullyReady) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.errorContainer
+                },
+            ),
+        ) {
+            Column(
+                Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        if (permissionReadiness.fullyReady) {
+                            Icons.Rounded.CheckCircle
+                        } else {
+                            Icons.Rounded.ErrorOutline
+                        },
+                        contentDescription = null,
+                    )
+                    Text(
+                        if (permissionReadiness.fullyReady) "设备已就绪" else "设备尚未完全就绪",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+                if (!permissionReadiness.fullyReady) {
+                    Text(
+                        "缺少${permissionReadiness.missingPermissionLabels.joinToString("、")}权限",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Button(onClick = onRequestPermissions, modifier = Modifier.fillMaxWidth()) {
+                        Text("补全权限")
+                    }
+                    TextButton(onClick = onOpenPermissionSettings, modifier = Modifier.fillMaxWidth()) {
+                        Text("打开系统设置")
+                    }
+                }
+            }
+        }
         state.remoteCallFailure?.let { failure ->
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth(),
@@ -1308,6 +1423,7 @@ private fun RemoteCallScreen(
     role: AppRole,
     session: RemoteSessionView,
     callState: LiveCallState,
+    heartbeatConnectionState: RemoteHeartbeatConnectionState?,
     familyFailureLatched: Boolean,
     onConnect: () -> Unit,
     onCancel: () -> Unit,
@@ -1369,6 +1485,9 @@ private fun RemoteCallScreen(
                         Spacer(Modifier.height(12.dp))
                         Text(
                             when {
+                                heartbeatConnectionState ==
+                                    RemoteHeartbeatConnectionState.RECONNECTING ->
+                                    "网络波动，正在重连"
                                 familyPresentation != null -> familyPresentation.title
                                 session.status == "RINGING" -> "等待陪伴设备现场接听"
                                 callState.phase == LiveCallPhase.CONNECTING -> "正在连接音视频"
@@ -1388,6 +1507,12 @@ private fun RemoteCallScreen(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (heartbeatConnectionState == RemoteHeartbeatConnectionState.RECONNECTING) {
+                NoticeCard(
+                    title = "正在重连",
+                    body = "网络暂时不可用，通话会在安全时限内自动重试。",
+                )
+            }
             NoticeCard(
                 title = "本次通话不会录制",
                 body = "摄像头和麦克风状态会显示在屏幕上。",
@@ -1749,6 +1874,54 @@ private fun RoleButton(
             Text(label)
         }
     }
+}
+
+internal data class CompanionPermissionReadiness(
+    val notificationGranted: Boolean,
+    val microphoneGranted: Boolean,
+    val cameraGranted: Boolean,
+) {
+    val fullyReady: Boolean
+        get() = notificationGranted && microphoneGranted && cameraGranted
+
+    val missingPermissionLabels: List<String>
+        get() = buildList {
+            if (!notificationGranted) add("通知")
+            if (!microphoneGranted) add("麦克风")
+            if (!cameraGranted) add("摄像头")
+        }
+}
+
+internal fun companionPermissionReadiness(
+    notificationGranted: Boolean,
+    microphoneGranted: Boolean,
+    cameraGranted: Boolean,
+) = CompanionPermissionReadiness(
+    notificationGranted = notificationGranted,
+    microphoneGranted = microphoneGranted,
+    cameraGranted = cameraGranted,
+)
+
+internal fun incomingCallPermissions(
+    sdkInt: Int,
+    needsMicrophone: Boolean,
+    needsCamera: Boolean,
+): List<String> = buildList {
+    if (sdkInt >= Build.VERSION_CODES.TIRAMISU) {
+        add(Manifest.permission.POST_NOTIFICATIONS)
+    }
+    if (needsMicrophone) add(Manifest.permission.RECORD_AUDIO)
+    if (needsCamera) add(Manifest.permission.CAMERA)
+}
+
+private fun permissionRecoveryMessage(deniedPermissions: Set<String>): String {
+    val labels = buildList {
+        if (Manifest.permission.POST_NOTIFICATIONS in deniedPermissions) add("通知")
+        if (Manifest.permission.RECORD_AUDIO in deniedPermissions) add("麦克风")
+        if (Manifest.permission.CAMERA in deniedPermissions) add("摄像头")
+    }
+    return "缺少${labels.ifEmpty { listOf("所需") }.joinToString("、")}权限；" +
+        "请在设备就绪卡片中重试，或打开系统设置授权"
 }
 
 private fun Context.hasPermission(permission: String): Boolean =

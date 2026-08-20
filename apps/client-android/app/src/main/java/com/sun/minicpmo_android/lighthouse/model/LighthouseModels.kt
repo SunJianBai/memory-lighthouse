@@ -434,6 +434,9 @@ data class CompanionModelConnection(
     val systemPrompt: String,
     /** Whether a future provider-supplied USER/ASR transcript may be retained. */
     val userTranscriptionAllowed: Boolean,
+    val promptVersion: Int? = null,
+    val memoryCount: Int? = null,
+    val routineCount: Int? = null,
 )
 
 data class RequestedRemoteMedia(

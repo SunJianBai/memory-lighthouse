@@ -44,6 +44,7 @@ class LighthouseViewModel internal constructor(
     val uiState: StateFlow<LighthouseUiState> = _uiState.asStateFlow()
 
     val callState: StateFlow<LiveCallState> = callCoordinator.liveCallState
+    val heartbeatConnectionState = callCoordinator.heartbeatConnectionState
     val companionMediaHandoffState: StateFlow<CompanionMediaHandoffState> =
         callCoordinator.companionMediaHandoffState
 

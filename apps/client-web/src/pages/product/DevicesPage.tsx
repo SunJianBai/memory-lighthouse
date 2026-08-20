@@ -9,13 +9,19 @@ import {
   XCircle,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiClient, readableError } from "../../api/api-client";
 import type {
   ActivationApprovalDetails,
   ActivationPresentation,
 } from "../../api/types";
 import { useWorkspace } from "../../workspace/workspace-context";
+import {
+  createWorkspaceOperationOwner,
+  isWorkspaceOperationOwnerCurrent,
+  LatestScopedRequest,
+  type WorkspaceOperationOwner,
+} from "../../workspace/workspace-scope";
 
 type ChallengeStatus = {
   status: string;
@@ -38,6 +44,8 @@ const networkSourceLabels: Record<
 export const DevicesPage = () => {
   const workspace = useWorkspace();
   const [challenge, setChallenge] = useState<ActivationPresentation | null>(null);
+  const [challengeOwner, setChallengeOwner] =
+    useState<WorkspaceOperationOwner | null>(null);
   const [status, setStatus] = useState<ChallengeStatus | null>(null);
   const [approvalDetails, setApprovalDetails] =
     useState<ActivationApprovalDetails | null>(null);
@@ -47,24 +55,68 @@ export const DevicesPage = () => {
   const [error, setError] = useState("");
   const [bindingError, setBindingError] = useState("");
   const [message, setMessage] = useState("");
+  const currentScopeKey = useRef(workspace.workspaceScopeKey);
+  currentScopeKey.current = workspace.workspaceScopeKey;
+  const challengePollRequests = useRef(new LatestScopedRequest());
+
+  useEffect(() => {
+    challengePollRequests.current.invalidate();
+    setChallenge(null);
+    setChallengeOwner(null);
+    setStatus(null);
+    setApprovalDetails(null);
+    setBusy(false);
+    setBindingBusyId("");
+    setCurrentPassword("");
+    setError("");
+    setBindingError("");
+    setMessage("");
+  }, [workspace.workspaceScopeKey]);
 
   const poll = useCallback(async () => {
-    if (!challenge) return;
+    if (
+      !challenge ||
+      !isWorkspaceOperationOwnerCurrent(
+        challengeOwner,
+        currentScopeKey.current,
+      )
+    )
+      return;
+    const polledChallenge = challenge;
+    const owner = challengeOwner;
+    const request = challengePollRequests.current.begin(
+      `${owner.scopeKey}:${polledChallenge.challengeId}`,
+    );
     try {
-      const next = await apiClient.request<ChallengeStatus>(`/activation-challenges/${challenge.challengeId}`, { authenticated: false, retryAuthentication: false });
+      const next = await apiClient.request<ChallengeStatus>(`/activation-challenges/${polledChallenge.challengeId}`, { authenticated: false, retryAuthentication: false });
+      if (
+        !challengePollRequests.current.isCurrent(request) ||
+        currentScopeKey.current !== owner.scopeKey
+      )
+        return;
       setStatus(next);
       if (next.status === "CLAIMED") {
         const details = await apiClient.request<ActivationApprovalDetails>(
-          `/activation-challenges/${challenge.challengeId}/approval-details`,
+          `/activation-challenges/${polledChallenge.challengeId}/approval-details`,
         );
+        if (
+          !challengePollRequests.current.isCurrent(request) ||
+          currentScopeKey.current !== owner.scopeKey
+        )
+          return;
         setApprovalDetails(details);
       } else {
         setApprovalDetails(null);
       }
     } catch (pollError) {
-      setError(readableError(pollError));
+      if (
+        challengePollRequests.current.isCurrent(request) &&
+        currentScopeKey.current === owner.scopeKey
+      ) {
+        setError(readableError(pollError));
+      }
     }
-  }, [challenge]);
+  }, [challenge, challengeOwner]);
 
   useEffect(() => {
     if (!challenge || ["CONSUMED", "CANCELLED", "EXPIRED", "ATTEMPTS_EXCEEDED"].includes(status?.status ?? "")) return;
@@ -73,60 +125,119 @@ export const DevicesPage = () => {
   }, [challenge, poll, status?.status]);
 
   useEffect(() => {
-    if (status?.status === "CONSUMED") void workspace.refreshBindings();
-  }, [status?.status, workspace.refreshBindings]);
+    if (
+      status?.status === "CONSUMED" &&
+      isWorkspaceOperationOwnerCurrent(
+        challengeOwner,
+        workspace.workspaceScopeKey,
+      )
+    ) {
+      void workspace.refreshBindings();
+    }
+  }, [
+    challengeOwner,
+    status?.status,
+    workspace.refreshBindings,
+    workspace.workspaceScopeKey,
+  ]);
 
   const createChallenge = async () => {
     if (!workspace.householdId || !workspace.recipientId) return;
+    const owner = createWorkspaceOperationOwner(
+      workspace.workspaceScopeKey,
+      workspace.householdId,
+      workspace.recipientId,
+    );
+    challengePollRequests.current.invalidate();
     setBusy(true);
     setError("");
     try {
-      const created = await apiClient.request<ActivationPresentation>(`/households/${workspace.householdId}/care-recipients/${workspace.recipientId}/activation-challenges`, { method: "POST", body: {} });
+      const created = await apiClient.request<ActivationPresentation>(`/households/${owner.householdId}/care-recipients/${owner.recipientId}/activation-challenges`, { method: "POST", body: {} });
+      if (currentScopeKey.current !== owner.scopeKey) return;
       setChallenge(created);
+      setChallengeOwner(owner);
       setApprovalDetails(null);
       setStatus({ status: "PENDING", expiresAt: created.expiresAt, claimedAt: null, approvedAt: null });
     } catch (createError) {
-      setError(readableError(createError));
+      if (currentScopeKey.current === owner.scopeKey) {
+        setError(readableError(createError));
+      }
     } finally {
-      setBusy(false);
+      if (currentScopeKey.current === owner.scopeKey) setBusy(false);
     }
   };
 
   const approve = async () => {
-    if (!challenge || !approvalDetails) return;
+    if (
+      !challenge ||
+      !approvalDetails ||
+      !isWorkspaceOperationOwnerCurrent(
+        challengeOwner,
+        currentScopeKey.current,
+      )
+    )
+      return;
+    const owner = challengeOwner;
+    const approvedChallenge = challenge;
+    const approvedDetails = approvalDetails;
     setBusy(true);
     setError("");
     try {
-      await apiClient.request(`/activation-challenges/${challenge.challengeId}/approve`, {
+      await apiClient.request(`/activation-challenges/${approvedChallenge.challengeId}/approve`, {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: { claimSnapshotToken: approvalDetails.claimSnapshotToken },
+        body: { claimSnapshotToken: approvedDetails.claimSnapshotToken },
       });
+      if (currentScopeKey.current !== owner.scopeKey) return;
       await poll();
-      await workspace.refreshBindings();
+      if (currentScopeKey.current === owner.scopeKey) {
+        await workspace.refreshBindings();
+      }
     } catch (approveError) {
-      setError(readableError(approveError));
+      if (currentScopeKey.current === owner.scopeKey) {
+        setError(readableError(approveError));
+      }
     } finally {
-      setBusy(false);
+      if (currentScopeKey.current === owner.scopeKey) setBusy(false);
     }
   };
 
   const cancel = async () => {
-    if (!challenge) return;
+    if (
+      !challenge ||
+      !isWorkspaceOperationOwnerCurrent(
+        challengeOwner,
+        currentScopeKey.current,
+      )
+    )
+      return;
+    const owner = challengeOwner;
+    const cancelledChallenge = challenge;
     setBusy(true);
     try {
-      await apiClient.request(`/activation-challenges/${challenge.challengeId}/cancel`, { method: "POST", body: { reasonCode: "FAMILY_CANCELLED" } });
+      await apiClient.request(`/activation-challenges/${cancelledChallenge.challengeId}/cancel`, { method: "POST", body: { reasonCode: "FAMILY_CANCELLED" } });
+      if (currentScopeKey.current !== owner.scopeKey) return;
+      challengePollRequests.current.invalidate();
       setChallenge(null);
+      setChallengeOwner(null);
       setStatus(null);
       setApprovalDetails(null);
     } catch (cancelError) {
-      setError(readableError(cancelError));
+      if (currentScopeKey.current === owner.scopeKey) {
+        setError(readableError(cancelError));
+      }
     } finally {
-      setBusy(false);
+      if (currentScopeKey.current === owner.scopeKey) setBusy(false);
     }
   };
 
   const revokeBinding = async (bindingId: string, displayName: string) => {
+    if (!workspace.householdId) return;
+    const owner = createWorkspaceOperationOwner(
+      workspace.workspaceScopeKey,
+      workspace.householdId,
+      workspace.recipientId,
+    );
     if (currentPassword.length === 0) {
       setBindingError("撤销设备前必须重新输入当前密码。");
       return;
@@ -140,7 +251,7 @@ export const DevicesPage = () => {
     setMessage("");
     try {
       await apiClient.request(
-        `/households/${workspace.householdId}/companion-bindings/${bindingId}`,
+        `/households/${owner.householdId}/companion-bindings/${bindingId}`,
         {
           method: "DELETE",
           body: {
@@ -149,33 +260,48 @@ export const DevicesPage = () => {
           },
         },
       );
-      await workspace.refreshBindings();
-      setMessage(`已撤销设备“${displayName}”。`);
+      if (currentScopeKey.current === owner.scopeKey) {
+        await workspace.refreshBindings();
+        if (currentScopeKey.current === owner.scopeKey) {
+          setMessage(`已撤销设备“${displayName}”。`);
+        }
+      }
     } catch (revokeError) {
-      setBindingError(readableError(revokeError));
+      if (currentScopeKey.current === owner.scopeKey) {
+        setBindingError(readableError(revokeError));
+      }
     } finally {
-      setCurrentPassword("");
-      setBindingBusyId("");
+      if (currentScopeKey.current === owner.scopeKey) {
+        setCurrentPassword("");
+        setBindingBusyId("");
+      }
     }
   };
+
+  const displayedChallenge = isWorkspaceOperationOwnerCurrent(
+    challengeOwner,
+    workspace.workspaceScopeKey,
+  )
+    ? challenge
+    : null;
 
   return (
     <div className="device-page-grid">
       <section className="panel-card activation-panel">
         <div className="panel-heading"><div><p className="eyebrow">设备激活</p><h2>添加陪伴设备</h2></div><QrCode aria-hidden="true" size={25} /></div>
-        {!challenge ? (
+        {!displayedChallenge ? (
           <div className="activation-intro">
             <p>让陪伴设备扫码或输入动态码，然后在这里确认。</p>
             <button className="primary-button" type="button" disabled={busy || !workspace.recipientId} onClick={() => void createChallenge()}>{busy ? "正在生成…" : "生成激活二维码与动态码"}</button>
           </div>
         ) : (
           <div className="activation-challenge">
-            <div className="qr-surface" aria-label="陪伴设备激活二维码"><QRCodeSVG value={challenge.qrPayload} size={190} level="M" marginSize={2} /></div>
+            <div className="qr-surface" aria-label="陪伴设备激活二维码"><QRCodeSVG value={displayedChallenge.qrPayload} size={190} level="M" marginSize={2} /></div>
             <div className="activation-code-block">
               <small>动态激活码</small>
-              <strong>{challenge.dynamicCode}</strong>
-              <span>公开编号：{challenge.publicId}</span>
-              <time dateTime={challenge.expiresAt}>有效至 {new Date(challenge.expiresAt).toLocaleTimeString("zh-CN")}</time>
+              <strong>{displayedChallenge.dynamicCode}</strong>
+              <span>公开编号：{displayedChallenge.publicId}</span>
+              <time dateTime={displayedChallenge.expiresAt}>有效至 {new Date(displayedChallenge.expiresAt).toLocaleTimeString("zh-CN")}</time>
             </div>
             <div className={`activation-status status-${status?.status.toLowerCase()}`} role="status">
               {status?.status === "CLAIMED" ? <Clock3 aria-hidden="true" size={21} /> : status?.status === "APPROVED" || status?.status === "CONSUMED" ? <CheckCircle2 aria-hidden="true" size={21} /> : ["EXPIRED", "CANCELLED", "ATTEMPTS_EXCEEDED"].includes(status?.status ?? "") ? <XCircle aria-hidden="true" size={21} /> : <RefreshCw aria-hidden="true" size={21} />}

@@ -8,6 +8,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCase
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
@@ -43,50 +44,104 @@ fun NativeCameraPreview(
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
-    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
-
     AndroidView(
         factory = { previewView },
         modifier = modifier,
     )
 
     DisposableEffect(lifecycleOwner, lensFacing) {
+        val bindingLease = CameraBindingLease()
+        val analysisExecutor = Executors.newSingleThreadExecutor()
         val providerFuture = ProcessCameraProvider.getInstance(context)
         var provider: ProcessCameraProvider? = null
+        var preview: Preview? = null
+        var analysis: ImageAnalysis? = null
         val bind = Runnable {
             runCatching {
-                provider = providerFuture.get()
-                val preview = Preview.Builder().build().also {
-                    it.surfaceProvider = previewView.surfaceProvider
-                }
-                val analyzer = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .build()
-                    .also { analysis ->
-                        analysis.setAnalyzer(
-                            analysisExecutor,
-                            JpegFrameAnalyzer { latestOnFrame(it) },
-                        )
+                bindingLease.runIfActive {
+                    val cameraProvider = providerFuture.get()
+                    val cameraPreview = Preview.Builder().build().also {
+                        it.surfaceProvider = previewView.surfaceProvider
                     }
-                val selector = CameraSelector.Builder()
-                    .requireLensFacing(lensFacing)
-                    .build()
-                provider?.unbindAll()
-                provider?.bindToLifecycle(lifecycleOwner, selector, preview, analyzer)
+                    val cameraAnalysis = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                        .build()
+                        .also { imageAnalysis ->
+                            imageAnalysis.setAnalyzer(
+                                analysisExecutor,
+                                JpegFrameAnalyzer { frame ->
+                                    bindingLease.runIfActive { latestOnFrame(frame) }
+                                },
+                            )
+                        }
+                    val selector = CameraSelector.Builder()
+                        .requireLensFacing(lensFacing)
+                        .build()
+                    provider = cameraProvider
+                    preview = cameraPreview
+                    analysis = cameraAnalysis
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        selector,
+                        cameraPreview,
+                        cameraAnalysis,
+                    )
+                }
             }.onFailure {
-                latestOnError(it.message ?: "摄像头启动失败")
+                releaseCameraUseCases(provider, preview, analysis)
+                bindingLease.runIfActive {
+                    latestOnError(it.message ?: "摄像头启动失败")
+                }
             }
         }
         providerFuture.addListener(bind, ContextCompat.getMainExecutor(context))
 
         onDispose {
-            runCatching { provider?.unbindAll() }
+            bindingLease.dispose {
+                releaseCameraUseCases(provider, preview, analysis)
+            }
+            analysisExecutor.shutdownNow()
+        }
+    }
+}
+
+internal class CameraBindingLease {
+    private val lock = Any()
+    private var active = true
+
+    fun runIfActive(block: () -> Unit): Boolean = synchronized(lock) {
+        if (!active) {
+            false
+        } else {
+            block()
+            true
         }
     }
 
-    DisposableEffect(Unit) {
-        onDispose { analysisExecutor.shutdownNow() }
+    fun dispose(cleanup: () -> Unit = {}) {
+        val shouldCleanup = synchronized(lock) {
+            if (active) {
+                active = false
+                true
+            } else {
+                false
+            }
+        }
+        if (shouldCleanup) cleanup()
+    }
+}
+
+internal fun releaseCameraUseCases(
+    provider: ProcessCameraProvider?,
+    preview: Preview?,
+    analysis: ImageAnalysis?,
+) {
+    analysis?.clearAnalyzer()
+    if (provider == null) return
+    val useCases = listOfNotNull<UseCase>(preview, analysis)
+    if (useCases.isNotEmpty()) {
+        runCatching { provider.unbind(*useCases.toTypedArray()) }
     }
 }
 

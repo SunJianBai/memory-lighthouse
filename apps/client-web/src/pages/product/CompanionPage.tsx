@@ -57,6 +57,12 @@ import {
   type LiveMediaStatus,
 } from "../../realtime/live-media";
 import {
+  CompanionStartCancelledError,
+  CompanionStartLifecycle,
+  isCompanionStartCancelledError,
+  startCompanionResources,
+} from "../../realtime/companion-start-lifecycle";
+import {
   acceptRemoteWithAuthoritativeHandoff,
   guardActiveCompanionHeartbeat,
   guardCompanionWrite,
@@ -65,6 +71,10 @@ import {
 } from "../../realtime/remote-answer-handoff";
 import { presentDeviceCall } from "../../realtime/device-call-presentation";
 import { useAppState } from "../../state/app-state";
+import {
+  formatCompanionContextSummary,
+  resolveCompanionSessionConfiguration,
+} from "./companion-session-config";
 
 type BarcodeResult = { rawValue?: string };
 type BarcodeDetectorLike = {
@@ -243,6 +253,8 @@ export const CompanionPage = () => {
   const scannerStream = useRef<MediaStream | null>(null);
   const careExperience = useRef<CareExperienceHandle | null>(null);
   const activeCompanionId = useRef("");
+  const companionStartLifecycle = useRef(new CompanionStartLifecycle());
+  const endingCompanionSessions = useRef(new Map<string, Promise<void>>());
   const heartbeatRequestSequence = useRef(0);
   const heartbeatAppliedSequence = useRef(0);
   const activationExchange = useRef(new ActivationExchangeGate());
@@ -253,16 +265,19 @@ export const CompanionPage = () => {
   const [callStatus, setCallStatus] = useState<LiveMediaStatus>("idle");
   const [callDetail, setCallDetail] = useState("");
   const [serverMediaStopped, setServerMediaStopped] = useState(false);
+  const [effectiveConfiguration, setEffectiveConfiguration] = useState("");
   const localVideo = useRef<HTMLVideoElement | null>(null);
   const remoteAudio = useRef<HTMLAudioElement | null>(null);
   const liveMedia = useRef(new LiveMediaConnection());
 
   const stopLocalCompanionRuntime = useCallback(
     (commitStopped: () => void, reason: string) => {
+      companionStartLifecycle.current.invalidate();
       try {
         careExperience.current?.stopLocalRuntime(reason);
       } finally {
         activeCompanionId.current = "";
+        setEffectiveConfiguration("");
         flushSync(commitStopped);
       }
     },
@@ -408,32 +423,79 @@ export const CompanionPage = () => {
     };
   }, [activated, callStatus]);
 
-  const stopCompanionServerSession = useCallback(async (reason: string) => {
-    const sessionId = activeCompanionId.current;
-    activeCompanionId.current = "";
-    if (sessionId) await deviceSession.endCompanion(sessionId, reason);
-  }, []);
+  const endCompanionServerSessionById = useCallback(
+    (sessionId: string, reason: string): Promise<void> => {
+      if (activeCompanionId.current === sessionId) {
+        activeCompanionId.current = "";
+      }
+      const existing = endingCompanionSessions.current.get(sessionId);
+      if (existing) return existing;
 
-  useEffect(
-    () => () => {
+      const request = deviceSession
+        .endCompanion(sessionId, reason)
+        .then(() => undefined);
+      endingCompanionSessions.current.set(sessionId, request);
+      void request.catch(() => {
+        if (endingCompanionSessions.current.get(sessionId) === request) {
+          endingCompanionSessions.current.delete(sessionId);
+        }
+      });
+      return request;
+    },
+    [],
+  );
+
+  const stopCompanionServerSession = useCallback(
+    async (reason: string) => {
+      companionStartLifecycle.current.invalidate();
+      const sessionId = activeCompanionId.current;
+      if (sessionId) await endCompanionServerSessionById(sessionId, reason);
+    },
+    [endCompanionServerSessionById],
+  );
+
+  useEffect(() => {
+    companionStartLifecycle.current.mount();
+    return () => {
+      companionStartLifecycle.current.unmount();
       scannerStream.current?.getTracks().forEach((track) => track.stop());
       void liveMedia.current.disconnect();
       void stopCompanionServerSession("PAGE_UNMOUNTED").catch(() => undefined);
-    },
-    [stopCompanionServerSession],
-  );
+    };
+  }, [stopCompanionServerSession]);
 
   const coordinator = useMemo(
     () => ({
       start: async (mode: "AUDIO" | "AUDIO_VIDEO") => {
-        const started = await deviceSession.startCompanion(mode);
-        activeCompanionId.current = started.session.id;
-        if (context)
-          setRuntimeState(
-            runtimeStateFromContext(demoState, context, started.careSnapshot),
-          );
         try {
-          const model = await deviceSession.startModel(started.session.id);
+          const { started, model, generation } = await startCompanionResources({
+            lifecycle: companionStartLifecycle.current,
+            startCompanion: () => deviceSession.startCompanion(mode),
+            startModel: (sessionId) => deviceSession.startModel(sessionId),
+            endCompanion: endCompanionServerSessionById,
+            onSessionAvailable: (sessionId) => {
+              activeCompanionId.current = sessionId;
+            },
+          });
+          const staleReason =
+            companionStartLifecycle.current.staleReason(generation);
+          if (staleReason) {
+            try {
+              await endCompanionServerSessionById(
+                started.session.id,
+                staleReason,
+              );
+            } catch {
+              // Server expiry remains the fallback for a cancelled start.
+            }
+            throw new CompanionStartCancelledError(staleReason);
+          }
+          if (context)
+            setRuntimeState(
+              runtimeStateFromContext(demoState, context, started.careSnapshot),
+            );
+          const configuration = resolveCompanionSessionConfiguration(model);
+          setEffectiveConfiguration(configuration.summary);
           let sequenceNo = 0;
           let firstResponseRecorded = false;
           const statusEvents = new Set<string>();
@@ -462,9 +524,7 @@ export const CompanionPage = () => {
             );
           };
           return {
-            prompt: model.prompt.content,
-            realtimeWs: model.connection.realtimeUrl,
-            model: model.connection.model,
+            ...configuration.runtime,
             onRuntimeStatus: (status: string) => {
               if (status === "connecting" || status === "initializing")
                 recordEvent("CONNECTING");
@@ -472,6 +532,8 @@ export const CompanionPage = () => {
               if (status === "live") recordEvent("CONNECTED");
               if (status === "closing" || status === "idle")
                 recordEvent("DISCONNECTED");
+              if (status === "closing" || status === "idle")
+                setEffectiveConfiguration("");
             },
             onAssistantFinal: (text: string) => {
               if (!firstResponseRecorded) {
@@ -509,10 +571,8 @@ export const CompanionPage = () => {
             },
           };
         } catch (modelError) {
-          try {
-            await stopCompanionServerSession("MODEL_START_FAILED");
-          } catch {
-            // Preserve the model-start error; session expiry remains the server fallback.
+          if (!isCompanionStartCancelledError(modelError)) {
+            setEffectiveConfiguration("");
           }
           throw modelError;
         }
@@ -543,6 +603,7 @@ export const CompanionPage = () => {
     [
       context,
       demoState,
+      endCompanionServerSessionById,
       failClosedCompanionWrite,
       stopCompanionServerSession,
     ],
@@ -849,6 +910,13 @@ export const CompanionPage = () => {
           </span>
           <strong>{context?.recipient.preferredName}的陪伴设备</strong>
           <p>绑定编号末 6 位：{context?.bindingId.slice(-6)}</p>
+          <p>
+            {effectiveConfiguration ||
+              formatCompanionContextSummary(
+                runtimeState?.memories.length ?? 0,
+                runtimeState?.routines.length ?? 0,
+              )}
+          </p>
         </div>
         <div className="inline-boundary">
           <PhoneCall aria-hidden="true" size={18} /> 等待家人来电

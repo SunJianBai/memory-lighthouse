@@ -8,7 +8,9 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
+  deployments: read
 
 concurrency:
   group: production-openbmb-api
@@ -23,8 +25,8 @@ env:
   REMOTE_INCOMING_ROOT: /home/ubuntu/.openbmb-api-incoming
 
 jobs:
-  deliver-api:
-    name: Build and atomically promote the native API
+  plan-api:
+    name: Plan API production reconciliation
     if: >-
       ((github.event_name == 'workflow_dispatch' &&
         github.ref == 'refs/heads/main') ||
@@ -33,6 +35,78 @@ jobs:
         github.event.workflow_run.event == 'push' &&
         github.event.workflow_run.head_branch == 'main' &&
         github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      production_sha: ${{ steps.plan.outputs.production_sha }}
+      should_release: ${{ steps.plan.outputs.should_release }}
+
+    steps:
+      - name: Check out the exact CI-validated source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Plan API delivery from the last verified promotion
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            marker_error="$RUNNER_TEMP/api-production-marker.err"
+            set +e
+            production_sha="$(
+              bash scripts/hybrid/production-deployment-marker.sh read api \
+                2>"$marker_error"
+            )"
+            marker_status=$?
+            set -e
+            if [[ "$marker_status" -ne 0 || ! "$production_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              cat "$marker_error" >&2 || true
+              echo "::warning::No trustworthy API promotion marker is available; fail-open delivery is required."
+              production_sha=''
+            fi
+            should_release="$(
+              bash scripts/hybrid/detect-release-changes.sh api "$SOURCE_SHA" \
+                "${{ github.event.workflow_run.id }}" "$production_sha"
+            )"
+          else
+            production_sha='manual-force'
+            should_release=true
+          fi
+          {
+            echo "production_sha=$production_sha"
+            echo "should_release=$should_release"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Record API delivery plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.plan.outputs.should_release }}" == false ]]; then
+            echo '### API production delivery: SKIPPED' >> "$GITHUB_STEP_SUMMARY"
+            echo "The last verified API promotion already contains every relevant change through $SOURCE_SHA." \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo 'The protected production environment was not opened.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '### API production delivery: RECONCILIATION REQUIRED' >> "$GITHUB_STEP_SUMMARY"
+            echo "Production will be verified against source $SOURCE_SHA before packaging." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deliver-api:
+    name: Reconcile native API production
+    needs: plan-api
+    if: needs.plan-api.outputs.should_release == 'true'
+    permissions:
+      actions: read
+      contents: read
+      deployments: write
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 45
@@ -45,8 +119,43 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Detect whether API paths changed in this delivery commit
-        id: detect_changes
+      - name: Configure pinned SSH identity
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY_BASE64: ${{ secrets.TX4H4G_SSH_PRIVATE_KEY_BASE64 }}
+          SSH_KNOWN_HOSTS_BASE64: ${{ secrets.TX4H4G_KNOWN_HOSTS_BASE64 }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SSH_PRIVATE_KEY_BASE64" && -n "$SSH_KNOWN_HOSTS_BASE64" ]]
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s' "$SSH_PRIVATE_KEY_BASE64" | base64 --decode > "$HOME/.ssh/openbmb_api_deploy"
+          printf '%s' "$SSH_KNOWN_HOSTS_BASE64" | base64 --decode > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/openbmb_api_deploy" "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/openbmb_api_deploy" >/dev/null
+          cat > "$HOME/.ssh/config" <<EOF
+          Host tx4h4g-api-prod
+            HostName $DEPLOY_HOST
+            User $DEPLOY_USER
+            IdentityFile ~/.ssh/openbmb_api_deploy
+            IdentitiesOnly yes
+            BatchMode yes
+            ConnectTimeout 20
+            ConnectionAttempts 2
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            GlobalKnownHostsFile /dev/null
+            ControlMaster auto
+            ControlPath ~/.ssh/openbmb-api-%C
+            ControlPersist 10m
+            ProxyCommand none
+            ServerAliveInterval 15
+            ServerAliveCountMax 4
+          EOF
+          chmod 0600 "$HOME/.ssh/config"
+          ssh tx4h4g-api-prod 'true'
+
+      - name: Verify locked production API baseline
+        id: reconcile
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,19 +163,38 @@ jobs:
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-            should_release="$(bash scripts/hybrid/detect-release-changes.sh api ${SOURCE_SHA} ${{ github.event.workflow_run.id }})"
+            baseline_error="$RUNNER_TEMP/api-production-baseline.err"
+            set +e
+            production_sha="$(
+              ssh tx4h4g-api-prod sudo -n bash -s -- baseline api \
+                < scripts/hybrid/remote-promotion-guard.sh 2>"$baseline_error"
+            )"
+            baseline_status=$?
+            set -e
+            if [[ "$baseline_status" -ne 0 || ! "$production_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              cat "$baseline_error" >&2 || true
+              echo "::warning::Could not verify the promoted API SHA; fail-open reconciliation is required."
+              production_sha=''
+              should_release=true
+            else
+              should_release="$(bash scripts/hybrid/detect-release-changes.sh api "$SOURCE_SHA" "${{ github.event.workflow_run.id }}" "$production_sha")"
+            fi
           else
+            production_sha='manual-force'
             should_release=true
           fi
-          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+          {
+            echo "production_sha=$production_sha"
+            echo "should_release=$should_release"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Skip API delivery when unchanged for this delivery domain
-        if: steps.detect_changes.outputs.should_release == 'false'
+      - name: Skip API delivery when the locked server is current
+        if: steps.reconcile.outputs.should_release == 'false'
         run: |
           echo "No API-relevant file changes detected for ${SOURCE_SHA}; skip delivery."
 
       - name: Validate immutable source identity
-        if: steps.detect_changes.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -75,7 +203,7 @@ jobs:
           [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
 
       - name: Set up the pinned native runtime version
-        if: steps.detect_changes.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -83,7 +211,7 @@ jobs:
           cache: npm
 
       - name: Pin the package manager and runner architecture
-        if: steps.detect_changes.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -92,18 +220,18 @@ jobs:
           [[ "$(npm --version)" == 11.4.2 ]]
 
       - name: Install the locked server dependency graph
-        if: steps.detect_changes.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true'
         run: >-
           npm ci
           --workspace @memory-lighthouse/server-api
           --include-workspace-root
 
       - name: Build the NestJS server
-        if: steps.detect_changes.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true'
         run: npm run build --workspace @memory-lighthouse/server-api
 
       - name: Prune development-only dependencies
-        if: steps.detect_changes.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true'
         run: >-
           npm prune --omit=dev
           --package-lock=false
@@ -111,15 +239,28 @@ jobs:
           --include-workspace-root
 
       - name: Verify the complete production dependency closure
-        if: steps.detect_changes.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true'
         run: >-
           npm ls --omit=dev --all
           --workspace @memory-lighthouse/server-api
           --include-workspace-root
 
+      - name: Verify build and pruning preserved immutable source
+        if: steps.reconcile.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dirty_status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ -n "$dirty_status" ]]; then
+            echo '::error::The API build or dependency pruning mutated the validated checkout.'
+            printf '%s\n' "$dirty_status" >&2
+            git diff --stat -- . >&2
+            exit 65
+          fi
+
       - name: Package and verify the native API artifact
         id: package
-        if: steps.detect_changes.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -162,44 +303,9 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      - name: Configure pinned SSH identity
-        if: steps.detect_changes.outputs.should_release == 'true'
-        shell: bash
-        env:
-          SSH_PRIVATE_KEY_BASE64: ${{ secrets.TX4H4G_SSH_PRIVATE_KEY_BASE64 }}
-          SSH_KNOWN_HOSTS_BASE64: ${{ secrets.TX4H4G_KNOWN_HOSTS_BASE64 }}
-        run: |
-          set -euo pipefail
-          [[ -n "$SSH_PRIVATE_KEY_BASE64" && -n "$SSH_KNOWN_HOSTS_BASE64" ]]
-          install -d -m 0700 "$HOME/.ssh"
-          printf '%s' "$SSH_PRIVATE_KEY_BASE64" | base64 --decode > "$HOME/.ssh/openbmb_api_deploy"
-          printf '%s' "$SSH_KNOWN_HOSTS_BASE64" | base64 --decode > "$HOME/.ssh/known_hosts"
-          chmod 0600 "$HOME/.ssh/openbmb_api_deploy" "$HOME/.ssh/known_hosts"
-          ssh-keygen -y -f "$HOME/.ssh/openbmb_api_deploy" >/dev/null
-          cat > "$HOME/.ssh/config" <<EOF
-          Host tx4h4g-api-prod
-            HostName $DEPLOY_HOST
-            User $DEPLOY_USER
-            IdentityFile ~/.ssh/openbmb_api_deploy
-            IdentitiesOnly yes
-            BatchMode yes
-            ConnectTimeout 20
-            ConnectionAttempts 2
-            StrictHostKeyChecking yes
-            UserKnownHostsFile ~/.ssh/known_hosts
-            GlobalKnownHostsFile /dev/null
-            ControlMaster auto
-            ControlPath ~/.ssh/openbmb-api-%C
-            ControlPersist 10m
-            ProxyCommand none
-            ServerAliveInterval 15
-            ServerAliveCountMax 4
-          EOF
-          chmod 0600 "$HOME/.ssh/config"
-          ssh tx4h4g-api-prod 'true'
-
       - name: Upload and atomically promote the exact API artifact
-        if: steps.detect_changes.outputs.should_release == 'true'
+        id: promote
+        if: steps.reconcile.outputs.should_release == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -266,7 +372,7 @@ jobs:
             < scripts/hybrid/remote-promotion-guard.sh
 
       - name: Remove ephemeral SSH material
-        if: always() && steps.detect_changes.outputs.should_release == 'true'
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
@@ -279,3 +385,36 @@ jobs:
               "$HOME/.ssh/known_hosts" \
               "$HOME/.ssh/config"
           fi
+
+      - name: Record API delivery result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.reconcile.outputs.should_release }}" == false ]]; then
+            echo '### API production delivery: SKIPPED' >> "$GITHUB_STEP_SUMMARY"
+            echo "The locked server already contains every API-relevant change through $SOURCE_SHA." \
+              >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.promote.outcome }}" == success ]]; then
+            echo '### API production delivery: DEPLOYED' >> "$GITHUB_STEP_SUMMARY"
+            echo "Promoted immutable API source $SOURCE_SHA." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '### API production delivery: FAILED' >> "$GITHUB_STEP_SUMMARY"
+            echo "API reconciliation for $SOURCE_SHA did not complete." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Record verified API reconciliation marker
+        id: marker
+        if: steps.reconcile.outputs.should_release == 'false' || steps.promote.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.promote.outcome }}" == success ]]; then
+            result=DEPLOYED
+          else
+            result=RECONCILED
+          fi
+          bash scripts/hybrid/production-deployment-marker.sh mark api \
+            "$SOURCE_SHA" "$GITHUB_RUN_ID" "$result"

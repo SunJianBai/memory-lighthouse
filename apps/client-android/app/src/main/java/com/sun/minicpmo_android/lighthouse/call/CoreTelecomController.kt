@@ -1,12 +1,16 @@
 package com.sun.minicpmo_android.lighthouse.call
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.telecom.DisconnectCause
 import androidx.core.telecom.CallAttributesCompat
 import androidx.core.telecom.CallControlResult
 import androidx.core.telecom.CallControlScope
 import androidx.core.telecom.CallsManager
+import androidx.core.content.ContextCompat
 import com.sun.minicpmo_android.lighthouse.model.RemoteSessionView
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -14,6 +18,29 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+
+internal fun canPresentIncomingInTelecom(
+    notificationGranted: Boolean,
+    microphoneGranted: Boolean,
+    cameraGranted: Boolean,
+    needsMicrophone: Boolean,
+    needsCamera: Boolean,
+): Boolean = notificationGranted &&
+    (!needsMicrophone || microphoneGranted) &&
+    (!needsCamera || cameraGranted)
+
+internal class RemoteCallPermissionsMissingException : IllegalStateException(
+    "通知、摄像头或麦克风权限不完整；本次系统接听已安全断开，请打开应用补全权限后重试",
+)
+
+internal fun incomingTelecomPresentationRequired(
+    currentSessionId: String?,
+    incomingSessionId: String,
+    permissionsGranted: Boolean,
+): Boolean {
+    if (!permissionsGranted) throw RemoteCallPermissionsMissingException()
+    return currentSessionId != incomingSessionId
+}
 
 /** Thin adapter around the official Core-Telecom call lifecycle. */
 internal class CoreTelecomController(
@@ -25,13 +52,30 @@ internal class CoreTelecomController(
     private val onSetInactive: suspend (sessionId: String) -> Unit,
     private val onFailure: suspend (sessionId: String, error: Throwable) -> Unit,
 ) {
-    private val callsManager = CallsManager(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val callsManager = CallsManager(appContext)
     private var registered = false
     private var session: TelecomSession? = null
 
+    fun canPresentIncoming(remote: RemoteSessionView): Boolean =
+        canPresentIncomingInTelecom(
+            notificationGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                hasPermission(Manifest.permission.POST_NOTIFICATIONS),
+            microphoneGranted = hasPermission(Manifest.permission.RECORD_AUDIO),
+            cameraGranted = hasPermission(Manifest.permission.CAMERA),
+            needsMicrophone = remote.media.receiveDeviceAudio,
+            needsCamera = remote.media.receiveDeviceVideo,
+        )
+
     @Synchronized
     fun presentIncoming(remote: RemoteSessionView) {
-        if (session?.sessionId == remote.id) return
+        if (
+            !incomingTelecomPresentationRequired(
+                currentSessionId = session?.sessionId,
+                incomingSessionId = remote.id,
+                permissionsGranted = canPresentIncoming(remote),
+            )
+        ) return
         session?.job?.cancel()
         registerIfNeeded()
 
@@ -54,7 +98,12 @@ internal class CoreTelecomController(
             runCatching {
                 callsManager.addCall(
                     callAttributes = attributes,
-                    onAnswer = { onAnswer(remote.id) },
+                    onAnswer = {
+                        if (!canPresentIncoming(remote)) {
+                            throw RemoteCallPermissionsMissingException()
+                        }
+                        onAnswer(remote.id)
+                    },
                     onDisconnect = { cause -> onDisconnect(remote.id, cause) },
                     onSetActive = { onSetActive(remote.id) },
                     onSetInactive = { onSetInactive(remote.id) },
@@ -118,6 +167,10 @@ internal class CoreTelecomController(
             error("Telecom rejected call transition (${result.errorCode})")
         }
     }
+
+    private fun hasPermission(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(appContext, permission) ==
+            PackageManager.PERMISSION_GRANTED
 
     private data class TelecomSession(
         val sessionId: String,

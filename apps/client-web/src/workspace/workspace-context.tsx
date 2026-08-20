@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type PropsWithChildren,
 } from "react";
@@ -14,6 +15,11 @@ import type {
   HouseholdView,
 } from "../api/types";
 import { useAuth } from "../auth/auth-context";
+import {
+  LatestScopedRequest,
+  WorkspaceScopeTracker,
+  workspaceScopeKey as createWorkspaceScopeKey,
+} from "./workspace-scope";
 
 const HOUSEHOLD_KEY = "memory-lighthouse.selected-household";
 const RECIPIENT_KEY = "memory-lighthouse.selected-recipient";
@@ -26,6 +32,8 @@ type WorkspaceContextValue = {
   recipient: CareRecipientView | null;
   householdId: string;
   recipientId: string;
+  workspaceScopeKey: string;
+  workspaceScopeEpoch: number;
   loading: boolean;
   error: string;
   selectHousehold: (id: string) => void;
@@ -69,35 +77,61 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
   const [recipientId, setRecipientId] = useState(() => stored(RECIPIENT_KEY));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const householdListRequests = useRef(new LatestScopedRequest());
+  const householdResourceRequests = useRef(new LatestScopedRequest());
+  const bindingRefreshRequests = useRef(new LatestScopedRequest());
+  const scopeTracker = useRef(new WorkspaceScopeTracker());
 
-  const loadHouseholdResources = useCallback(async (id: string) => {
-    if (!id) {
-      setRecipients([]);
-      setBindings([]);
-      setRecipientId("");
-      return;
-    }
-    const [nextRecipients, nextBindings] = await Promise.all([
-      apiClient.request<CareRecipientView[]>(`/households/${id}/care-recipients`),
-      apiClient.request<CompanionBindingView[]>(`/households/${id}/companion-bindings`),
-    ]);
-    setRecipients(nextRecipients);
-    setBindings(nextBindings);
-    setRecipientId((current) => {
-      const next = nextRecipients.some((item) => item.id === current)
-        ? current
-        : nextRecipients[0]?.id ?? "";
-      persist(RECIPIENT_KEY, next);
-      return next;
-    });
-  }, []);
+  const scopeIdentity = scopeTracker.current.observe(
+    createWorkspaceScopeKey(householdId, recipientId),
+  );
+
+  const loadHouseholdResources = useCallback(
+    async (id: string): Promise<boolean> => {
+      const request = householdResourceRequests.current.begin(id);
+      bindingRefreshRequests.current.invalidate();
+      if (!id) {
+        setRecipients([]);
+        setBindings([]);
+        setRecipientId("");
+        return true;
+      }
+      try {
+        const [nextRecipients, nextBindings] = await Promise.all([
+          apiClient.request<CareRecipientView[]>(
+            `/households/${id}/care-recipients`,
+          ),
+          apiClient.request<CompanionBindingView[]>(
+            `/households/${id}/companion-bindings`,
+          ),
+        ]);
+        if (!householdResourceRequests.current.isCurrent(request)) return false;
+        setRecipients(nextRecipients);
+        setBindings(nextBindings);
+        setRecipientId((current) => {
+          const next = nextRecipients.some((item) => item.id === current)
+            ? current
+            : (nextRecipients[0]?.id ?? "");
+          persist(RECIPIENT_KEY, next);
+          return next;
+        });
+        return true;
+      } catch (loadError) {
+        if (!householdResourceRequests.current.isCurrent(request)) return false;
+        throw loadError;
+      }
+    },
+    [],
+  );
 
   const refresh = useCallback(async () => {
     if (status !== "authenticated") return;
+    const request = householdListRequests.current.begin("households");
     setLoading(true);
     setError("");
     try {
       const next = await apiClient.request<HouseholdView[]>("/households");
+      if (!householdListRequests.current.isCurrent(request)) return;
       setHouseholds(next);
       const selected = next.some((item) => item.id === householdId)
         ? householdId
@@ -106,15 +140,20 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
       persist(HOUSEHOLD_KEY, selected);
       await loadHouseholdResources(selected);
     } catch (loadError) {
-      setError(readableError(loadError));
+      if (householdListRequests.current.isCurrent(request)) {
+        setError(readableError(loadError));
+      }
     } finally {
-      setLoading(false);
+      if (householdListRequests.current.isCurrent(request)) setLoading(false);
     }
   }, [householdId, loadHouseholdResources, status]);
 
   useEffect(() => {
     if (status === "authenticated") void refresh();
     if (status === "anonymous") {
+      householdListRequests.current.invalidate();
+      householdResourceRequests.current.invalidate();
+      bindingRefreshRequests.current.invalidate();
       setHouseholds([]);
       setRecipients([]);
       setBindings([]);
@@ -123,13 +162,19 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
 
   const selectHousehold = useCallback(
     (id: string) => {
+      householdListRequests.current.invalidate();
       setHouseholdId(id);
       persist(HOUSEHOLD_KEY, id);
       setLoading(true);
       setError("");
       void loadHouseholdResources(id)
-        .catch((loadError) => setError(readableError(loadError)))
-        .finally(() => setLoading(false));
+        .then((applied) => {
+          if (applied) setLoading(false);
+        })
+        .catch((loadError) => {
+          setError(readableError(loadError));
+          setLoading(false);
+        });
     },
     [loadHouseholdResources],
   );
@@ -141,10 +186,15 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
 
   const refreshBindings = useCallback(async () => {
     if (!householdId) return;
-    const next = await apiClient.request<CompanionBindingView[]>(
-      `/households/${householdId}/companion-bindings`,
-    );
-    setBindings(next);
+    const request = bindingRefreshRequests.current.begin(householdId);
+    try {
+      const next = await apiClient.request<CompanionBindingView[]>(
+        `/households/${householdId}/companion-bindings`,
+      );
+      if (bindingRefreshRequests.current.isCurrent(request)) setBindings(next);
+    } catch (loadError) {
+      if (bindingRefreshRequests.current.isCurrent(request)) throw loadError;
+    }
   }, [householdId]);
 
   const createHousehold = useCallback(
@@ -190,6 +240,8 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
       recipient,
       householdId,
       recipientId,
+      workspaceScopeKey: scopeIdentity.key,
+      workspaceScopeEpoch: scopeIdentity.epoch,
       loading,
       error,
       selectHousehold,
@@ -215,6 +267,8 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
       refreshBindings,
       selectHousehold,
       selectRecipient,
+      scopeIdentity.epoch,
+      scopeIdentity.key,
     ],
   );
 

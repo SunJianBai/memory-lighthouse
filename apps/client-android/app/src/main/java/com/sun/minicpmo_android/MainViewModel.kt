@@ -15,8 +15,8 @@ import com.sun.minicpmo_android.model.MessageRole
 import com.sun.minicpmo_android.model.RealtimeMode
 import com.sun.minicpmo_android.model.SessionPhase
 import com.sun.minicpmo_android.model.SessionSettings
+import com.sun.minicpmo_android.model.withServerManagedSession
 import com.sun.minicpmo_android.network.RealtimeApiClient
-import com.sun.minicpmo_android.network.RealtimeProtocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -128,6 +128,7 @@ class MainViewModel(
                     audioLevel = 0f,
                     forceListen = false,
                     mediaError = null,
+                    effectiveSession = null,
                 )
             }
         }
@@ -185,6 +186,7 @@ class MainViewModel(
                     sessionId = null,
                     audioLevel = 0f,
                     forceListen = false,
+                    effectiveSession = null,
                 )
             }
         }
@@ -305,22 +307,13 @@ class MainViewModel(
 
     fun saveSettings(): String? {
         val settings = _uiState.value.settings.copy(
-            apiHost = _uiState.value.settings.apiHost.trim().trimEnd('/'),
-            systemPrompt = _uiState.value.settings.systemPrompt.trim(),
             lengthPenalty = _uiState.value.settings.lengthPenalty.coerceIn(0.1f, 3f),
         )
-        val validationError = runCatching {
-            require(settings.systemPrompt.isNotBlank()) { "系统提示词不能为空" }
-            RealtimeProtocol.webSocketUrl(settings.apiHost, RealtimeMode.CHAT)
-        }.exceptionOrNull()?.message
-        if (validationError != null) return validationError
-
         if (_uiState.value.hasActiveSession) stopSession(quiet = true)
         settingsRepository.save(settings)
         _uiState.update { current ->
             current.copy(settings = settings, settingsVisible = false)
         }
-        refreshServiceStatus()
         return null
     }
 
@@ -366,6 +359,7 @@ class MainViewModel(
                     audioLevel = 0f,
                     queuePosition = null,
                     queueWaitSeconds = null,
+                    effectiveSession = null,
                 )
             }
             generation
@@ -383,11 +377,13 @@ class MainViewModel(
                         firstResponseReported = false
                         connection?.let { prepared ->
                             _uiState.update { current ->
-                                current.copy(
-                                    settings = current.settings.copy(
-                                        apiHost = prepared.realtimeUrl,
-                                        systemPrompt = prepared.systemPrompt,
-                                    ),
+                                current.withServerManagedSession(
+                                    realtimeUrl = prepared.realtimeUrl,
+                                    systemPrompt = prepared.systemPrompt,
+                                    model = prepared.model,
+                                    promptVersion = prepared.promptVersion,
+                                    memoryCount = prepared.memoryCount,
+                                    routineCount = prepared.routineCount,
                                 )
                             }
                         }
@@ -407,15 +403,12 @@ class MainViewModel(
                     if (!isConnectionAttemptCurrent(attemptGeneration)) {
                         false
                     } else {
-                        val currentSettings = _uiState.value.settings
+                        val currentState = _uiState.value
+                        val currentSettings = currentState.settings
+                        val effective = currentState.effectiveSession
                         realtimeClient.connect(
                             mode,
-                            connection?.let {
-                                currentSettings.copy(
-                                    apiHost = it.realtimeUrl,
-                                    systemPrompt = it.systemPrompt,
-                                )
-                            } ?: currentSettings,
+                            effective?.connectionSettings(currentSettings) ?: currentSettings,
                             this@MainViewModel,
                         )
                         true
@@ -519,7 +512,7 @@ class MainViewModel(
         reportCompanionEvent("CONNECTED")
 
         if (selectedMode == RealtimeMode.CHAT) {
-            if (_uiState.value.settings.chatTtsEnabled) {
+            if (_uiState.value.settings.chatTtsEnabledFor(selectedMode)) {
                 runCatching {
                     synchronized(mediaStateLock) {
                         if (!stoppedByUser && _uiState.value.phase == SessionPhase.LIVE) {
@@ -533,7 +526,7 @@ class MainViewModel(
                 pendingChat = null
                 if (!realtimeClient.sendChat(
                         text,
-                        _uiState.value.settings.chatTtsEnabled,
+                        _uiState.value.settings.chatTtsEnabledFor(selectedMode),
                         _uiState.value.settings.lengthPenalty,
                     )
                 ) {

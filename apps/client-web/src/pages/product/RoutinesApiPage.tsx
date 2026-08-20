@@ -24,8 +24,8 @@ import type {
   RoutineView,
 } from "../../api/types";
 import { useWorkspace } from "../../workspace/workspace-context";
+import { dateInTimeZone } from "./routine-date";
 
-const today = () => new Date().toISOString().slice(0, 10);
 const toMinutes = (value: string) => {
   const [hours, minutes] = value.split(":").map(Number);
   return hours * 60 + minutes;
@@ -105,6 +105,8 @@ export const RoutinesApiPage = () => {
   const create = async (event: FormEvent) => {
     event.preventDefault();
     if (!workspace.householdId || !workspace.recipientId) return;
+    const recipientTimezone =
+      workspace.recipient?.timezone || "Asia/Shanghai";
     setBusyId("create");
     setError("");
     try {
@@ -118,10 +120,10 @@ export const RoutinesApiPage = () => {
             instructions: instructions.trim(),
             confirmationQuestion: question.trim(),
             schedule: {
-              timezone: workspace.recipient?.timezone || "Asia/Shanghai",
+              timezone: recipientTimezone,
               localTimeMinutes: toMinutes(time),
               weekdayMask: 127,
-              startDate: today(),
+              startDate: dateInTimeZone(new Date(), recipientTimezone),
               graceMinutes: 5,
               familyNoticeMinutes: 15,
             },

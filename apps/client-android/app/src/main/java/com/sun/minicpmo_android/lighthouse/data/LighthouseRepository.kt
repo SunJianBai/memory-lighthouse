@@ -705,16 +705,21 @@ class LighthouseRepository(
             ),
         )
         val decisions = model.getJSONObject("consent").getJSONObject("decisions")
+        val prompt = model.getJSONObject("prompt")
+        val careSnapshot = model.optJSONObject("careSnapshot")
         return CompanionModelConnection(
             companionSessionId = companionSessionId,
             modelSessionId = model.getJSONObject("session").getString("id"),
             realtimeUrl = model.getJSONObject("connection").getString("realtimeUrl"),
             model = model.getJSONObject("connection").getString("model"),
-            systemPrompt = model.getJSONObject("prompt").getString("content"),
+            systemPrompt = prompt.getString("content"),
             userTranscriptionAllowed = decisions.optBoolean(
                 "MODEL_INPUT_TRANSCRIPTION",
                 false,
             ),
+            promptVersion = prompt.optInt("version").takeIf { it > 0 },
+            memoryCount = careSnapshot?.optJSONArray("memories")?.length(),
+            routineCount = careSnapshot?.optJSONArray("occurrences")?.length(),
         ).also { activeCompanionSessionId.set(companionSessionId) }
     }
 

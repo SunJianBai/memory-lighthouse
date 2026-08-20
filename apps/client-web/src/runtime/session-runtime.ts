@@ -8,6 +8,7 @@ import {
   MicrophoneCapture,
   PcmPlayer,
 } from "./media";
+import { createRealtimeSessionInit } from "./session-configuration";
 import type {
   RuntimeCallbacks,
   RuntimeMetrics,
@@ -980,21 +981,7 @@ export class SessionRuntime {
       const referenceAudio =
         options.referenceAudio ??
         (await getDefaultReferenceAudio(options.cloudBaseUrl));
-      const message = {
-        type: "session.init",
-        payload: {
-          system_prompt: options.prompt,
-          config: { length_penalty: 1 },
-          ...(referenceAudio
-            ? {
-                voice: {
-                  ref_audio_base64: referenceAudio,
-                  tts_ref_audio_base64: referenceAudio,
-                },
-              }
-            : {}),
-        },
-      };
+      const message = createRealtimeSessionInit(options.prompt, referenceAudio);
       if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
       socket.send(JSON.stringify(message));
       this.emit(

@@ -25,12 +25,18 @@ for hybrid_script in \
   "$hybrid_dir/web/install-web-release.sh" \
   "$hybrid_dir/web/openbmb-web-release" \
   "$project_root/scripts/hybrid/assert-current-main.sh" \
+  "$project_root/scripts/hybrid/detect-release-changes.sh" \
   "$project_root/scripts/hybrid/package-api.sh" \
   "$project_root/scripts/hybrid/package-web.sh" \
   "$project_root/scripts/hybrid/prepare-remote-incoming.sh" \
-  "$project_root/scripts/hybrid/remote-promotion-guard.sh"; do
+  "$project_root/scripts/hybrid/production-deployment-marker.sh" \
+  "$project_root/scripts/hybrid/remote-promotion-guard.sh" \
+  "$project_root/scripts/hybrid/test-detect-release-changes.sh" \
+  "$project_root/scripts/hybrid/test-production-deployment-marker.sh"; do
   bash -n "$hybrid_script"
 done
+bash "$project_root/scripts/hybrid/test-detect-release-changes.sh"
+bash "$project_root/scripts/hybrid/test-production-deployment-marker.sh"
 bash "$hybrid_dir/api/test.sh"
 bash "$hybrid_dir/bootstrap/test-runtime-mode.sh"
 bash "$hybrid_dir/web/test-web-release.sh"

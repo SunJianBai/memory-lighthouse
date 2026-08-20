@@ -28,6 +28,10 @@ jobs:
       - name: Validate production deployment assets
         run: ./infra/production/scripts/validate-static.sh
 
+      - name: Validate hybrid delivery workflow contracts
+        shell: pwsh
+        run: ./scripts/hybrid/test-delivery-static.ps1
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:

@@ -12,7 +12,7 @@ import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
 import androidx.core.content.ContextCompat
-import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ArrayBlockingQueue
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.sqrt
@@ -20,7 +20,7 @@ import kotlin.math.sqrt
 class DuplexAudioEngine(context: Context) {
     private val appContext = context.applicationContext
     private val audioManager = appContext.getSystemService(AudioManager::class.java)
-    private val playbackQueue = LinkedBlockingQueue<FloatArray>()
+    private val playbackQueue = LatestBoundedBuffer<FloatArray>(PLAYBACK_QUEUE_CAPACITY)
 
     @Volatile
     private var recording = false
@@ -242,6 +242,26 @@ class DuplexAudioEngine(context: Context) {
     companion object {
         const val INPUT_SAMPLE_RATE = 16_000
         const val OUTPUT_SAMPLE_RATE = 24_000
-        const val CHUNK_SAMPLES = INPUT_SAMPLE_RATE
+        const val CAPTURE_CHUNK_DURATION_MS = 1_000
+        const val CHUNK_SAMPLES = INPUT_SAMPLE_RATE * CAPTURE_CHUNK_DURATION_MS / 1_000
+        private const val PLAYBACK_QUEUE_CAPACITY = 16
+    }
+}
+
+internal class LatestBoundedBuffer<T>(capacity: Int) {
+    private val queue = ArrayBlockingQueue<T>(capacity)
+
+    fun offer(value: T) {
+        while (!queue.offer(value)) {
+            queue.poll()
+        }
+    }
+
+    fun take(): T = queue.take()
+
+    fun poll(): T? = queue.poll()
+
+    fun clear() {
+        queue.clear()
     }
 }

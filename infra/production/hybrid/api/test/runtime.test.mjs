@@ -81,7 +81,12 @@ MINIO_KMS_SECRET_KEY=key-name:kms_material_must_not_leak
 LIVEKIT_API_SECRET=abcdefghijklmnopqrstuvwxyz_222222
 MYSQL_ROOT_PASSWORD=must_not_leak_123456789
 `);
-  const api = parseRawEnv('SMTP_HOST=smtp.qq.com\nAUTH_ACCESS_TOKEN_SECRET=api-secret\n');
+  const api = parseRawEnv(`
+SMTP_HOST=smtp.qq.com
+AUTH_ACCESS_TOKEN_SECRET=api-secret
+MINICPM_MODEL=openbmb/MiniCPM-o-4_5
+MINICPM_SYSTEM_PROMPT=已审核的生产提示词
+`);
   const environment = deriveApiEnvironment(infra, api, 'green');
   assert.equal(environment.PORT, '13102');
   assert.equal(environment.HOST, '127.0.0.1');
@@ -89,6 +94,8 @@ MYSQL_ROOT_PASSWORD=must_not_leak_123456789
   assert.equal(environment.OBJECT_STORAGE_ENDPOINT, 'https://sun227454.online');
   assert.match(environment.DATABASE_URL, /@127\.0\.0\.1:13306\/openbmb$/);
   assert.equal(environment.SMTP_HOST, 'smtp.qq.com');
+  assert.equal(environment.MINICPM_MODEL, 'openbmb/MiniCPM-o-4_5');
+  assert.equal(environment.MINICPM_SYSTEM_PROMPT, '已审核的生产提示词');
   assert.equal(environment.MYSQL_ROOT_PASSWORD, undefined);
   assert.equal(environment.REDIS_LIVEKIT_PASSWORD, undefined);
   assert.equal(environment.MINIO_ROOT_PASSWORD, undefined);

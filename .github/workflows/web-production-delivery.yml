@@ -8,7 +8,9 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
+  deployments: read
 
 concurrency:
   group: production-openbmb-web
@@ -23,8 +25,8 @@ env:
   REMOTE_INCOMING_DIRECTORY: /home/ubuntu/.openbmb-web-incoming
 
 jobs:
-  deliver-web:
-    name: Build and atomically promote web assets
+  plan-web:
+    name: Plan Web production reconciliation
     if: >-
       ((github.event_name == 'workflow_dispatch' &&
         github.ref == 'refs/heads/main') ||
@@ -33,6 +35,78 @@ jobs:
         github.event.workflow_run.event == 'push' &&
         github.event.workflow_run.head_branch == 'main' &&
         github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      production_sha: ${{ steps.plan.outputs.production_sha }}
+      should_release: ${{ steps.plan.outputs.should_release }}
+
+    steps:
+      - name: Check out the exact CI-validated source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Plan Web delivery from the last verified promotion
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            marker_error="$RUNNER_TEMP/web-production-marker.err"
+            set +e
+            production_sha="$(
+              bash scripts/hybrid/production-deployment-marker.sh read web \
+                2>"$marker_error"
+            )"
+            marker_status=$?
+            set -e
+            if [[ "$marker_status" -ne 0 || ! "$production_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              cat "$marker_error" >&2 || true
+              echo "::warning::No trustworthy Web promotion marker is available; fail-open delivery is required."
+              production_sha=''
+            fi
+            should_release="$(
+              bash scripts/hybrid/detect-release-changes.sh web "$SOURCE_SHA" \
+                "${{ github.event.workflow_run.id }}" "$production_sha"
+            )"
+          else
+            production_sha='manual-force'
+            should_release=true
+          fi
+          {
+            echo "production_sha=$production_sha"
+            echo "should_release=$should_release"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Record Web delivery plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.plan.outputs.should_release }}" == false ]]; then
+            echo '### Web production delivery: SKIPPED' >> "$GITHUB_STEP_SUMMARY"
+            echo "The last verified Web promotion already contains every relevant change through $SOURCE_SHA." \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo 'The protected production environment was not opened.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '### Web production delivery: RECONCILIATION REQUIRED' >> "$GITHUB_STEP_SUMMARY"
+            echo "Production will be verified against source $SOURCE_SHA before packaging." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deliver-web:
+    name: Reconcile Web production
+    needs: plan-web
+    if: needs.plan-web.outputs.should_release == 'true'
+    permissions:
+      actions: read
+      contents: read
+      deployments: write
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 20
@@ -45,96 +119,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Detect whether web paths changed in this delivery commit
-        id: detect_changes
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-            should_release="$(bash scripts/hybrid/detect-release-changes.sh web ${SOURCE_SHA} ${{ github.event.workflow_run.id }})"
-          else
-            should_release=true
-          fi
-          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
-
-      - name: Skip web delivery when unchanged for this delivery domain
-        if: steps.detect_changes.outputs.should_release == 'false'
-        run: |
-          echo "No web-relevant file changes detected for ${SOURCE_SHA}; skip delivery."
-
-      - name: Validate immutable source identity
-        if: steps.detect_changes.outputs.should_release == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
-          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
-
-      - name: Set up Node.js
-        if: steps.detect_changes.outputs.should_release == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-
-      - name: Install locked dependencies
-        if: steps.detect_changes.outputs.should_release == 'true'
-        run: npm ci
-
-      - name: Build client and admin web applications
-        if: steps.detect_changes.outputs.should_release == 'true'
-        env:
-          VITE_API_BASE_URL: /openBMB/api/v1
-          VITE_API_BASE: /openBMB/api/v1
-          VITE_DEPLOYMENT_ENVIRONMENT: production
-          VITE_ENABLE_DEVELOPMENT_CONTENT_INSPECTION: "false"
-        run: |
-          npm run build --workspace @memory-lighthouse/client-web
-          npm run build --workspace @memory-lighthouse/admin-web
-
-      - name: Package normalized web artifact
-        id: package
-        if: steps.detect_changes.outputs.should_release == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          artifact_dir="$RUNNER_TEMP/openbmb-web-artifact"
-          install -d -m 0700 "$artifact_dir"
-          archive="$artifact_dir/openbmb-web-$SOURCE_SHA.tar.zst"
-          bash scripts/hybrid/package-web.sh "$SOURCE_SHA" "$archive" | tee "$artifact_dir/package.log"
-          archive_sha256="$(sha256sum "$archive" | awk '{ print $1 }')"
-          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
-          mapfile -t expanded_values < <(sed -n 's/^WEB_EXPANDED_BYTES=//p' "$artifact_dir/package.log")
-          [[ "${#expanded_values[@]}" -eq 1 && "${expanded_values[0]}" =~ ^[1-9][0-9]*$ ]]
-          expanded_bytes="${expanded_values[0]}"
-          archive_bytes="$(stat -c %s -- "$archive")"
-          [[ "$archive_bytes" =~ ^[1-9][0-9]*$ ]]
-          promotion_required_bytes=$((expanded_bytes + archive_bytes + 1073741824))
-          upload_required_bytes=$((promotion_required_bytes + archive_bytes))
-          remote_archive="$REMOTE_INCOMING_DIRECTORY/openbmb-web-$SOURCE_SHA-$archive_sha256-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.zst"
-          {
-            echo "archive=$archive"
-            echo "archive_sha256=$archive_sha256"
-            echo "remote_archive=$remote_archive"
-            echo "promotion_required_bytes=$promotion_required_bytes"
-            echo "upload_required_bytes=$upload_required_bytes"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Retain exact web artifact evidence
-        if: steps.package.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: web-release-${{ env.SOURCE_SHA }}
-          path: ${{ runner.temp }}/openbmb-web-artifact/
-          if-no-files-found: error
-          retention-days: 3
-
       - name: Configure pinned SSH identity
-        if: steps.detect_changes.outputs.should_release == 'true'
         shell: bash
         env:
           SSH_PRIVATE_KEY_BASE64: ${{ secrets.TX4H4G_SSH_PRIVATE_KEY_BASE64 }}
@@ -169,8 +154,116 @@ jobs:
           chmod 0600 "$HOME/.ssh/config"
           ssh tx4h4g-web-prod 'true'
 
+      - name: Verify locked production Web baseline
+        id: reconcile
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            baseline_error="$RUNNER_TEMP/web-production-baseline.err"
+            set +e
+            production_sha="$(
+              ssh tx4h4g-web-prod sudo -n bash -s -- baseline web \
+                < scripts/hybrid/remote-promotion-guard.sh 2>"$baseline_error"
+            )"
+            baseline_status=$?
+            set -e
+            if [[ "$baseline_status" -ne 0 || ! "$production_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              cat "$baseline_error" >&2 || true
+              echo "::warning::Could not verify the promoted Web SHA; fail-open reconciliation is required."
+              production_sha=''
+              should_release=true
+            else
+              should_release="$(bash scripts/hybrid/detect-release-changes.sh web "$SOURCE_SHA" "${{ github.event.workflow_run.id }}" "$production_sha")"
+            fi
+          else
+            production_sha='manual-force'
+            should_release=true
+          fi
+          {
+            echo "production_sha=$production_sha"
+            echo "should_release=$should_release"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Skip Web delivery when the locked server is current
+        if: steps.reconcile.outputs.should_release == 'false'
+        run: |
+          echo "No web-relevant file changes detected for ${SOURCE_SHA}; skip delivery."
+
+      - name: Validate immutable source identity
+        if: steps.reconcile.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+      - name: Set up Node.js
+        if: steps.reconcile.outputs.should_release == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install locked dependencies
+        if: steps.reconcile.outputs.should_release == 'true'
+        run: npm ci
+
+      - name: Build client and admin web applications
+        if: steps.reconcile.outputs.should_release == 'true'
+        env:
+          VITE_API_BASE_URL: /openBMB/api/v1
+          VITE_API_BASE: /openBMB/api/v1
+          VITE_DEPLOYMENT_ENVIRONMENT: production
+          VITE_ENABLE_DEVELOPMENT_CONTENT_INSPECTION: "false"
+        run: |
+          npm run build --workspace @memory-lighthouse/client-web
+          npm run build --workspace @memory-lighthouse/admin-web
+
+      - name: Package normalized web artifact
+        id: package
+        if: steps.reconcile.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/openbmb-web-artifact"
+          install -d -m 0700 "$artifact_dir"
+          archive="$artifact_dir/openbmb-web-$SOURCE_SHA.tar.zst"
+          bash scripts/hybrid/package-web.sh "$SOURCE_SHA" "$archive" | tee "$artifact_dir/package.log"
+          archive_sha256="$(sha256sum "$archive" | awk '{ print $1 }')"
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          mapfile -t expanded_values < <(sed -n 's/^WEB_EXPANDED_BYTES=//p' "$artifact_dir/package.log")
+          [[ "${#expanded_values[@]}" -eq 1 && "${expanded_values[0]}" =~ ^[1-9][0-9]*$ ]]
+          expanded_bytes="${expanded_values[0]}"
+          archive_bytes="$(stat -c %s -- "$archive")"
+          [[ "$archive_bytes" =~ ^[1-9][0-9]*$ ]]
+          promotion_required_bytes=$((expanded_bytes + archive_bytes + 1073741824))
+          upload_required_bytes=$((promotion_required_bytes + archive_bytes))
+          remote_archive="$REMOTE_INCOMING_DIRECTORY/openbmb-web-$SOURCE_SHA-$archive_sha256-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.zst"
+          {
+            echo "archive=$archive"
+            echo "archive_sha256=$archive_sha256"
+            echo "remote_archive=$remote_archive"
+            echo "promotion_required_bytes=$promotion_required_bytes"
+            echo "upload_required_bytes=$upload_required_bytes"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Retain exact web artifact evidence
+        if: steps.package.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: web-release-${{ env.SOURCE_SHA }}
+          path: ${{ runner.temp }}/openbmb-web-artifact/
+          if-no-files-found: error
+          retention-days: 3
+
       - name: Upload and atomically promote exact web artifact
-        if: steps.detect_changes.outputs.should_release == 'true'
+        id: promote
+        if: steps.reconcile.outputs.should_release == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -215,7 +308,7 @@ jobs:
             < scripts/hybrid/remote-promotion-guard.sh
 
       - name: Remove ephemeral SSH material
-        if: always() && steps.detect_changes.outputs.should_release == 'true'
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
@@ -228,3 +321,36 @@ jobs:
               "$HOME/.ssh/known_hosts" \
               "$HOME/.ssh/config"
           fi
+
+      - name: Record Web delivery result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.reconcile.outputs.should_release }}" == false ]]; then
+            echo '### Web production delivery: SKIPPED' >> "$GITHUB_STEP_SUMMARY"
+            echo "The locked server already contains every Web-relevant change through $SOURCE_SHA." \
+              >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.promote.outcome }}" == success ]]; then
+            echo '### Web production delivery: DEPLOYED' >> "$GITHUB_STEP_SUMMARY"
+            echo "Promoted immutable Web source $SOURCE_SHA." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '### Web production delivery: FAILED' >> "$GITHUB_STEP_SUMMARY"
+            echo "Web reconciliation for $SOURCE_SHA did not complete." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Record verified Web reconciliation marker
+        id: marker
+        if: steps.reconcile.outputs.should_release == 'false' || steps.promote.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.promote.outcome }}" == success ]]; then
+            result=DEPLOYED
+          else
+            result=RECONCILED
+          fi
+          bash scripts/hybrid/production-deployment-marker.sh mark web \
+            "$SOURCE_SHA" "$GITHUB_RUN_ID" "$result"

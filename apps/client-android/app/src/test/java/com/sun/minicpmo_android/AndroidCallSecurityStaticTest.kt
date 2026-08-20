@@ -111,6 +111,16 @@ class AndroidCallSecurityStaticTest {
         assertFalse(route.contains("remoteHandoffInProgress by remember"))
         assertTrue(repository.contains("activeCompanionSessionId"))
         assertTrue(repository.contains("body.put(\"activeCompanionSessionId\", it)"))
+        val joinTicketAnchor = coordinator.indexOf(
+            "val joinTicketRenewalStartedAtMillis = monotonicNowMillis()",
+        )
+        val joinTicketRequest = coordinator.indexOf("repository.deviceJoinTicket(remote.id)")
+        assertTrue(joinTicketAnchor in 0 until joinTicketRequest)
+        assertTrue(
+            coordinator.contains(
+                "initialSuccessfulRenewalAtMillis = joinTicketRenewalStartedAtMillis",
+            ),
+        )
     }
 
     @Test
@@ -261,7 +271,7 @@ class AndroidCallSecurityStaticTest {
     fun cancelledTelecomAnswerQueuesServerConvergenceOutsideTheTimedOutJob() {
         val coordinator = projectDir.resolve(
             "app/src/main/java/com/sun/minicpmo_android/lighthouse/call/RemoteCallCoordinator.kt",
-        ).readText()
+        ).readText().replace("\r\n", "\n")
 
         assertTrue(coordinator.contains("catch (cancelled: CancellationException)"))
         assertTrue(coordinator.contains("withContext(NonCancellable)"))

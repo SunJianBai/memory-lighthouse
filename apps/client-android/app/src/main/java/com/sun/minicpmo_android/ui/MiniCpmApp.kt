@@ -81,13 +81,11 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
@@ -126,7 +124,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -401,6 +398,7 @@ private fun MiniCpmApp(
     if (state.settingsVisible) {
         SettingsSheet(
             initial = state.settings,
+            showChatTts = RealtimeMode.CHAT in allowedModes,
             onDismiss = onDismissSettings,
             onSave = onSaveSettings,
         )
@@ -497,6 +495,15 @@ private fun AppTopBar(
                     modifier = Modifier.semantics {
                         liveRegion = LiveRegionMode.Polite
                     },
+                )
+            }
+            state.effectiveSession?.let { configuration ->
+                Text(
+                    text = configuration.summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -1510,10 +1517,14 @@ private fun RoundControl(
     }
 }
 
+internal fun answerLengthEndpointLabels(): Pair<String, String> =
+    "更简短" to "更详细"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
     initial: SessionSettings,
+    showChatTts: Boolean,
     onDismiss: () -> Unit,
     onSave: (SessionSettings) -> String?,
 ) {
@@ -1537,9 +1548,9 @@ private fun SettingsSheet(
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("会话设置", style = MaterialTheme.typography.headlineMedium)
+                        Text("回答偏好", style = MaterialTheme.typography.headlineMedium)
                         Text(
-                            "Realtime API 连接与生成参数",
+                            "调整陪伴时的回答方式",
                             style = MaterialTheme.typography.bodyMedium,
                             color = colors.onSurfaceVariant,
                         )
@@ -1550,30 +1561,9 @@ private fun SettingsSheet(
                 }
             }
             item {
-                OutlinedTextField(
-                    value = draft.apiHost,
-                    onValueChange = { draft = draft.copy(apiHost = it) },
-                    label = { Text("API Host") },
-                    supportingText = { Text("仅接受 HTTPS / WSS 地址") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            item {
-                OutlinedTextField(
-                    value = draft.systemPrompt,
-                    onValueChange = { draft = draft.copy(systemPrompt = it) },
-                    label = { Text("系统提示词") },
-                    minLines = 3,
-                    maxLines = 6,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            item {
                 Column {
                     Row(Modifier.fillMaxWidth()) {
-                        Text("长度惩罚", style = MaterialTheme.typography.titleMedium)
+                        Text("回答长度", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.weight(1f))
                         Text(
                             String.format(Locale.US, "%.1f", draft.lengthPenalty),
@@ -1587,9 +1577,25 @@ private fun SettingsSheet(
                         valueRange = 0.5f..2f,
                         steps = 14,
                     )
+                    val (shorterLabel, detailedLabel) = answerLengthEndpointLabels()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            shorterLabel,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            detailedLabel,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
                 }
             }
-            item {
+            if (showChatTts) item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1606,27 +1612,6 @@ private fun SettingsSheet(
                         checked = draft.chatTtsEnabled,
                         onCheckedChange = { draft = draft.copy(chatTtsEnabled = it) },
                     )
-                }
-            }
-            item { HorizontalDivider(color = colors.outlineVariant) }
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerHigh),
-                    shape = RoundedCornerShape(18.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = colors.primary)
-                        Spacer(Modifier.width(12.dp))
-                        Text(
-                            "官方公网服务当前无需 API Key。应用不会写入或上传额外凭据。",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = colors.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
                 }
             }
             error?.let { message ->

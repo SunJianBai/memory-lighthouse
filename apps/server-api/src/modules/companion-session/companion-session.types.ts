@@ -112,6 +112,10 @@ export interface ModelConnectionView {
     id: string;
     code: string;
     version: number;
+    /**
+     * Exact session-effective prompt sent by clients. The identifiers above
+     * continue to reference the immutable audited base PromptVersion.
+     */
     content: string;
   };
   careSnapshot: CareSnapshot;
