@@ -32,10 +32,12 @@ for hybrid_script in \
   "$project_root/scripts/hybrid/production-deployment-marker.sh" \
   "$project_root/scripts/hybrid/remote-promotion-guard.sh" \
   "$project_root/scripts/hybrid/test-detect-release-changes.sh" \
+  "$project_root/scripts/hybrid/test-package-api-cache.sh" \
   "$project_root/scripts/hybrid/test-production-deployment-marker.sh"; do
   bash -n "$hybrid_script"
 done
 bash "$project_root/scripts/hybrid/test-detect-release-changes.sh"
+bash "$project_root/scripts/hybrid/test-package-api-cache.sh"
 bash "$project_root/scripts/hybrid/test-production-deployment-marker.sh"
 bash "$hybrid_dir/api/test.sh"
 bash "$hybrid_dir/bootstrap/test-runtime-mode.sh"

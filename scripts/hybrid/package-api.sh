@@ -158,18 +158,32 @@ payload_members=(
 if [[ -d "$workspace_dependencies_root" ]]; then
   payload_members+=(apps/server-api/node_modules)
 fi
+# Prisma's TypeScript config loader can leave ignored Jiti caches in either
+# dependency root. They are build-host state, not runtime dependencies, and
+# the strict manifest allowlist must never receive them.
+payload_excludes=(
+  '--exclude=node_modules/.cache'
+  '--exclude=apps/server-api/node_modules/.cache'
+)
 tar --create \
   --file - \
   --directory "$project_root" \
   --dereference \
   --hard-dereference \
   --exclude='node_modules/@memory-lighthouse/server-api' \
+  "${payload_excludes[@]}" \
   "${payload_members[@]}" \
   | tar --extract \
       --file - \
       --directory "$payload" \
       --no-same-owner \
       --no-same-permissions
+
+workspace_payload_dependencies="$payload/apps/server-api/node_modules"
+if [[ -d "$workspace_payload_dependencies" && \
+      -z "$(find "$workspace_payload_dependencies" -mindepth 1 -print -quit)" ]]; then
+  rmdir -- "$workspace_payload_dependencies"
+fi
 
 unsafe_path="$(find "$payload" \( -type l -o \( \! -type f -a \! -type d \) \) -print -quit)"
 [[ -z "$unsafe_path" ]] || {

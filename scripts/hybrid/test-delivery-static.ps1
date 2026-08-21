@@ -105,6 +105,7 @@ $validateStatic = [System.IO.File]::ReadAllText(
 
 Assert-Contains $ciWorkflow 'scripts/hybrid/test-delivery-static.ps1' 'CI executes hybrid workflow invariants'
 Assert-Contains $validateStatic 'test-detect-release-changes.sh' 'CI exercises production-baseline reconciliation behavior'
+Assert-Contains $validateStatic 'test-package-api-cache.sh' 'CI proves transient Node caches stay outside API artifacts'
 Assert-Contains $validateStatic 'test-production-deployment-marker.sh' 'CI exercises durable promotion markers'
 
 Assert-Contains $webWorkflow "  plan-web:" 'Web skip planning has a non-production job'
