@@ -26,7 +26,9 @@ mkdir -p -- \
   "$fixture/infra/production/compatibility" \
   "$fixture/apps/server-api/dist" \
   "$fixture/apps/server-api/prisma" \
+  "$fixture/apps/server-api/node_modules/.bin" \
   "$fixture/apps/server-api/node_modules/.cache/jiti" \
+  "$fixture/apps/server-api/node_modules/empty-package/lib" \
   "$fixture/node_modules/runtime-package" \
   "$fixture/node_modules/.cache/jiti" \
   "$output_dir" \
@@ -80,8 +82,8 @@ if grep -F '/.cache/' <<<"$tar_members"; then
   exit 1
 fi
 if grep -Fq 'payload/apps/server-api/node_modules' <<<"$tar_members"; then
-  printf 'package-api retained an empty workspace node_modules directory\n' >&2
+  printf 'package-api retained empty workspace node_modules directories\n' >&2
   exit 1
 fi
 
-printf 'API package cache exclusion test passed.\n'
+printf 'API package cache and empty-directory policy test passed.\n'

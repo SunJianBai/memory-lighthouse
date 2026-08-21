@@ -180,9 +180,12 @@ tar --create \
       --no-same-permissions
 
 workspace_payload_dependencies="$payload/apps/server-api/node_modules"
-if [[ -d "$workspace_payload_dependencies" && \
-      -z "$(find "$workspace_payload_dependencies" -mindepth 1 -print -quit)" ]]; then
-  rmdir -- "$workspace_payload_dependencies"
+# npm prune can leave directory-only workspace remnants such as .bin/ or an
+# emptied package tree. Remove only empty directories from the leaves upward so
+# the artifact stays compatible with the currently installed production
+# validator; any real workspace-local dependency remains fail-closed.
+if [[ -d "$workspace_payload_dependencies" ]]; then
+  find "$workspace_payload_dependencies" -depth -type d -empty -delete
 fi
 
 unsafe_path="$(find "$payload" \( -type l -o \( \! -type f -a \! -type d \) \) -print -quit)"
