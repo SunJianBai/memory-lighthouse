@@ -175,7 +175,12 @@ class InspectionPrismaHarness {
   readonly auditLog = {
     findFirst: jest.fn(async () => {
       const previous = this.auditLogs.at(-1);
-      return previous ? { eventHash: previous.eventHash } : null;
+      return previous
+        ? {
+            eventHash: previous.eventHash,
+            occurredAt: previous.occurredAt,
+          }
+        : null;
     }),
     create: jest.fn(async ({ data }: Row) => {
       this.auditLogs.push(data);
@@ -345,6 +350,39 @@ describe('PlatformOperationsApplicationService content inspection', () => {
     expect(Buffer.from(prisma.auditLogs[1].eventHash)).not.toEqual(
       Buffer.from(prisma.auditLogs[0].eventHash),
     );
+  });
+
+  it('keeps the global audit chain ordered when the clock moves backwards', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(NOW);
+    try {
+      const { prisma, service } = makeService();
+      const previousOccurredAt = new Date(NOW.getTime() + 10_000);
+      prisma.auditLogs.push({
+        id: '01K1K000000000000000000099',
+        occurredAt: previousOccurredAt,
+        eventHash: Uint8Array.from(Array(32).fill(7)),
+      });
+
+      await service.inspectMemoryRevision({
+        principal,
+        grantId: ID.grant,
+        memoryId: ID.memory,
+        request: {
+          requestId: 'request-clock-rollback',
+          sourceIpHash: SOURCE_IP_HASH,
+        },
+      });
+
+      expect(prisma.auditLogs[1]?.occurredAt).toEqual(
+        new Date(previousOccurredAt.getTime() + 1),
+      );
+      expect(prisma.auditLogs[1]?.previousEventHash).toEqual(
+        prisma.auditLogs[0]?.eventHash,
+      );
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('refuses decryption and audit when current CONTENT_INSPECTION consent is absent', async () => {

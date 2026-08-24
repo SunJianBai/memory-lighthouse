@@ -11,6 +11,18 @@ class AuthApiContractTest {
 
         assertEquals("auth/email-verifications", AuthApiContract.emailVerificationsPath())
         assertEquals("family@example.com", body.getString("email"))
+        assertEquals(false, body.has("currentPassword"))
+    }
+
+    @Test
+    fun firstEmailAttachmentCarriesTheCurrentPasswordWithoutTrimmingIt() {
+        val body = AuthApiContract.requestEmailVerificationBody(
+            "  family@example.com  ",
+            " password with spaces ",
+        )
+
+        assertEquals("family@example.com", body.getString("email"))
+        assertEquals(" password with spaces ", body.getString("currentPassword"))
     }
 
     @Test

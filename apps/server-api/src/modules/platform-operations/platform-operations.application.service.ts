@@ -13,6 +13,7 @@ import { DATA_ENCRYPTION_PORT } from '../memory/memory.constants';
 import type { DataEncryptionPort } from '../memory/ports/data-encryption.port';
 import { NotificationApplicationService } from '../notification';
 import { DevelopmentContentInspectionPolicy } from './config/development-content-inspection.policy';
+import { preparePlatformAuditAppend } from './platform-audit-chain';
 import {
   AUDIT_SERIALIZABLE_RETRY_LIMIT,
   CONTENT_INSPECTION_CONSENT_SCOPE,
@@ -1004,11 +1005,12 @@ export class PlatformOperationsApplicationService {
     input: AuditAppendInput,
     occurredAt = new Date(),
   ): Promise<void> {
-    const previous = await transaction.auditLog.findFirst({
-      orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
-      select: { eventHash: true },
-    });
-    const id = newUlid(occurredAt.getTime());
+    const appendPoint = await preparePlatformAuditAppend(
+      transaction,
+      occurredAt,
+    );
+    const id = appendPoint.id;
+    occurredAt = appendPoint.occurredAt;
     const roles = [...input.principal.platformRoles].sort();
     const requestId = this.auditRequestId(input.request.requestId);
     if (input.request.sourceIpHash.byteLength !== 32) {
@@ -1035,8 +1037,8 @@ export class PlatformOperationsApplicationService {
       decision: 'ALLOW',
       policyVersion: 'development-content-inspection-v1',
     };
-    const previousHash = previous
-      ? Buffer.from(previous.eventHash)
+    const previousHash = appendPoint.previousEventHash
+      ? Buffer.from(appendPoint.previousEventHash)
       : Buffer.alloc(32);
     const eventHash = createHash('sha256')
       .update(previousHash)
@@ -1072,8 +1074,8 @@ export class PlatformOperationsApplicationService {
         policyVersion: 'development-content-inspection-v1',
         beforeHash: null,
         afterHash: null,
-        previousEventHash: previous
-          ? Uint8Array.from(previous.eventHash)
+        previousEventHash: appendPoint.previousEventHash
+          ? Uint8Array.from(appendPoint.previousEventHash)
           : null,
         eventHash: Uint8Array.from(eventHash),
         retentionUntil: null,

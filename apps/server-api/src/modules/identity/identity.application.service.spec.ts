@@ -543,7 +543,9 @@ describe('IdentityApplicationService security paths', () => {
       id: 'user-1',
       status: 'ACTIVE',
       deletedAt: null,
+      passwordCredential: { passwordHash: Uint8Array.from([7]) },
     });
+    harness.passwordHasher.verify.mockResolvedValue(true);
     harness.prisma.loginIdentity.findUnique.mockResolvedValue(null);
     harness.prisma.loginIdentity.create.mockResolvedValue({
       id: 'email-1',
@@ -558,6 +560,7 @@ describe('IdentityApplicationService security paths', () => {
     const result = await harness.service.requestEmailVerification(
       'user-1',
       ' NewAddress@Example.com ',
+      'current-password',
     );
 
     expect(result).toEqual({ accepted: true });
@@ -590,6 +593,65 @@ describe('IdentityApplicationService security paths', () => {
     expect(
       Buffer.from(persisted.data.tokenHash).toString('utf8'),
     ).not.toContain(deliveredCode);
+    expect(harness.passwordHasher.verify.mock.calls).toContainEqual([
+      'current-password',
+      Uint8Array.from([7]),
+    ]);
+  });
+
+  it('rejects attaching the first email when the request only proves bearer ownership', async () => {
+    const harness = makeHarness();
+    harness.prisma.user.findUnique.mockResolvedValue({
+      id: 'user-1',
+      status: 'ACTIVE',
+      deletedAt: null,
+    });
+    harness.prisma.loginIdentity.findUnique.mockResolvedValue(null);
+    harness.prisma.loginIdentity.create.mockResolvedValue({
+      id: 'email-1',
+      userId: 'user-1',
+      value: 'new-address@example.com',
+      verifiedAt: null,
+    });
+    harness.prisma.oneTimeToken.updateMany.mockResolvedValue({ count: 0 });
+    harness.prisma.oneTimeToken.create.mockResolvedValue({});
+
+    await expect(
+      harness.service.requestEmailVerification(
+        'user-1',
+        'new-address@example.com',
+      ),
+    ).rejects.toBeInstanceOf(InvalidCredentialsException);
+    expect(harness.prisma.loginIdentity.create.mock.calls).toHaveLength(0);
+    expect(harness.notification.sendEmailVerification.mock.calls).toHaveLength(
+      0,
+    );
+  });
+
+  it('resends a code for an existing email identity without password reauthentication', async () => {
+    const harness = makeHarness();
+    harness.prisma.user.findUnique.mockResolvedValue({
+      id: 'user-1',
+      status: 'PENDING_VERIFICATION',
+      deletedAt: null,
+    });
+    harness.prisma.loginIdentity.findUnique.mockResolvedValue({
+      id: 'email-1',
+      userId: 'user-1',
+      value: 'family@example.com',
+      verifiedAt: null,
+    });
+    harness.prisma.oneTimeToken.updateMany.mockResolvedValue({ count: 1 });
+    harness.prisma.oneTimeToken.create.mockResolvedValue({});
+    harness.notification.sendEmailVerification.mockResolvedValue();
+
+    await expect(
+      harness.service.requestEmailVerification('user-1', 'family@example.com'),
+    ).resolves.toEqual({ accepted: true });
+    expect(harness.passwordHasher.verify.mock.calls).toHaveLength(0);
+    expect(harness.notification.sendEmailVerification.mock.calls).toHaveLength(
+      1,
+    );
   });
 
   it('confirms the latest email code once and activates its pending account', async () => {

@@ -54,6 +54,12 @@ const navigation = computed<NavigationItem[]>(() => {
       requiredCapability: 'PLATFORM_MODEL_SESSIONS_READ'
     },
     {
+      to: '/prompts',
+      label: '提示词',
+      icon: 'prompt',
+      requiredCapability: 'PLATFORM_PROMPTS_READ'
+    },
+    {
       to: '/remote-sessions',
       label: '远程会话',
       icon: 'call',

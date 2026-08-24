@@ -180,6 +180,7 @@ if ($apiMarkerStart -lt 0 -or $apiWorkflow.IndexOf("`n      - name:", $apiMarker
     throw 'Invalid delivery ordering: API success marker must be the final workflow step'
 }
 Assert-Contains $apiWorkflow 'runs-on: ubuntu-24.04' 'API runner OS is pinned'
+Assert-Contains $apiWorkflow 'timeout-minutes: 90' 'API delivery allows the validated large artifact to finish over the production link'
 Assert-Contains $apiWorkflow 'architecture: x64' 'API runner architecture is pinned'
 Assert-Contains $apiWorkflow 'npm install --global npm@11.4.2' 'API npm version is pinned'
 Assert-Contains $apiWorkflow '--package-lock=false' 'API pruning cannot dirty the tracked lockfile'
@@ -188,7 +189,10 @@ Assert-Contains $apiWorkflow 'Verify build and pruning preserved immutable sourc
 Assert-Before $apiWorkflow 'Verify build and pruning preserved immutable source' 'Package and verify the native API artifact' 'API source cleanliness is proven before packaging'
 Assert-Contains $apiWorkflow 'prepare-remote-incoming.sh' 'API delivery performs bounded incoming cleanup and disk preflight'
 Assert-Contains $apiWorkflow 'remote-promotion-guard.sh' 'API promotion uses the server-side shared-lock guard'
-Assert-Before $apiWorkflow 'scp -- "$ARCHIVE" "$SIDECAR"' 'assert-current-main.sh "$SOURCE_SHA"' 'API remote-main check follows upload'
+Assert-Contains $apiWorkflow 'for transfer_attempt in 1 2 3' 'API upload retries are explicitly bounded'
+Assert-Contains $apiWorkflow 'rsync --partial --append-verify' 'API upload resumes verified partial transfers'
+Assert-NotContains $apiWorkflow 'scp -- "$ARCHIVE" "$SIDECAR"' 'API upload no longer restarts a large artifact from zero'
+Assert-Before $apiWorkflow 'rsync --partial --append-verify' 'assert-current-main.sh "$SOURCE_SHA"' 'API remote-main check follows upload'
 Assert-Before $apiWorkflow 'assert-current-main.sh "$SOURCE_SHA"' 'api "$SOURCE_SHA" "$REMOTE_DIRECTORY/$ARCHIVE_NAME"' 'API rechecks remote main immediately before guarded promotion'
 
 Assert-Contains $dockerWorkflow "vars.PRODUCTION_DEPLOY_ENABLED == 'true'" 'Docker delivery requires explicit enablement'

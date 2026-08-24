@@ -14,8 +14,10 @@ import { apiClient, readableError } from "../../api/api-client";
 import { navigate } from "../../app/navigation";
 import { useAuth } from "../../auth/auth-context";
 import {
+  emailAddressesMatch,
   isCompleteEmailVerificationCode,
   normalizeEmailVerificationCode,
+  ownsEmailIdentity,
 } from "../../auth/email-verification-model";
 import { BrandMark } from "../../components/BrandMark";
 
@@ -48,18 +50,35 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
+  const [acceptedVerificationEmail, setAcceptedVerificationEmail] =
+    useState("");
   const [registrationCreated, setRegistrationCreated] = useState(false);
   const [emailVerified, setEmailVerified] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const requestedEmailAlreadyOwned = ownsEmailIdentity(
+    auth.user?.identities ?? [],
+    email,
+  );
+  const requestedEmailAlreadyAccepted = emailAddressesMatch(
+    acceptedVerificationEmail,
+    email,
+  );
+  const requiresEmailAttachmentPassword =
+    mode === "verify-email" &&
+    auth.status === "authenticated" &&
+    email.trim().length > 0 &&
+    !requestedEmailAlreadyOwned &&
+    !requestedEmailAlreadyAccepted;
 
   useEffect(() => {
     setError("");
     setSuccess("");
     setPassword("");
     setVerificationCode("");
+    setAcceptedVerificationEmail("");
     setRegistrationCreated(false);
     setEmailVerified(false);
   }, [mode]);
@@ -146,8 +165,17 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
     setError("");
     setSuccess("");
     try {
-      await auth.requestEmailVerification(email);
-      setSuccess("新的 6 位验证码已发送，请检查收件箱与垃圾邮件。 ");
+      const result = await auth.requestEmailVerification(
+        email,
+        requiresEmailAttachmentPassword ? password : undefined,
+      );
+      setAcceptedVerificationEmail(email.trim());
+      if (requiresEmailAttachmentPassword) setPassword("");
+      setSuccess(
+        result.userRefreshed
+          ? "新的 6 位验证码已发送，请检查收件箱与垃圾邮件。 "
+          : "验证码已发送，但账号信息暂未刷新；你仍可直接输入收到的验证码。 ",
+      );
     } catch (sendError) {
       setError(readableError(sendError));
     } finally {
@@ -158,7 +186,10 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
   const isVerificationStep =
     mode === "verify-email" || (mode === "register" && registrationCreated);
   const needsPassword =
-    mode === "login" || mode === "reset-password" || (mode === "register" && !registrationCreated);
+    mode === "login" ||
+    mode === "reset-password" ||
+    requiresEmailAttachmentPassword ||
+    (mode === "register" && !registrationCreated);
   const verificationReady =
     email.trim().length > 0 && isCompleteEmailVerificationCode(verificationCode);
 
@@ -254,27 +285,27 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
                 />
               </div>
               <p className="field-help">验证码仅可使用一次，请以最新收到的邮件为准。</p>
-              {!emailVerified && auth.status === "authenticated" && (
-                <button
-                  className="text-button verification-resend"
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void resendVerification()}
-                >
-                  {busy ? "正在发送…" : "没有收到？重新发送验证码"}
-                </button>
-              )}
             </>
           )}
 
           {needsPassword && (
             <>
-              <label htmlFor="auth-password">{mode === "reset-password" ? "新密码" : "密码"}</label>
+              <label htmlFor="auth-password">
+                {mode === "reset-password"
+                  ? "新密码"
+                  : requiresEmailAttachmentPassword
+                    ? "当前账号密码"
+                    : "密码"}
+              </label>
               <div className="password-field">
                 <input
                   id="auth-password"
                   type={showPassword ? "text" : "password"}
-                  autoComplete={mode === "login" ? "current-password" : "new-password"}
+                  autoComplete={
+                    mode === "login" || requiresEmailAttachmentPassword
+                      ? "current-password"
+                      : "new-password"
+                  }
                   minLength={10}
                   maxLength={128}
                   required
@@ -285,8 +316,27 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
                   {showPassword ? <EyeOff aria-hidden="true" size={20} /> : <Eye aria-hidden="true" size={20} />}
                 </button>
               </div>
-              {mode !== "login" && <p className="field-help">至少 10 个字符，请勿使用其他网站相同的密码。</p>}
+              {requiresEmailAttachmentPassword ? (
+                <p className="field-help">绑定此邮箱前需要再次确认当前账号密码。</p>
+              ) : mode !== "login" ? (
+                <p className="field-help">至少 10 个字符，请勿使用其他网站相同的密码。</p>
+              ) : null}
             </>
+          )}
+
+          {isVerificationStep && !emailVerified && auth.status === "authenticated" && (
+            <button
+              className="text-button verification-resend"
+              type="button"
+              disabled={
+                busy ||
+                !email.trim() ||
+                (requiresEmailAttachmentPassword && !password)
+              }
+              onClick={() => void resendVerification()}
+            >
+              {busy ? "正在发送…" : "没有收到？重新发送验证码"}
+            </button>
           )}
 
           {error && <div className="form-message error" role="alert">{error}</div>}

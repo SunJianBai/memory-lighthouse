@@ -20,6 +20,7 @@ import com.sun.minicpmo_android.lighthouse.network.LighthouseApiException
 import com.sun.minicpmo_android.lighthouse.realtime.LiveCallState
 import com.sun.minicpmo_android.lighthouse.realtime.isUnexpectedFamilyMediaFailure
 import com.sun.minicpmo_android.lighthouse.realtime.shouldKeepFamilyMediaFailureVisible
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -130,15 +131,31 @@ class LighthouseViewModel internal constructor(
         consumeDeferredActivation()
     }
 
-    fun requestEmailVerification(emailInput: String? = null) = action {
+    fun requestEmailVerification(
+        emailInput: String? = null,
+        currentPassword: String? = null,
+    ) = action {
         val email = emailInput?.trim()?.takeIf(String::isNotBlank)
             ?: _uiState.value.user?.email
             ?: error("请先填写用于验证的邮箱")
-        repository.requestEmailVerification(email)
+        if (_uiState.value.user?.email == null) {
+            require(!currentPassword.isNullOrEmpty()) { "绑定首个邮箱前，请输入当前账号密码" }
+        }
+        repository.requestEmailVerification(email, currentPassword)
+        val refreshedUser = try {
+            repository.getMe()
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            null
+        }
         _uiState.value = _uiState.value.copy(
-            user = repository.getMe(),
+            user = refreshedUser ?: _uiState.value.user,
             emailVerificationPromptVisible = true,
-            message = "6 位邮箱验证码已发送，请查收并输入验证码",
+            message = if (refreshedUser != null) {
+                "6 位邮箱验证码已发送，请查收并输入验证码"
+            } else {
+                "验证码已发送，但账号信息暂未刷新；仍可直接输入收到的验证码"
+            },
         )
     }
 

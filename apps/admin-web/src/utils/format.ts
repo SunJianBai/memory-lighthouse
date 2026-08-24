@@ -50,7 +50,11 @@ export function formatError(error: unknown): string {
       CONTENT_INSPECTION_CONSENT_REQUIRED: '长者当前未授予内容检查同意，不能查看原文。',
       INSPECTION_RESOURCE_NOT_FOUND: '没有找到指定资源，请核对 ID。',
       INSPECTION_CONTENT_UNAVAILABLE: '原文不存在、已清除或超过保留期限。',
-      RATE_LIMITED: '请求过于频繁，请稍后再试。'
+      RATE_LIMITED: '请求过于频繁，请稍后再试。',
+      PROMPT_PUBLICATION_CONFLICT: '提示词已被其他管理员更新，请刷新后重新确认。',
+      PROMPT_PUBLICATION_UNSUPPORTED: '当前提示词版本暂不支持在线发布，请先升级服务端。',
+      PROMPT_PUBLICATION_INVALID: '请检查提示词正文和发布说明的长度。',
+      PROMPT_REVISION_UNCHANGED: '提示词正文没有变化，无需发布新修订。'
     }
     const knownMessage = messages[error.code]
     if (knownMessage) return knownMessage

@@ -50,6 +50,26 @@ function loginRequest(identifier: string): Request {
   } as unknown as Request;
 }
 
+function authenticatedEmailRequest(email: string, ip: string): Request {
+  return {
+    body: { email },
+    params: {},
+    headers: { 'x-forwarded-for': ip },
+    socket: { remoteAddress: '127.0.0.1' },
+    userPrincipal: {
+      userId: 'user-1',
+      sessionId: 'session-1',
+    },
+  } as unknown as Request;
+}
+
+function bucketKey(
+  buckets: readonly RateLimitBucket[],
+  bucketId: string,
+): string | undefined {
+  return buckets.find((bucket) => bucket.key.includes(`:${bucketId}:`))?.key;
+}
+
 function createService(store: RateLimitStore): RateLimitApplicationService {
   return new RateLimitApplicationService(
     store,
@@ -103,6 +123,35 @@ describe('RateLimitApplicationService', () => {
       remaining: 0,
       retryAfterSeconds: 2,
     });
+  });
+
+  it('keeps account and session buckets stable when an attacker rotates email and IP', async () => {
+    const store = new CapturingStore();
+    const service = createService(store);
+
+    await service.consume(
+      RateLimitPolicy.AUTH_EMAIL_VERIFICATION_REQUEST,
+      authenticatedEmailRequest('first@example.com', '198.51.100.23'),
+    );
+    await service.consume(
+      RateLimitPolicy.AUTH_EMAIL_VERIFICATION_REQUEST,
+      authenticatedEmailRequest('second@example.com', '203.0.113.42'),
+    );
+
+    expect(store.calls).toHaveLength(2);
+    expect(store.calls[0]).toHaveLength(5);
+    expect(bucketKey(store.calls[0] ?? [], 'account')).toBe(
+      bucketKey(store.calls[1] ?? [], 'account'),
+    );
+    expect(bucketKey(store.calls[0] ?? [], 'source-session')).toBe(
+      bucketKey(store.calls[1] ?? [], 'source-session'),
+    );
+    expect(bucketKey(store.calls[0] ?? [], 'email')).not.toBe(
+      bucketKey(store.calls[1] ?? [], 'email'),
+    );
+    expect(bucketKey(store.calls[0] ?? [], 'ip')).not.toBe(
+      bucketKey(store.calls[1] ?? [], 'ip'),
+    );
   });
 
   it('fails closed without leaking adapter errors', async () => {

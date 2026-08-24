@@ -109,6 +109,7 @@ interface LifecycleMemoryFixture {
   kind: string;
   title: string;
   content: string;
+  verificationStatus?: string;
 }
 
 interface LifecycleOccurrenceFixture {
@@ -313,7 +314,7 @@ function lifecycleHarness(
       kind: memory.kind,
       title: memory.title,
       sensitivity: 'HOUSEHOLD',
-      verificationStatus: 'FAMILY_VERIFIED',
+      verificationStatus: memory.verificationStatus ?? 'FAMILY_VERIFIED',
       status: 'ACTIVE',
       currentRevisionNo: 1,
       revisions: [
@@ -358,7 +359,40 @@ function lifecycleHarness(
     companionBinding: { findFirst: jest.fn(async () => binding) },
     companionSession,
     recipientConsentState,
-    memory: { findMany: jest.fn(async () => memoryRows) },
+    memory: {
+      findMany: jest.fn(
+        async ({
+          where,
+          take,
+        }: {
+          where: {
+            kind?: string | { not?: string };
+            verificationStatus?: { in?: string[] };
+          };
+          take?: number;
+        }) => {
+          const allowedStatuses = where.verificationStatus?.in;
+          const matchingRows = memoryRows.filter((memory) => {
+            if (
+              allowedStatuses &&
+              !allowedStatuses.includes(memory.verificationStatus)
+            ) {
+              return false;
+            }
+            if (typeof where.kind === 'string') {
+              return memory.kind === where.kind;
+            }
+            if (where.kind?.not) {
+              return memory.kind !== where.kind.not;
+            }
+            return true;
+          });
+          return take === undefined
+            ? matchingRows
+            : matchingRows.slice(0, take);
+        },
+      ),
+    },
     routineOccurrence: { findMany: jest.fn(async () => occurrenceRows) },
     device: { updateMany: jest.fn(async () => ({ count: 1 })) },
     modelSession,
@@ -473,8 +507,10 @@ function lifecycleHarness(
     leases,
     mediaSecurity,
     modelSession,
+    memory: prisma.memory,
     promptVersion: prisma.promptVersion,
     modelLock: prisma.$queryRaw,
+    transaction: prisma.$transaction,
     outboxEvent: prisma.outboxEvent,
     companionSession,
     session: () => storedSession,
@@ -1051,6 +1087,146 @@ describe('CompanionSessionApplicationService media lifecycle', () => {
     );
     expect(model.careSnapshot.memories).toHaveLength(2);
     expect(model.careSnapshot.occurrences).toHaveLength(1);
+  });
+
+  it('keeps unverified memories out of the model context while preserving family-reported provenance', async () => {
+    const test = lifecycleHarness({
+      memories: [
+        {
+          id: 'memory-unverified',
+          kind: 'PREFERENCE',
+          title: '未经核验的偏好',
+          content: '未经核验的内容不得提供给模型。',
+          verificationStatus: 'UNVERIFIED',
+        },
+        {
+          id: 'memory-family-reported',
+          kind: 'PREFERENCE',
+          title: '家属提供的偏好',
+          content: '家属说希望陪伴助手放慢语速。',
+          verificationStatus: 'FAMILY_REPORTED',
+        },
+        {
+          id: 'memory-family-verified',
+          kind: 'STORY',
+          title: '已核验的往事',
+          content: '已经由家属核验的往事。',
+          verificationStatus: 'FAMILY_VERIFIED',
+        },
+      ],
+    });
+    test.setConsent([
+      'MICROPHONE_CAPTURE',
+      'MODEL_PROCESSING',
+      'MEMORY_STORAGE',
+    ]);
+    const companion = await test.start();
+
+    const model = await test.startModel(
+      companion.session.id,
+      'model-memory-verification-boundary',
+    );
+
+    expect(
+      model.careSnapshot.memories.map((memory) => ({
+        id: memory.id,
+        verificationStatus: memory.verificationStatus,
+      })),
+    ).toEqual([
+      {
+        id: 'memory-family-reported',
+        verificationStatus: 'FAMILY_REPORTED',
+      },
+      {
+        id: 'memory-family-verified',
+        verificationStatus: 'FAMILY_VERIFIED',
+      },
+    ]);
+    expect(model.prompt.content).not.toContain(
+      '未经核验的内容不得提供给模型。',
+    );
+    expect(model.prompt.content).toContain('家属说希望陪伴助手放慢语速。');
+    expect(model.prompt.content).toContain('已经由家属核验的往事。');
+  });
+
+  it('reserves bounded snapshot capacity for communication preferences and ordinary memories independently', async () => {
+    const recentStories = Array.from({ length: 20 }, (_, index) => ({
+      id: `recent-story-${index}`,
+      kind: 'STORY',
+      title: `近期记忆 ${index}`,
+      content: `近期记忆内容 ${index}`,
+    }));
+    const olderPreferences = Array.from({ length: 6 }, (_, index) => ({
+      id: `older-preference-${index}`,
+      kind: 'PREFERENCE',
+      title: `沟通偏好 ${index}`,
+      content: `沟通偏好内容 ${index}`,
+    }));
+    const test = lifecycleHarness({
+      memories: [...recentStories, ...olderPreferences],
+    });
+    test.setConsent([
+      'MICROPHONE_CAPTURE',
+      'MODEL_PROCESSING',
+      'MEMORY_STORAGE',
+    ]);
+    const companion = await test.start();
+    test.memory.findMany.mockClear();
+    test.transaction.mockClear();
+
+    const model = await test.startModel(
+      companion.session.id,
+      'model-memory-category-quotas',
+    );
+
+    expect(test.memory.findMany).toHaveBeenCalledTimes(2);
+    expect(test.transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: 'RepeatableRead',
+    });
+    expect(test.memory.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ kind: 'PREFERENCE' }),
+        take: 5,
+      }),
+    );
+    expect(test.memory.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ kind: { not: 'PREFERENCE' } }),
+        take: 20,
+      }),
+    );
+    expect(model.careSnapshot.memories).toHaveLength(20);
+    expect(model.careSnapshot.memories.map((memory) => memory.id)).toEqual([
+      ...olderPreferences.slice(0, 5).map((memory) => memory.id),
+      ...recentStories.slice(0, 15).map((memory) => memory.id),
+    ]);
+    expect(model.prompt.content).toContain('沟通偏好内容 0');
+    expect(model.prompt.content).not.toContain('沟通偏好内容 5');
+  });
+
+  it('fills all twenty snapshot slots with ordinary memories when there are no preferences', async () => {
+    const ordinaryMemories = Array.from({ length: 25 }, (_, index) => ({
+      id: `ordinary-memory-${index}`,
+      kind: 'STORY',
+      title: `普通记忆 ${index}`,
+      content: `普通记忆内容 ${index}`,
+    }));
+    const test = lifecycleHarness({ memories: ordinaryMemories });
+    test.setConsent([
+      'MICROPHONE_CAPTURE',
+      'MODEL_PROCESSING',
+      'MEMORY_STORAGE',
+    ]);
+    const companion = await test.start();
+
+    const model = await test.startModel(
+      companion.session.id,
+      'model-general-memory-capacity',
+    );
+
+    expect(model.careSnapshot.memories.map((memory) => memory.id)).toEqual(
+      ordinaryMemories.slice(0, 20).map((memory) => memory.id),
+    );
   });
 
   it('keeps the effective prompt valid and bounded when authorized care data is large', async () => {

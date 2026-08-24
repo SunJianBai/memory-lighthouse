@@ -30,6 +30,27 @@ export const MODEL_EVENT_TYPES = [
 export type ModelEventType = (typeof MODEL_EVENT_TYPES)[number];
 
 export const DEFAULT_PROMPT_CODE = 'COMPANION_SYSTEM';
+export const COMPANION_PROMPT_REVISION_CODE_PREFIX = `${DEFAULT_PROMPT_CODE}.REVISION.`;
+
+export function companionPromptRevisionCode(promptId: string): string {
+  return `${COMPANION_PROMPT_REVISION_CODE_PREFIX}${promptId}`;
+}
+
+export function companionPromptCodeFilter(): {
+  OR: Array<
+    | { code: string }
+    | {
+        code: { startsWith: string };
+      }
+  >;
+} {
+  return {
+    OR: [
+      { code: DEFAULT_PROMPT_CODE },
+      { code: { startsWith: COMPANION_PROMPT_REVISION_CODE_PREFIX } },
+    ],
+  };
+}
 
 export function promptEncryptionContext(
   promptId: string,

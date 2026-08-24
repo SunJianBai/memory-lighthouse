@@ -9,6 +9,8 @@ describe('platform capabilities', () => {
         'PLATFORM_DASHBOARD_READ',
         'PLATFORM_USERS_READ',
         'PLATFORM_AUDIT_LOGS_READ',
+        'PLATFORM_PROMPTS_READ',
+        'PLATFORM_PROMPTS_PUBLISH',
         'INSPECTION_GRANTS_APPROVE',
       ]),
     );

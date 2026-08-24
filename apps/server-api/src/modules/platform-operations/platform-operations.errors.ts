@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   GoneException,
@@ -80,5 +81,38 @@ export class InspectionContentUnavailableException extends GoneException {
       code: 'INSPECTION_CONTENT_UNAVAILABLE',
       message: '原文不存在、已清除或已超过保留期限',
     });
+  }
+}
+
+export class PromptPublicationConflictException extends ConflictException {
+  constructor() {
+    super({
+      code: 'PROMPT_PUBLICATION_CONFLICT',
+      message: '提示词已被其他管理员更新，请刷新后重新确认',
+    });
+  }
+}
+
+export class PromptPublicationUnsupportedException extends ConflictException {
+  constructor(version: number) {
+    super({
+      code: 'PROMPT_PUBLICATION_UNSUPPORTED',
+      message: `当前提示词使用尚未注册的组合器版本 ${version}，不能直接发布修订`,
+    });
+  }
+}
+
+export class PromptRevisionUnchangedException extends ConflictException {
+  constructor() {
+    super({
+      code: 'PROMPT_REVISION_UNCHANGED',
+      message: '提示词正文没有变化，无需发布新修订',
+    });
+  }
+}
+
+export class PromptPublicationValidationException extends BadRequestException {
+  constructor(message: string) {
+    super({ code: 'PROMPT_PUBLICATION_INVALID', message });
   }
 }

@@ -56,7 +56,7 @@ DELETE /v1/me/sessions/:sessionId
 
 注册请求允许邮箱和用户名至少填一项；创建家庭或激活设备前必须存在已验证邮箱。登录只接收一个 `identifier`，服务器按规范化规则匹配邮箱或用户名，不返回“账号不存在”差异信息。
 
-注册请求包含邮箱时，服务端在账号与登录会话创建成功后自动发送 6 位数字验证码。已登录用户可向 `POST /v1/auth/email-verifications` 提交 `{ "email": "family@example.com" }` 绑定首个邮箱或重新发送；确认接口为公开的 `POST /v1/auth/email-verifications/confirm`，请求体固定为 `{ "email": "family@example.com", "code": "042731" }`。验证码默认 10 分钟有效，新验证码会使同一账号此前未使用的验证码失效，连续错误达到 5 次后失效，成功确认后不可再次使用。接口对不存在邮箱、错误码、过期码和已使用码返回相同的通用错误，数据库只保存与邮箱身份及令牌记录绑定的 HMAC 摘要，不保存验证码原文。密码重置仍使用独立的高熵一次性链接，不与短验证码共用确认契约。
+注册请求包含邮箱时，服务端在账号与登录会话创建成功后自动发送 6 位数字验证码。已登录用户可向 `POST /v1/auth/email-verifications` 提交 `{ "email": "family@example.com" }` 为本账号已有的待验证邮箱重新发送验证码；创建新的邮箱身份（包括用户名账号绑定首个邮箱）时必须额外提交原样的 `currentPassword`（不得去除首尾字符），服务端在创建身份前重新认证当前用户。发送接口同时按来源 IP、目标邮箱、当前账号、当前会话及 IP + 账号组合限流。确认接口为公开的 `POST /v1/auth/email-verifications/confirm`，请求体固定为 `{ "email": "family@example.com", "code": "042731" }`。验证码默认 10 分钟有效，新验证码会使同一账号此前未使用的验证码失效，连续错误达到 5 次后失效，成功确认后不可再次使用。接口对不存在邮箱、错误码、过期码和已使用码返回相同的通用错误，数据库只保存与邮箱身份及令牌记录绑定的 HMAC 摘要，不保存验证码原文。密码重置仍使用独立的高熵一次性链接，不与短验证码共用确认契约。
 
 Web 刷新令牌使用 HttpOnly Cookie；Android 在响应体取得经 Keystore 加密保存的刷新令牌。两者均执行轮换和重放检测。
 
@@ -287,6 +287,8 @@ GET  /v1/admin/devices
 GET  /v1/admin/model-sessions
 GET  /v1/admin/remote-sessions
 GET  /v1/admin/audit-logs
+GET  /v1/admin/prompts/current
+POST /v1/admin/prompts/revisions
 
 POST /v1/admin/inspection-grants
 POST /v1/admin/inspection-grants/:grantId/approve
@@ -296,6 +298,8 @@ GET  /v1/admin/inspections/utterances/:utteranceId
 ```
 
 原文检查 Interface 在生产构建中不注册；开发环境每次读取都要提供 Grant ID，并返回 `Cache-Control: no-store`。
+
+提示词发布请求必须携带 `expectedCurrentPromptId`、1～4000 字符的 `content` 和发布说明 `reason`。服务端以乐观锁拒绝基于旧修订的写入；正文相同不创建新修订。每次发布创建不可变 `prompt_versions` 记录并在同一串行化事务中写入 `prompt-publication-v1` 审计。内容修订继承当前 Provider 与 Model，且只影响之后启动的 Model Session；已启动会话继续引用原 `promptVersionId`。在不增加数据库字段的前提下，在线修订保持 Composer Version 为 3，并使用受控的 `COMPANION_SYSTEM.REVISION.<ULID>` Code 区分修订；未注册的未来 Composer Version 仍会被拒绝。
 
 ## 11. 实时控制 WebSocket
 

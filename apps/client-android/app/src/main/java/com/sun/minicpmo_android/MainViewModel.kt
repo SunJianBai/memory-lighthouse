@@ -15,6 +15,8 @@ import com.sun.minicpmo_android.model.MessageRole
 import com.sun.minicpmo_android.model.RealtimeMode
 import com.sun.minicpmo_android.model.SessionPhase
 import com.sun.minicpmo_android.model.SessionSettings
+import com.sun.minicpmo_android.model.chatDeliveryFailureMessage
+import com.sun.minicpmo_android.model.withChatDeliveryResult
 import com.sun.minicpmo_android.model.withServerManagedSession
 import com.sun.minicpmo_android.network.RealtimeApiClient
 import kotlinx.coroutines.Dispatchers
@@ -39,7 +41,7 @@ class MainViewModel(
     private val mediaGeneration = AtomicLong(0)
     private val connectionGeneration = AtomicLong(0)
     private val mediaStateLock = Any()
-    private var pendingChat: String? = null
+    private val pendingChat = AtomicReference<String?>(null)
     @Volatile
     private var stoppedByUser = false
     private var companionConnection: CompanionModelConnection? = null
@@ -86,21 +88,19 @@ class MainViewModel(
     fun sendChat() {
         val state = _uiState.value
         val text = state.composerText.trim()
-        if (text.isEmpty() || state.selectedMode != RealtimeMode.CHAT) return
+        if (text.isEmpty() || !state.canSendChat) return
 
-        addMessage(MessageRole.USER, text)
-        _uiState.update { current -> current.copy(composerText = "") }
         if (realtimeClient.isSessionReady) {
-            if (!realtimeClient.sendChat(
-                    text,
-                    state.settings.chatTtsEnabled,
-                    state.settings.lengthPenalty,
-                )
-            ) {
-                reportError("消息发送失败，请重新连接")
+            val accepted = deliverChat(
+                text = text,
+                ttsEnabled = state.settings.chatTtsEnabled,
+                lengthPenalty = state.settings.lengthPenalty,
+            )
+            if (!accepted) {
+                reportError(chatDeliveryFailureMessage("实时连接未接受消息"))
             }
         } else {
-            pendingChat = text
+            pendingChat.set(text)
             connect(RealtimeMode.CHAT)
         }
     }
@@ -112,7 +112,7 @@ class MainViewModel(
     }
 
     fun stopSession(quiet: Boolean = false) {
-        pendingChat = null
+        pendingChat.set(null)
         synchronized(mediaStateLock) {
             stoppedByUser = true
             mediaGeneration.incrementAndGet()
@@ -169,7 +169,7 @@ class MainViewModel(
     }
 
     private fun stopLocalCompanionForHandoff(): CompanionModelConnection? {
-        pendingChat = null
+        pendingChat.set(null)
         val connection = companionConnection
         companionConnection = null
         synchronized(mediaStateLock) {
@@ -522,15 +522,15 @@ class MainViewModel(
                 }
                     .onFailure { reportMediaError("音频播放不可用：${it.message}") }
             }
-            pendingChat?.let { text ->
-                pendingChat = null
-                if (!realtimeClient.sendChat(
-                        text,
-                        _uiState.value.settings.chatTtsEnabledFor(selectedMode),
-                        _uiState.value.settings.lengthPenalty,
-                    )
-                ) {
-                    reportError("消息发送失败，请重试")
+            pendingChat.getAndSet(null)?.let { text ->
+                val settings = _uiState.value.settings
+                val accepted = deliverChat(
+                    text = text,
+                    ttsEnabled = settings.chatTtsEnabledFor(selectedMode),
+                    lengthPenalty = settings.lengthPenalty,
+                )
+                if (!accepted) {
+                    reportError(chatDeliveryFailureMessage("实时连接未接受消息"))
                 }
             }
         } else {
@@ -694,6 +694,10 @@ class MainViewModel(
             "timeout" -> "会话已达到时长上限"
             else -> "会话已结束：$reason"
         }
+        if (pendingChat.get() != null) {
+            reportError(closureMessage)
+            return
+        }
         synchronized(mediaStateLock) {
             mediaGeneration.incrementAndGet()
             connectionGeneration.incrementAndGet()
@@ -800,6 +804,23 @@ class MainViewModel(
         addMessage(MessageRole.SYSTEM, text)
     }
 
+    private fun deliverChat(
+        text: String,
+        ttsEnabled: Boolean,
+        lengthPenalty: Float,
+    ): Boolean {
+        val accepted = realtimeClient.sendChat(text, ttsEnabled, lengthPenalty)
+        val messageId = if (accepted) nextMessageId.getAndIncrement() else 0L
+        _uiState.update { current ->
+            current.withChatDeliveryResult(
+                text = text,
+                accepted = accepted,
+                messageId = messageId,
+            )
+        }
+        return accepted
+    }
+
     private fun reportMediaError(message: String) {
         val normalized = message.trim().ifEmpty { "陪伴服务暂时不可用" }
         val isNew = _uiState.value.mediaError != normalized
@@ -818,6 +839,19 @@ class MainViewModel(
     }
 
     private fun reportError(message: String) {
+        val pendingText = pendingChat.getAndSet(null)
+        val visibleMessage = if (pendingText == null) {
+            message
+        } else {
+            _uiState.update { current ->
+                current.withChatDeliveryResult(
+                    text = pendingText,
+                    accepted = false,
+                    messageId = 0L,
+                )
+            }
+            chatDeliveryFailureMessage(message)
+        }
         synchronized(mediaStateLock) {
             mediaGeneration.incrementAndGet()
             connectionGeneration.incrementAndGet()
@@ -825,8 +859,8 @@ class MainViewModel(
                 current.copy(
                     phase = SessionPhase.ERROR,
                     duplexActivity = DuplexActivity.READY,
-                    statusText = message,
-                    mediaError = message,
+                    statusText = visibleMessage,
+                    mediaError = visibleMessage,
                     audioLevel = 0f,
                     forceListen = false,
                     queuePosition = null,
@@ -839,7 +873,7 @@ class MainViewModel(
         audioEngine.stop()
         realtimeClient.close("client_error")
         finishCompanion("CLIENT_ERROR")
-        addSystemMessage(message)
+        addSystemMessage(visibleMessage)
     }
 
     private fun updateMetrics(metrics: JSONObject?) {

@@ -65,13 +65,20 @@ export class RefreshDto {
   refreshToken?: string;
 }
 
-export class EmailVerificationRequestDto {
+class EmailAddressDto {
   @IsEmail()
   @MaxLength(320)
   email!: string;
 }
 
-export class EmailVerificationConfirmDto extends EmailVerificationRequestDto {
+export class EmailVerificationRequestDto extends EmailAddressDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  currentPassword?: string;
+}
+
+export class EmailVerificationConfirmDto extends EmailAddressDto {
   @IsString()
   @Matches(/^\d{6}$/)
   code!: string;

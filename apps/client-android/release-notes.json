@@ -1,10 +1,10 @@
 {
-  "versionCode": 2,
-  "versionName": "1.0.1",
+  "versionCode": 3,
+  "versionName": "1.0.2",
   "mandatory": false,
   "releaseNotes": [
-    "优化家属端与陪伴端界面和交互",
-    "精简页面说明文字",
-    "新增安全的应用内更新功能"
+    "完善家属端和陪伴端的核心交互",
+    "修复网络中断与会话结束后的消息状态",
+    "优化回答偏好入口和无障碍体验"
   ]
 }

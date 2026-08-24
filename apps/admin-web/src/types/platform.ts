@@ -48,6 +48,8 @@ export type PlatformCapability =
   | 'PLATFORM_MODEL_SESSIONS_READ'
   | 'PLATFORM_REMOTE_SESSIONS_READ'
   | 'PLATFORM_AUDIT_LOGS_READ'
+  | 'PLATFORM_PROMPTS_READ'
+  | 'PLATFORM_PROMPTS_PUBLISH'
   | 'INSPECTION_GRANTS_READ'
   | 'INSPECTION_GRANTS_REQUEST'
   | 'INSPECTION_GRANTS_APPROVE'
@@ -131,4 +133,21 @@ export interface UtteranceInspectionResult {
   charCount: number
   createdAt: string
   watermark: InspectionWatermark
+}
+
+export interface CompanionPrompt {
+  id: string
+  code: string
+  composerVersion: number
+  provider: string
+  model: string
+  content: string
+  contentHash: string
+  publishedAt: string
+}
+
+export interface PublishCompanionPromptInput {
+  expectedCurrentPromptId: string
+  content: string
+  reason: string
 }

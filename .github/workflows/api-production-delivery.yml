@@ -109,7 +109,7 @@ jobs:
       deployments: write
     runs-on: ubuntu-24.04
     environment: production
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Check out the exact CI-validated source
@@ -153,6 +153,8 @@ jobs:
           EOF
           chmod 0600 "$HOME/.ssh/config"
           ssh tx4h4g-api-prod 'true'
+          command -v rsync >/dev/null
+          ssh tx4h4g-api-prod 'command -v rsync >/dev/null'
 
       - name: Verify locked production API baseline
         id: reconcile
@@ -362,7 +364,17 @@ jobs:
             upload-preflight api "$UPLOAD_REQUIRED_BYTES" \
             < scripts/hybrid/remote-promotion-guard.sh
 
-          scp -- "$ARCHIVE" "$SIDECAR" "tx4h4g-api-prod:$REMOTE_DIRECTORY/"
+          transfer_succeeded=false
+          for transfer_attempt in 1 2 3; do
+            if rsync --partial --append-verify --timeout=120 --chmod=F600 \
+              --protect-args -- "$ARCHIVE" "$SIDECAR" \
+              "tx4h4g-api-prod:$REMOTE_DIRECTORY/"; then
+              transfer_succeeded=true
+              break
+            fi
+            echo "::warning::API artifact transfer attempt $transfer_attempt failed; the next bounded attempt will resume the verified partial file."
+          done
+          [[ "$transfer_succeeded" == true ]]
 
           bash scripts/hybrid/assert-current-main.sh "$SOURCE_SHA"
           ssh tx4h4g-api-prod sudo -n bash -s -- \

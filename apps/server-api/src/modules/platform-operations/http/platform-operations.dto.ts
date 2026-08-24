@@ -9,6 +9,7 @@ import {
   IsOptional,
   IsString,
   Length,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -21,6 +22,7 @@ import {
   PLATFORM_PAGE_MAX,
   type InspectionDataCategory,
 } from '../platform-operations.constants';
+import { COMPANION_PROMPT_TEMPLATE_MAX_CHARS } from '../../companion-session/companion-prompt';
 
 export class PlatformPageQueryDto {
   @IsOptional()
@@ -99,4 +101,20 @@ export class MemoryInspectionQueryDto extends InspectionQueryDto {
   @IsString()
   @Length(26, 26)
   revisionId?: string;
+}
+
+export class PublishCompanionPromptDto {
+  @IsString()
+  @Length(26, 26)
+  expectedCurrentPromptId!: string;
+
+  @IsString()
+  @Length(1, COMPANION_PROMPT_TEMPLATE_MAX_CHARS)
+  @Matches(/\S/u)
+  content!: string;
+
+  @IsString()
+  @Length(1, 100)
+  @Matches(/\S/u)
+  reason!: string;
 }

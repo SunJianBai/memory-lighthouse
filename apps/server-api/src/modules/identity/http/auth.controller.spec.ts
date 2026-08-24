@@ -1,11 +1,12 @@
 import type { Request, Response } from 'express';
 import { describe, expect, it, jest } from '@jest/globals';
+import { validate } from 'class-validator';
 
 import type { IdentitySecurityConfig } from '../config/identity-security.config';
 import type { IdentityApplicationService } from '../identity.application.service';
 import type { SessionTokenResult } from '../identity.types';
 import { AuthController } from './auth.controller';
-import { ClientTypeDto } from './identity.dto';
+import { ClientTypeDto, EmailVerificationConfirmDto } from './identity.dto';
 
 jest.mock('../identity.application.service', () => ({
   IdentityApplicationService: class IdentityApplicationService {},
@@ -154,5 +155,50 @@ describe('AuthController refresh transport', () => {
       'Family@Example.com',
       '042731',
     );
+  });
+
+  it('forwards the current password when requesting a new email identity', async () => {
+    const requestEmailVerification = jest.fn(() =>
+      Promise.resolve({ accepted: true as const }),
+    );
+    const identity = {
+      requestEmailVerification,
+    } as unknown as IdentityApplicationService;
+    const controller = new AuthController(identity, config);
+
+    await expect(
+      controller.requestEmailVerification(
+        {
+          kind: 'USER',
+          userId: 'user-1',
+          sessionId: 'session-1',
+          tokenId: 'token-1',
+          status: 'ACTIVE',
+        },
+        {
+          email: 'new-address@example.com',
+          currentPassword: 'current-password',
+        },
+      ),
+    ).resolves.toEqual({ accepted: true });
+    expect(requestEmailVerification).toHaveBeenCalledWith(
+      'user-1',
+      'new-address@example.com',
+      'current-password',
+    );
+  });
+
+  it('keeps currentPassword out of the public email confirmation contract', async () => {
+    const dto = Object.assign(new EmailVerificationConfirmDto(), {
+      email: 'family@example.com',
+      code: '042731',
+      currentPassword: 'must-not-be-accepted-here',
+    });
+
+    const errors = await validate(dto, {
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    });
+    expect(errors.map((error) => error.property)).toContain('currentPassword');
   });
 });

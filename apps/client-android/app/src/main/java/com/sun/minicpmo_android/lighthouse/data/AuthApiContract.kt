@@ -7,8 +7,14 @@ internal object AuthApiContract {
 
     fun confirmEmailVerificationPath() = "${emailVerificationsPath()}/confirm"
 
-    fun requestEmailVerificationBody(email: String) = JSONObject()
+    fun requestEmailVerificationBody(
+        email: String,
+        currentPassword: String? = null,
+    ) = JSONObject()
         .put("email", email.trim())
+        .apply {
+            currentPassword?.let { put("currentPassword", it) }
+        }
 
     fun confirmEmailVerificationBody(email: String, code: String): JSONObject {
         val normalizedCode = code.trim()

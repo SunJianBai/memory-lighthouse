@@ -102,7 +102,7 @@ import java.time.format.DateTimeFormatter
 import java.util.TimeZone
 
 internal class FamilyUiActions(
-    val requestEmailVerification: (String?) -> Unit,
+    val requestEmailVerification: (String?, String?) -> Unit,
     val confirmEmailVerification: (String, String) -> Unit,
     val dismissEmailVerificationPrompt: () -> Unit,
     val selectHousehold: (String) -> Unit,

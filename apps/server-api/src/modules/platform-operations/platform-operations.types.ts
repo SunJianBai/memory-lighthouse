@@ -75,3 +75,25 @@ export interface InspectionWatermark {
   requestId: string;
   occurredAt: string;
 }
+
+export interface PublishCompanionPromptCommand {
+  principal: PlatformPrincipal;
+  expectedCurrentPromptId: string;
+  content: string;
+  reason: string;
+  request: PlatformRequestMetadata;
+  /** Deterministic test seam; HTTP callers never set these values. */
+  now?: Date;
+  promptId?: string;
+}
+
+export interface CompanionPromptView {
+  id: string;
+  code: string;
+  composerVersion: number;
+  provider: string;
+  model: string;
+  content: string;
+  contentHash: string;
+  publishedAt: string;
+}

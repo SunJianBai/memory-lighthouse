@@ -2,9 +2,11 @@ import { apiRequest } from './client'
 import type {
   InspectionDataCategory,
   InspectionGrant,
+  CompanionPrompt,
   MemoryInspectionResult,
   OperationsDashboard,
   PlatformPage,
+  PublishCompanionPromptInput,
   UtteranceInspectionResult
 } from '../types/platform'
 
@@ -89,4 +91,15 @@ export function inspectUtterance(
   return apiRequest(
     `/admin/inspections/utterances/${encodeURIComponent(utteranceId)}?${params.toString()}`
   )
+}
+
+export function getCurrentCompanionPrompt(): Promise<CompanionPrompt> {
+  return apiRequest('/admin/prompts/current')
+}
+
+export function publishCompanionPrompt(input: PublishCompanionPromptInput): Promise<CompanionPrompt> {
+  return apiRequest('/admin/prompts/revisions', {
+    method: 'POST',
+    body: input
+  })
 }

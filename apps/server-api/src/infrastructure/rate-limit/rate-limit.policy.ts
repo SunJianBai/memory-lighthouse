@@ -50,6 +50,24 @@ export const RATE_LIMIT_POLICY_DEFINITIONS: Readonly<
   [RateLimitPolicy.AUTH_EMAIL_VERIFICATION_REQUEST]: [
     { id: 'ip', limit: 20, windowMs: HOUR, dimensions: ['ip'] },
     { id: 'email', limit: 3, windowMs: HOUR, dimensions: ['email'] },
+    {
+      id: 'account',
+      limit: 5,
+      windowMs: 15 * MINUTE,
+      dimensions: ['user-account'],
+    },
+    {
+      id: 'source-session',
+      limit: 5,
+      windowMs: 15 * MINUTE,
+      dimensions: ['user-session'],
+    },
+    {
+      id: 'ip-account',
+      limit: 3,
+      windowMs: 15 * MINUTE,
+      dimensions: ['ip', 'user-account'],
+    },
   ],
   [RateLimitPolicy.AUTH_EMAIL_VERIFICATION_CONFIRM]: [
     { id: 'ip', limit: 20, windowMs: 15 * MINUTE, dimensions: ['ip'] },

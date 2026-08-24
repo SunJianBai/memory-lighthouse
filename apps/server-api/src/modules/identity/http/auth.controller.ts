@@ -180,6 +180,7 @@ export class AuthController {
     return this.identity.requestEmailVerification(
       principal.userId,
       input.email,
+      input.currentPassword,
     );
   }
 

@@ -10,15 +10,21 @@ import { AdminAuthenticationApplicationService } from './admin-authentication.ap
 import { AdminAuthController } from './http/admin-auth.controller';
 import { DevelopmentContentInspectionController } from './http/development-content-inspection.controller';
 import { PlatformOperationsController } from './http/platform-operations.controller';
+import { PlatformPromptManagementController } from './http/platform-prompt-management.controller';
 import { PlatformRoleGuard } from './http/platform-role.guard';
 import { PlatformAuditIpHasher } from './platform-audit-ip-hasher';
 import { PlatformOperationsApplicationService } from './platform-operations.application.service';
+import { PlatformPromptManagementApplicationService } from './platform-prompt-management.application.service';
 import { PlatformRoleAuthorizer } from './platform-role.authorizer';
 
 export function platformOperationsControllersFor(
   environment: string | undefined,
 ) {
-  const controllers = [AdminAuthController, PlatformOperationsController];
+  const controllers = [
+    AdminAuthController,
+    PlatformOperationsController,
+    PlatformPromptManagementController,
+  ];
   return environment === 'production'
     ? controllers
     : [...controllers, DevelopmentContentInspectionController];
@@ -39,12 +45,14 @@ export function platformOperationsControllersFor(
     PlatformRoleAuthorizer,
     PlatformRoleGuard,
     PlatformOperationsApplicationService,
+    PlatformPromptManagementApplicationService,
   ],
   exports: [
     DevelopmentContentInspectionPolicy,
     PlatformRoleAuthorizer,
     PlatformRoleGuard,
     PlatformOperationsApplicationService,
+    PlatformPromptManagementApplicationService,
   ],
 })
 export class PlatformOperationsModule {

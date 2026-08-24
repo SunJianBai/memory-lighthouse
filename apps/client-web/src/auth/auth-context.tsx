@@ -11,13 +11,21 @@ import {
 import { ApiError, apiClient } from "../api/api-client";
 import { clearPersistentIdempotencyNamespace } from "../api/idempotent-command";
 import type { SessionTokenView, UserView } from "../api/types";
-import { emailVerificationConfirmBody } from "./email-verification-model";
+import {
+  emailVerificationConfirmBody,
+  emailVerificationRequestBody,
+  tryRefreshUserAfterAcceptedEmailVerification,
+} from "./email-verification-model";
 
 type RegisterInput = {
   email: string;
   username?: string;
   password: string;
   displayName?: string;
+};
+
+type EmailVerificationRequestResult = {
+  userRefreshed: boolean;
 };
 
 type AuthContextValue = {
@@ -29,7 +37,10 @@ type AuthContextValue = {
   logoutAll: () => Promise<void>;
   lockToDeviceMode: () => Promise<void>;
   refreshUser: () => Promise<void>;
-  requestEmailVerification: (email: string) => Promise<void>;
+  requestEmailVerification: (
+    email: string,
+    currentPassword?: string,
+  ) => Promise<EmailVerificationRequestResult>;
   confirmEmailVerification: (email: string, code: string) => Promise<void>;
 };
 
@@ -185,12 +196,22 @@ export const AuthProvider = ({ children }: PropsWithChildren) => {
     await loadMe();
   }, [loadMe]);
 
-  const requestEmailVerification = useCallback(async (email: string) => {
+  const requestEmailVerification = useCallback(async (
+    email: string,
+    currentPassword?: string,
+  ) => {
     await apiClient.request<{ accepted: true }>("/auth/email-verifications", {
       method: "POST",
-      body: { email: email.trim() },
+      body: emailVerificationRequestBody(email, currentPassword),
     });
-  }, []);
+    if (status !== "authenticated") return { userRefreshed: true };
+    // The verification request is already accepted at this point. A
+    // transient /me failure must not encourage sending another code and
+    // invalidating the one that is already in the user's inbox.
+    return {
+      userRefreshed: await tryRefreshUserAfterAcceptedEmailVerification(loadMe),
+    };
+  }, [loadMe, status]);
 
   const confirmEmailVerification = useCallback(
     async (email: string, code: string) => {

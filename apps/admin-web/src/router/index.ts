@@ -51,6 +51,16 @@ const routes: RouteRecordRaw[] = [
           requiredCapability: 'PLATFORM_DASHBOARD_READ'
         }
       },
+      {
+        path: 'prompts',
+        name: 'prompts',
+        component: () => import('../views/PromptManagementView.vue'),
+        meta: {
+          title: '提示词',
+          requiresAuth: true,
+          requiredCapability: 'PLATFORM_PROMPTS_READ'
+        }
+      },
       ...resourceRoutes.map(
         ([resourceKey, title, requiredCapability]): RouteRecordRaw => ({
           path: resourceKey,

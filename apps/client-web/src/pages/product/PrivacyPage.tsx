@@ -14,11 +14,22 @@ import {
   Speech,
   Video,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAdminAccessNotifications } from "../../api/admin-access-notifications";
 import { apiClient, readableError } from "../../api/api-client";
 import type { ConsentScope, ConsentStateView } from "../../api/types";
 import { useWorkspace } from "../../workspace/workspace-context";
+import {
+  createWorkspaceOperationOwner,
+  LatestScopedRequest,
+} from "../../workspace/workspace-scope";
+import {
+  createScopedPageState,
+  createScopedMutationOwner,
+  isScopedMutationOwnerCurrent,
+  pageValueForScope,
+  type ScopedPageState,
+} from "./family-page-state";
 
 const consentCatalog: Record<ConsentScope, {
   documentVersionId: string;
@@ -41,38 +52,119 @@ const consentCatalog: Record<ConsentScope, {
 export const PrivacyPage = () => {
   const workspace = useWorkspace();
   const adminAccesses = useAdminAccessNotifications();
-  const [states, setStates] = useState<ConsentStateView[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [busyScope, setBusyScope] = useState<ConsentScope | "">("");
-  const [error, setError] = useState("");
+  const [consentState, setConsentState] = useState<
+    ScopedPageState<ConsentStateView[]>
+  >(() => createScopedPageState("", []));
+  const [loadingScopeKey, setLoadingScopeKey] = useState("");
+  const [busyState, setBusyState] = useState<
+    ScopedPageState<ConsentScope | "">
+  >(() => createScopedPageState("", ""));
+  const [errorState, setErrorState] = useState<ScopedPageState<string>>(() =>
+    createScopedPageState("", ""),
+  );
+  const currentScopeKey = useRef(workspace.workspaceScopeKey);
+  currentScopeKey.current = workspace.workspaceScopeKey;
+  const scopeIdentity = {
+    key: workspace.workspaceScopeKey,
+    epoch: workspace.workspaceScopeEpoch,
+  };
+  const currentScopeIdentity = useRef(scopeIdentity);
+  currentScopeIdentity.current = scopeIdentity;
+  const loadRequests = useRef(new LatestScopedRequest());
+  const states = pageValueForScope(
+    consentState,
+    workspace.workspaceScopeKey,
+    [],
+  );
+  const loading =
+    loadingScopeKey === workspace.workspaceScopeKey ||
+    (Boolean(workspace.householdId && workspace.recipientId) &&
+      consentState.scopeKey !== workspace.workspaceScopeKey);
+  const busyScope = pageValueForScope(
+    busyState,
+    workspace.workspaceScopeKey,
+    "",
+  );
+  const error = pageValueForScope(
+    errorState,
+    workspace.workspaceScopeKey,
+    "",
+  );
 
   const load = useCallback(async () => {
     if (!workspace.householdId || !workspace.recipientId) {
-      setStates([]);
+      loadRequests.current.invalidate();
+      setConsentState(
+        createScopedPageState(workspace.workspaceScopeKey, []),
+      );
+      setLoadingScopeKey("");
       return;
     }
-    setLoading(true);
-    setError("");
+    const owner = createWorkspaceOperationOwner(
+      workspace.workspaceScopeKey,
+      workspace.householdId,
+      workspace.recipientId,
+    );
+    const request = loadRequests.current.begin(owner.scopeKey);
+    setLoadingScopeKey(owner.scopeKey);
+    setErrorState(createScopedPageState(owner.scopeKey, ""));
     try {
-      setStates(await apiClient.request<ConsentStateView[]>(`/households/${workspace.householdId}/care-recipients/${workspace.recipientId}/consents`));
+      const nextStates = await apiClient.request<ConsentStateView[]>(
+        `/households/${owner.householdId}/care-recipients/${owner.recipientId}/consents`,
+      );
+      if (
+        !loadRequests.current.isCurrent(request) ||
+        currentScopeKey.current !== owner.scopeKey
+      )
+        return;
+      setConsentState(createScopedPageState(owner.scopeKey, nextStates));
     } catch (loadError) {
-      setError(readableError(loadError));
+      if (
+        loadRequests.current.isCurrent(request) &&
+        currentScopeKey.current === owner.scopeKey
+      ) {
+        setErrorState(
+          createScopedPageState(owner.scopeKey, readableError(loadError)),
+        );
+      }
     } finally {
-      setLoading(false);
+      if (
+        loadRequests.current.isCurrent(request) &&
+        currentScopeKey.current === owner.scopeKey
+      ) {
+        setLoadingScopeKey("");
+      }
     }
-  }, [workspace.householdId, workspace.recipientId]);
+  }, [
+    workspace.householdId,
+    workspace.recipientId,
+    workspace.workspaceScopeKey,
+  ]);
+
+  useEffect(() => {
+    loadRequests.current.invalidate();
+    setConsentState(createScopedPageState(workspace.workspaceScopeKey, []));
+    setLoadingScopeKey("");
+    setBusyState(createScopedPageState(workspace.workspaceScopeKey, ""));
+    setErrorState(createScopedPageState(workspace.workspaceScopeKey, ""));
+  }, [workspace.workspaceScopeKey]);
 
   useEffect(() => { void load(); }, [load]);
 
   const decide = async (scope: ConsentScope, grant: boolean) => {
     if (!workspace.householdId || !workspace.recipientId) return;
+    const owner = createScopedMutationOwner(
+      scopeIdentity,
+      workspace.householdId,
+      workspace.recipientId,
+    );
     const copy = consentCatalog[scope];
     if (!grant && !window.confirm(`确认撤回“${copy.title}”吗？相关能力会在新的请求中立即被服务器拒绝。`)) return;
-    setBusyScope(scope);
-    setError("");
+    setBusyState(createScopedPageState(owner.scopeKey, scope));
+    setErrorState(createScopedPageState(owner.scopeKey, ""));
     try {
       const current = states.find((state) => state.scope === scope);
-      await apiClient.request(`/households/${workspace.householdId}/care-recipients/${workspace.recipientId}/consents/${scope}/${grant ? "grant" : "revoke"}`, {
+      await apiClient.request(`/households/${owner.householdId}/care-recipients/${owner.recipientId}/consents/${scope}/${grant ? "grant" : "revoke"}`, {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: {
@@ -80,11 +172,32 @@ export const PrivacyPage = () => {
           reason: grant ? "家属在隐私中心明确授权" : "家属在隐私中心主动撤回",
         },
       });
+      if (
+        !isScopedMutationOwnerCurrent(
+          owner,
+          currentScopeIdentity.current,
+        )
+      )
+        return;
       await load();
     } catch (decisionError) {
-      setError(readableError(decisionError));
+      if (
+        isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)
+      ) {
+        setErrorState(
+          createScopedPageState(owner.scopeKey, readableError(decisionError)),
+        );
+      }
     } finally {
-      setBusyScope("");
+      if (
+        isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)
+      ) {
+        setBusyState((current) =>
+          current.scopeKey === owner.scopeKey && current.value === scope
+            ? createScopedPageState(owner.scopeKey, "")
+            : current,
+        );
+      }
     }
   };
 

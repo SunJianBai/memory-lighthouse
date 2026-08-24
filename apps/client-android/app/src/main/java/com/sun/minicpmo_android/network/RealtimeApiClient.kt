@@ -18,6 +18,7 @@ class RealtimeApiClient(
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
         .build(),
+    private val webSocketFactory: WebSocket.Factory = httpClient,
 ) {
     interface Listener {
         fun onSocketOpen() = Unit
@@ -38,6 +39,7 @@ class RealtimeApiClient(
     private var listener: Listener? = null
     private var settings: SessionSettings? = null
     private var initSent = false
+    private var terminalNotified = false
 
     @Volatile
     var isSessionReady: Boolean = false
@@ -48,12 +50,13 @@ class RealtimeApiClient(
         this.listener = listener
         this.settings = settings
         initSent = false
+        terminalNotified = false
         isSessionReady = false
 
         val request = Request.Builder()
             .url(RealtimeProtocol.webSocketUrl(settings.apiHost, mode))
             .build()
-        val newSocket = httpClient.newWebSocket(request, socketListener)
+        val newSocket = webSocketFactory.newWebSocket(request, socketListener)
         synchronized(lock) { socket = newSocket }
     }
 
@@ -95,6 +98,7 @@ class RealtimeApiClient(
     }
 
     private fun send(text: String): Boolean = synchronized(lock) {
+        if (!isSessionReady || terminalNotified) return@synchronized false
         socket?.send(text) ?: false
     }
 
@@ -114,10 +118,14 @@ class RealtimeApiClient(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            if (!isCurrent(webSocket)) return
+            if (!isCurrentSessionActive(webSocket)) return
             runCatching { JSONObject(text) }
-                .onSuccess(::handleEvent)
-                .onFailure { listener?.onError("服务端消息无法解析：${it.message}") }
+                .onSuccess { event -> handleEvent(webSocket, event) }
+                .onFailure {
+                    if (isCurrentSessionActive(webSocket)) {
+                        listener?.onError("服务端消息无法解析：${it.message}")
+                    }
+                }
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -125,26 +133,44 @@ class RealtimeApiClient(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            if (!isCurrent(webSocket)) return
-            synchronized(lock) {
-                if (socket === webSocket) socket = null
+            val closureListener = synchronized(lock) {
+                if (socket !== webSocket) {
+                    null
+                } else {
+                    socket = null
+                    isSessionReady = false
+                    if (terminalNotified) {
+                        null
+                    } else {
+                        terminalNotified = true
+                        listener
+                    }
+                }
             }
-            isSessionReady = false
-            listener?.onClosed(reason.ifBlank { "连接已关闭" })
+            closureListener?.onClosed(reason.ifBlank { "连接已关闭" })
         }
 
         override fun onFailure(webSocket: WebSocket, throwable: Throwable, response: Response?) {
-            if (!isCurrent(webSocket)) return
-            synchronized(lock) {
-                if (socket === webSocket) socket = null
+            val failureListener = synchronized(lock) {
+                if (socket !== webSocket) {
+                    null
+                } else {
+                    socket = null
+                    isSessionReady = false
+                    if (terminalNotified) {
+                        null
+                    } else {
+                        terminalNotified = true
+                        listener
+                    }
+                }
             }
-            isSessionReady = false
             val suffix = response?.let { "（HTTP ${it.code}）" }.orEmpty()
-            listener?.onError("连接失败$suffix：${throwable.message ?: "网络不可用"}")
+            failureListener?.onError("连接失败$suffix：${throwable.message ?: "网络不可用"}")
         }
     }
 
-    private fun handleEvent(event: JSONObject) {
+    private fun handleEvent(webSocket: WebSocket, event: JSONObject) {
         when (event.optString("type")) {
             "session.queued", "queued", "session.queue_update", "queue_update" -> {
                 listener?.onQueue(
@@ -188,8 +214,9 @@ class RealtimeApiClient(
             )
 
             "response.metrics" -> listener?.onMetrics(event)
-            "session.closed", "stopped", "timeout" -> listener?.onClosed(
-                event.optString("reason", "会话已结束"),
+            "session.closed", "stopped", "timeout" -> notifyProtocolTerminal(
+                webSocket = webSocket,
+                reason = event.optString("reason", "会话已结束"),
             )
 
             "error" -> {
@@ -204,6 +231,23 @@ class RealtimeApiClient(
 
     private fun isCurrent(candidate: WebSocket): Boolean = synchronized(lock) {
         socket === candidate
+    }
+
+    private fun isCurrentSessionActive(candidate: WebSocket): Boolean = synchronized(lock) {
+        socket === candidate && !terminalNotified
+    }
+
+    private fun notifyProtocolTerminal(webSocket: WebSocket, reason: String) {
+        val closureListener = synchronized(lock) {
+            if (socket !== webSocket || terminalNotified) {
+                null
+            } else {
+                isSessionReady = false
+                terminalNotified = true
+                listener
+            }
+        }
+        closureListener?.onClosed(reason)
     }
 }
 

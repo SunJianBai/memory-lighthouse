@@ -1,6 +1,50 @@
 import { RATE_LIMIT_POLICY_DEFINITIONS } from './rate-limit.policy';
 import { RateLimitPolicy } from './rate-limit.types';
 
+describe('email verification request rate limit', () => {
+  it('protects password step-up across target emails and source IPs', () => {
+    const definitions =
+      RATE_LIMIT_POLICY_DEFINITIONS[
+        RateLimitPolicy.AUTH_EMAIL_VERIFICATION_REQUEST
+      ];
+
+    expect(definitions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'ip',
+          limit: 20,
+          windowMs: 60 * 60 * 1_000,
+          dimensions: ['ip'],
+        }),
+        expect.objectContaining({
+          id: 'email',
+          limit: 3,
+          windowMs: 60 * 60 * 1_000,
+          dimensions: ['email'],
+        }),
+        expect.objectContaining({
+          id: 'account',
+          limit: 5,
+          windowMs: 15 * 60 * 1_000,
+          dimensions: ['user-account'],
+        }),
+        expect.objectContaining({
+          id: 'source-session',
+          limit: 5,
+          windowMs: 15 * 60 * 1_000,
+          dimensions: ['user-session'],
+        }),
+        expect.objectContaining({
+          id: 'ip-account',
+          limit: 3,
+          windowMs: 15 * 60 * 1_000,
+          dimensions: ['ip', 'user-account'],
+        }),
+      ]),
+    );
+  });
+});
+
 describe('email verification code rate limit', () => {
   it('limits guesses by email and IP/email pair instead of the submitted code', () => {
     const definitions =

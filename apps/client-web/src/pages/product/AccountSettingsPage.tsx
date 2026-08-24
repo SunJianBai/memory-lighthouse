@@ -28,6 +28,7 @@ export const AccountSettingsPage = () => {
   const email = auth.user?.identities.find((identity) => identity.type === "EMAIL");
   const [verificationEmail, setVerificationEmail] = useState(email?.value ?? "");
   const [verificationCode, setVerificationCode] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,12 +52,24 @@ export const AccountSettingsPage = () => {
       setVerificationError("请输入需要绑定和验证的邮箱。 ");
       return;
     }
+    if (!email && !currentPassword) {
+      setVerificationError("绑定首个邮箱前，请输入当前账号密码。 ");
+      return;
+    }
     setBusy("email-send");
     setVerificationError("");
     setMessage("");
     try {
-      await auth.requestEmailVerification(verificationEmail);
-      setMessage("6 位验证码已发送，请检查收件箱与垃圾邮件。 ");
+      const result = await auth.requestEmailVerification(
+        verificationEmail,
+        email ? undefined : currentPassword,
+      );
+      setCurrentPassword("");
+      setMessage(
+        result.userRefreshed
+          ? "6 位验证码已发送，请检查收件箱与垃圾邮件。 "
+          : "验证码已发送，但账号信息暂未刷新；你仍可直接输入收到的验证码。 ",
+      );
     } catch (sendError) {
       setVerificationError(readableError(sendError));
     } finally {
@@ -137,8 +150,24 @@ export const AccountSettingsPage = () => {
               }}
             />
             {!email && <p className="field-help">当前账号尚未绑定邮箱，发送验证码时会先绑定此邮箱。</p>}
+            {!email && (
+              <>
+                <label htmlFor="settings-verification-password">当前账号密码</label>
+                <input
+                  id="settings-verification-password"
+                  type="password"
+                  autoComplete="current-password"
+                  maxLength={128}
+                  value={currentPassword}
+                  onChange={(event) => {
+                    setCurrentPassword(event.target.value);
+                    setVerificationError("");
+                  }}
+                />
+              </>
+            )}
             <div className="email-verification-actions">
-              <button className="secondary-button" type="button" disabled={Boolean(busy)} onClick={() => void sendVerification()}><MailCheck aria-hidden="true" size={19} /> {busy === "email-send" ? "正在发送…" : "发送或重发验证码"}</button>
+              <button className="secondary-button" type="button" disabled={Boolean(busy) || (!email && !currentPassword)} onClick={() => void sendVerification()}><MailCheck aria-hidden="true" size={19} /> {busy === "email-send" ? "正在发送…" : "发送或重发验证码"}</button>
               <input
                 className="verification-code-input"
                 type="text"

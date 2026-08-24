@@ -8,6 +8,7 @@ import com.sun.minicpmo_android.model.withServerManagedSession
 import com.sun.minicpmo_android.model.migrateStoredLengthPenalty
 import com.sun.minicpmo_android.network.RealtimeProtocol
 import com.sun.minicpmo_android.ui.answerLengthEndpointLabels
+import com.sun.minicpmo_android.ui.answerLengthStateDescription
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -19,6 +20,9 @@ class SessionSettingsPolicyTest {
     fun answerLengthSliderExplainsBothDirections() {
         assertEquals("更简短", answerLengthEndpointLabels().first)
         assertEquals("更详细", answerLengthEndpointLabels().second)
+        assertEquals("更简短，0.5", answerLengthStateDescription(0.5f))
+        assertEquals("适中，1.0", answerLengthStateDescription(1.0f))
+        assertEquals("更详细，2.0", answerLengthStateDescription(2.0f))
     }
 
     @Test

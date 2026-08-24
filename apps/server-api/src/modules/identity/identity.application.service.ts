@@ -524,8 +524,26 @@ export class IdentityApplicationService {
   async requestEmailVerification(
     userId: string,
     emailInput: string,
+    currentPassword?: string,
   ): Promise<AcceptedResult> {
     const email = normalizeEmail(emailInput);
+    const existingIdentity = await this.prisma.loginIdentity.findUnique({
+      where: {
+        type_normalizedValue: {
+          type: EMAIL_IDENTITY,
+          normalizedValue: email.normalizedValue,
+        },
+      },
+      select: { userId: true },
+    });
+
+    // Re-sending a code to an email identity already owned by this user does
+    // not change account recovery authority. Creating any new email identity
+    // does, so a bearer token alone is insufficient for that transition.
+    if (!existingIdentity || existingIdentity.userId !== userId) {
+      await this.reauthenticateUser(userId, currentPassword ?? '');
+    }
+
     let delivery: {
       email: string;
       issued: IssuedEmailVerificationCode;

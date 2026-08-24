@@ -93,11 +93,11 @@ class LighthouseRepository(
         return getMe()
     }
 
-    suspend fun requestEmailVerification(email: String) {
+    suspend fun requestEmailVerification(email: String, currentPassword: String? = null) {
         userRequest(
             "POST",
             AuthApiContract.emailVerificationsPath(),
-            AuthApiContract.requestEmailVerificationBody(email),
+            AuthApiContract.requestEmailVerificationBody(email, currentPassword),
         )
     }
 

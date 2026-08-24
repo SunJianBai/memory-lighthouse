@@ -67,6 +67,7 @@ import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Hearing
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Settings
@@ -79,6 +80,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -121,6 +124,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -400,7 +404,13 @@ private fun MiniCpmApp(
             initial = state.settings,
             showChatTts = RealtimeMode.CHAT in allowedModes,
             onDismiss = onDismissSettings,
-            onSave = onSaveSettings,
+            onSave = { draft ->
+                if (state.hasActiveSession) {
+                    "陪伴进行中，请结束后再修改回答偏好"
+                } else {
+                    onSaveSettings(draft)
+                }
+            },
         )
     }
 
@@ -439,6 +449,11 @@ private fun AppTopBar(
     onExit: (() -> Unit)?,
 ) {
     val statusVisual = sessionStatusVisual(state)
+    val settingsEntry = companionSettingsEntryPolicy(
+        embeddedInLighthouse = embeddedInLighthouse,
+        settingsEnabled = settingsEnabled,
+    )
+    var overflowExpanded by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -515,17 +530,72 @@ private fun AppTopBar(
                 Icon(Icons.Rounded.DeleteOutline, contentDescription = "清空对话")
             }
         }
-        if (!embeddedInLighthouse) {
+        if (settingsEntry.visible && settingsEntry.useOverflowMenu) {
+            Box {
+                IconButton(
+                    onClick = { overflowExpanded = true },
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Icon(Icons.Rounded.MoreVert, contentDescription = "更多操作")
+                }
+                DropdownMenu(
+                    expanded = overflowExpanded,
+                    onDismissRequest = { overflowExpanded = false },
+                ) {
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(settingsEntry.label)
+                                settingsEntry.disabledHint?.let { hint ->
+                                    Text(
+                                        text = hint,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Rounded.Settings, contentDescription = null)
+                        },
+                        enabled = settingsEntry.enabled,
+                        onClick = {
+                            overflowExpanded = false
+                            onOpenSettings()
+                        },
+                    )
+                }
+            }
+        } else if (settingsEntry.visible) {
             IconButton(
                 onClick = onOpenSettings,
-                enabled = settingsEnabled,
+                enabled = settingsEntry.enabled,
                 modifier = Modifier.size(48.dp),
             ) {
-                Icon(Icons.Rounded.Settings, contentDescription = "打开设置")
+                Icon(Icons.Rounded.Settings, contentDescription = settingsEntry.label)
             }
         }
     }
 }
+
+internal data class CompanionSettingsEntryPolicy(
+    val visible: Boolean,
+    val useOverflowMenu: Boolean,
+    val enabled: Boolean,
+    val label: String,
+    val disabledHint: String?,
+)
+
+internal fun companionSettingsEntryPolicy(
+    embeddedInLighthouse: Boolean,
+    settingsEnabled: Boolean,
+): CompanionSettingsEntryPolicy = CompanionSettingsEntryPolicy(
+    visible = true,
+    useOverflowMenu = embeddedInLighthouse,
+    enabled = settingsEnabled,
+    label = if (embeddedInLighthouse) "回答偏好" else "打开设置",
+    disabledHint = if (settingsEnabled) null else "结束陪伴后可修改",
+)
 
 @Composable
 private fun ServiceDot(available: Boolean?) {
@@ -1520,6 +1590,15 @@ private fun RoundControl(
 internal fun answerLengthEndpointLabels(): Pair<String, String> =
     "更简短" to "更详细"
 
+internal fun answerLengthStateDescription(value: Float): String {
+    val direction = when {
+        value < 1f -> "更简短"
+        value > 1f -> "更详细"
+        else -> "适中"
+    }
+    return "$direction，${String.format(Locale.US, "%.1f", value)}"
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
@@ -1576,6 +1655,10 @@ private fun SettingsSheet(
                         onValueChange = { draft = draft.copy(lengthPenalty = it) },
                         valueRange = 0.5f..2f,
                         steps = 14,
+                        modifier = Modifier.semantics {
+                            contentDescription = "回答长度"
+                            stateDescription = answerLengthStateDescription(draft.lengthPenalty)
+                        },
                     )
                     val (shorterLabel, detailedLabel) = answerLengthEndpointLabels()
                     Row(

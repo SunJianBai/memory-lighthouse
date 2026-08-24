@@ -1034,12 +1034,14 @@ private fun FamilyScreen(
     var verificationCode by remember(state.emailVerificationPromptVisible, showEmailDialog) {
         mutableStateOf("")
     }
+    var emailAttachmentPassword by remember(state.user?.email) { mutableStateOf("") }
     val emailVerificationDialogVisible =
         showEmailDialog || state.emailVerificationPromptVisible
 
     LaunchedEffect(state.user?.emailVerified) {
         if (state.user?.emailVerified == true) {
             verificationCode = ""
+            emailAttachmentPassword = ""
             showEmailDialog = false
         }
     }
@@ -1048,7 +1050,7 @@ private fun FamilyScreen(
         actions = actions,
         onRequestEmailVerification = {
             if (state.user?.email == null) showEmailDialog = true
-            else actions.requestEmailVerification(null)
+            else actions.requestEmailVerification(null, null)
         },
     )
 
@@ -1068,6 +1070,7 @@ private fun FamilyScreen(
         AlertDialog(
             onDismissRequest = {
                 verificationCode = ""
+                emailAttachmentPassword = ""
                 showEmailDialog = false
                 actions.dismissEmailVerificationPrompt()
             },
@@ -1102,9 +1105,31 @@ private fun FamilyScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    if (state.user?.email == null) {
+                        OutlinedTextField(
+                            value = emailAttachmentPassword,
+                            onValueChange = { emailAttachmentPassword = it },
+                            label = { Text("当前账号密码") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            supportingText = { Text("绑定首个邮箱前需要再次确认密码") },
+                        )
+                    }
                     TextButton(
-                        onClick = { actions.requestEmailVerification(verificationEmail) },
-                        enabled = !state.busy && verificationEmail.contains('@'),
+                        onClick = {
+                            val passwordForRequest = emailAttachmentPassword.takeIf {
+                                state.user?.email == null
+                            }
+                            actions.requestEmailVerification(
+                                verificationEmail,
+                                passwordForRequest,
+                            )
+                        },
+                        enabled = !state.busy &&
+                            verificationEmail.contains('@') &&
+                            (state.user?.email != null || emailAttachmentPassword.isNotEmpty()),
                     ) {
                         Text(
                             if (state.emailVerificationPromptVisible) "重新发送验证码"
@@ -1130,6 +1155,7 @@ private fun FamilyScreen(
                 TextButton(
                     onClick = {
                         verificationCode = ""
+                        emailAttachmentPassword = ""
                         showEmailDialog = false
                         actions.dismissEmailVerificationPrompt()
                     },
