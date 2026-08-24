@@ -55,6 +55,7 @@ class LighthouseViewModel internal constructor(
     private val familyWorkspaceLoads = LatestFamilyWorkspaceLoad()
     private val familyOperations = FamilyOperationCoordinator()
     private val actionBusyTracker = ActionBusyTracker()
+    private var familyCallJoinGeneration = 0L
 
     init {
         viewModelScope.launch {
@@ -906,16 +907,57 @@ class LighthouseViewModel internal constructor(
         )
     }
 
-    fun connectFamilyCall() = action {
-        val session = _uiState.value.activeRemoteSession ?: error("通话请求不存在")
-        require(_uiState.value.remoteCallFailureSessionId != session.id) {
-            "本次媒体连接已失败，请结束后重新发起通话"
+    fun connectFamilyCall(): Job {
+        val owner = captureFamilyCallJoinOwner()
+            ?: return action { error("通话请求不存在") }
+        return action(
+            isResultOwner = { isCurrentFamilyCallJoinOwner(owner) },
+        ) {
+            val session = _uiState.value.activeRemoteSession ?: return@action
+            require(_uiState.value.remoteCallFailureSessionId != session.id) {
+                "本次媒体连接已失败，请结束后重新发起通话"
+            }
+            require(!callCoordinator.liveCallState.value.isUnexpectedFamilyMediaFailure(session.id)) {
+                "本次媒体连接已失败，请结束后重新发起通话"
+            }
+            val ticket = repository.familyJoinTicket(owner.householdId, owner.sessionId)
+            if (
+                !isCurrentFamilyCallJoinOwner(owner) ||
+                ticket.sessionId != owner.sessionId ||
+                _uiState.value.remoteCallFailureSessionId == owner.sessionId ||
+                callCoordinator.liveCallState.value.isUnexpectedFamilyMediaFailure(owner.sessionId)
+            ) return@action
+            callCoordinator.connectFamily(ticket)
         }
-        require(!callCoordinator.liveCallState.value.isUnexpectedFamilyMediaFailure(session.id)) {
-            "本次媒体连接已失败，请结束后重新发起通话"
-        }
-        val ticket = repository.familyJoinTicket(session.householdId, session.id)
-        callCoordinator.connectFamily(ticket)
+    }
+
+    private fun captureFamilyCallJoinOwner(): FamilyCallJoinOwner? {
+        val current = _uiState.value
+        val session = current.activeRemoteSession ?: return null
+        val userId = current.user?.id ?: return null
+        if (!current.signedIn || current.role != AppRole.FAMILY) return null
+        return FamilyCallJoinOwner(
+            generation = familyCallJoinGeneration,
+            userId = userId,
+            householdId = session.householdId,
+            sessionId = session.id,
+        )
+    }
+
+    private fun isCurrentFamilyCallJoinOwner(owner: FamilyCallJoinOwner): Boolean {
+        val current = _uiState.value
+        val session = current.activeRemoteSession
+        return familyCallJoinGeneration == owner.generation &&
+            current.signedIn &&
+            current.role == AppRole.FAMILY &&
+            current.user?.id == owner.userId &&
+            session?.id == owner.sessionId &&
+            session.householdId == owner.householdId &&
+            session.status !in TERMINAL_REMOTE_STATUSES
+    }
+
+    private fun invalidatePendingFamilyCallJoins() {
+        familyCallJoinGeneration += 1
     }
 
     fun connectDeviceCall() = action {
@@ -925,38 +967,44 @@ class LighthouseViewModel internal constructor(
         callCoordinator.acceptIncoming(pending.id)
     }
 
-    fun endRemoteCall() = action {
-        val session = _uiState.value.activeRemoteSession
-        if (session != null) {
-            if (_uiState.value.role == AppRole.COMPANION) {
-                callCoordinator.endCompanionCall(session.id)
-            } else {
-                callCoordinator.disconnectFamily()
-                repository.endFamilyRemoteSession(session.householdId, session.id)
+    fun endRemoteCall(): Job {
+        invalidatePendingFamilyCallJoins()
+        return action {
+            val session = _uiState.value.activeRemoteSession
+            if (session != null) {
+                if (_uiState.value.role == AppRole.COMPANION) {
+                    callCoordinator.endCompanionCall(session.id)
+                } else {
+                    callCoordinator.disconnectFamily()
+                    repository.endFamilyRemoteSession(session.householdId, session.id)
+                }
             }
+            _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
+            _uiState.value = _uiState.value.copy(
+                activeRemoteSession = null,
+                remoteCallFailureSessionId = null,
+                remoteCallFailureTitle = null,
+                remoteCallFailure = null,
+                message = "通话已结束",
+            )
         }
-        _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
-        _uiState.value = _uiState.value.copy(
-            activeRemoteSession = null,
-            remoteCallFailureSessionId = null,
-            remoteCallFailureTitle = null,
-            remoteCallFailure = null,
-            message = "通话已结束",
-        )
     }
 
-    fun cancelRemoteRequest() = action {
-        val session = _uiState.value.activeRemoteSession ?: return@action
-        repository.cancelFamilyRemoteSession(session.householdId, session.id)
-        remotePolling?.cancel()
-        _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
-        _uiState.value = _uiState.value.copy(
-            activeRemoteSession = null,
-            remoteCallFailureSessionId = null,
-            remoteCallFailureTitle = null,
-            remoteCallFailure = null,
-            message = "已取消呼叫",
-        )
+    fun cancelRemoteRequest(): Job {
+        invalidatePendingFamilyCallJoins()
+        return action {
+            val session = _uiState.value.activeRemoteSession ?: return@action
+            repository.cancelFamilyRemoteSession(session.householdId, session.id)
+            remotePolling?.cancel()
+            _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
+            _uiState.value = _uiState.value.copy(
+                activeRemoteSession = null,
+                remoteCallFailureSessionId = null,
+                remoteCallFailureTitle = null,
+                remoteCallFailure = null,
+                message = "已取消呼叫",
+            )
+        }
     }
 
     fun attachVideoRenderer(renderer: livekit.org.webrtc.SurfaceViewRenderer) =
@@ -1661,6 +1709,13 @@ class LighthouseViewModel internal constructor(
             }
     }
 }
+
+private data class FamilyCallJoinOwner(
+    val generation: Long,
+    val userId: String,
+    val householdId: String,
+    val sessionId: String,
+)
 
 private data class FamilyResources(
     val memories: List<MemoryView>,
