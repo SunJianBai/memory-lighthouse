@@ -374,6 +374,7 @@ class RemoteCallCoordinator(
         sessionId: String,
         fromTelecom: Boolean = false,
         reason: String = "user_ended",
+        notifyServerAsynchronously: Boolean = false,
     ) {
         transitionMutex.withLock {
             val current = (_state.value.active ?: _state.value.incoming)
@@ -384,6 +385,7 @@ class RemoteCallCoordinator(
                 DisconnectCause.LOCAL,
                 notifyTelecom = !fromTelecom,
                 reason = reason,
+                notifyServerAsynchronously = notifyServerAsynchronously,
             ) {
                 if (current.status == "RINGING") {
                     repository.declineDeviceRemoteSession(current.id)

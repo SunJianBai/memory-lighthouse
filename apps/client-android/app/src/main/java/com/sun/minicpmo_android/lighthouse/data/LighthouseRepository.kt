@@ -5,6 +5,7 @@ import com.sun.minicpmo_android.BuildConfig
 import com.sun.minicpmo_android.lighthouse.model.*
 import com.sun.minicpmo_android.lighthouse.network.LighthouseApiException
 import com.sun.minicpmo_android.lighthouse.network.LighthouseHttpClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
@@ -39,6 +40,7 @@ class LighthouseRepository(
     private val http = httpClient ?: LighthouseHttpClient(settings::apiBaseUrl)
     private val userRefreshMutex = Mutex()
     private val deviceRefreshMutex = Mutex()
+    private val explicitUserSessions = ExplicitUserSessionOwnership()
     private val activeCompanionSessionId = AtomicReference<String?>(null)
     private val careCommands = CareCommandRetrier(
         persistence = VaultCareCommandPersistence(vault),
@@ -60,7 +62,7 @@ class LighthouseRepository(
     fun pendingDeviceActivation(): PendingDeviceActivation? = vault.pendingDeviceActivation()
 
     suspend fun login(identifier: String, password: String): UserView {
-        beginExplicitUserSession()
+        val ticket = beginExplicitUserSession()
         val result = requireNotNull(
             http.request(
                 method = "POST",
@@ -71,8 +73,10 @@ class LighthouseRepository(
                     .put("clientType", "ANDROID"),
             ),
         )
-        replaceUserSession(parseUserSession(result))
-        return getMe()
+        val session = parseUserSession(result)
+        val user = fetchUser(session)
+        commitExplicitUserSession(ticket, session, user)
+        return user
     }
 
     suspend fun register(
@@ -81,7 +85,7 @@ class LighthouseRepository(
         password: String,
         displayName: String,
     ): UserView {
-        beginExplicitUserSession()
+        val ticket = beginExplicitUserSession()
         val body = JSONObject()
             .put("password", password)
             .put("displayName", displayName.trim())
@@ -89,8 +93,10 @@ class LighthouseRepository(
         email?.trim()?.takeIf(String::isNotBlank)?.let { body.put("email", it) }
         username?.trim()?.takeIf(String::isNotBlank)?.let { body.put("username", it) }
         val result = requireNotNull(http.request("POST", "auth/register", body))
-        replaceUserSession(parseUserSession(result))
-        return getMe()
+        val session = parseUserSession(result)
+        val user = fetchUser(session)
+        commitExplicitUserSession(ticket, session, user)
+        return user
     }
 
     suspend fun requestEmailVerification(email: String, currentPassword: String? = null) {
@@ -109,44 +115,67 @@ class LighthouseRepository(
         )
     }
 
-    suspend fun logout() {
-        runCatching { userRequest("POST", "auth/logout", JSONObject()) }
-        clearUserSession()
+    suspend fun logout(familyRemoteSession: RemoteSessionView? = null) {
+        completeUserSessionRevocation(
+            revocation = beginUserSessionRevocation(),
+            familyRemoteSession = familyRemoteSession,
+        )
     }
 
     suspend fun revokeUserSessionForCompanionMode() {
-        val session = vault.userSession()
         // Device mode must stop retaining family authority before any network
         // wait. The server-side logout is best effort; the local refresh token
         // and every account-scoped pending command are already gone.
-        clearUserSession()
-        if (session != null) {
-            runCatching {
+        completeUserSessionRevocation(beginUserSessionRevocation())
+    }
+
+    internal fun beginUserSessionRevocation(): UserSessionRevocation? =
+        clearUserSession()?.let(::UserSessionRevocation)
+
+    internal suspend fun completeUserSessionRevocation(
+        revocation: UserSessionRevocation?,
+        familyRemoteSession: RemoteSessionView? = null,
+    ) {
+        val session = revocation?.session ?: return
+        revokeCapturedUserSession(session) { accessToken ->
+            familyRemoteSession?.let { remote ->
                 http.request(
                     "POST",
-                    "auth/logout",
+                    "households/${remote.householdId}/remote-sessions/${remote.id}/end",
                     JSONObject(),
-                    session.accessToken,
+                    accessToken,
                 )
             }
         }
     }
 
     suspend fun restoreUser(): UserView? {
+        val ticket = explicitUserSessions.snapshot()
         if (!hasUserSession()) return null
         return runCatching { getMe() }.getOrElse {
             if (it is LighthouseApiException && it.status == 401) {
-                clearUserSession()
-                null
+                if (it.code == "SIGNED_OUT" && vault.userSession() == null) {
+                    return@getOrElse null
+                }
+                val cleared = explicitUserSessions.invalidateIfCurrent(ticket) {
+                    clearUserSessionStorage()
+                }
+                if (cleared) null else throw ExplicitUserSessionSupersededException()
             } else {
                 throw it
             }
         }
     }
 
-    suspend fun getMe(): UserView = parseUser(
-        requireNotNull(userRequest("GET", "me")),
-    ).also(::saveUserCareNamespace)
+    suspend fun getMe(): UserView {
+        val ticket = explicitUserSessions.snapshot()
+        val user = parseUser(requireNotNull(userRequest("GET", "me")))
+        val committed = explicitUserSessions.commitIfCurrent(ticket) {
+            saveUserCareNamespace(user)
+        }
+        if (!committed) throw ExplicitUserSessionSupersededException()
+        return user
+    }
 
     suspend fun listHouseholds(): List<HouseholdView> =
         arrayData(userRequest("GET", "households")).mapObjects(::parseHousehold)
@@ -856,18 +885,32 @@ class LighthouseRepository(
         body: JSONObject? = null,
         headers: Map<String, String> = emptyMap(),
     ): JSONObject? {
+        val ticket = explicitUserSessions.snapshot()
         val session = vault.userSession() ?: throw LighthouseApiException(401, "SIGNED_OUT", "请先登录")
+        requireCurrentExplicitUserSession(ticket)
         return try {
-            http.request(method, path, body, session.accessToken, headers)
+            http.request(method, path, body, session.accessToken, headers).also {
+                requireCurrentExplicitUserSession(ticket)
+            }
         } catch (error: LighthouseApiException) {
+            requireCurrentExplicitUserSession(ticket)
             if (error.status != 401) throw error
-            val refreshed = refreshUserSession(session.refreshToken)
-            http.request(method, path, body, refreshed.accessToken, headers)
+            val refreshed = refreshUserSession(ticket, session.refreshToken)
+            requireCurrentExplicitUserSession(ticket)
+            http.request(method, path, body, refreshed.accessToken, headers).also {
+                requireCurrentExplicitUserSession(ticket)
+            }
         }
     }
 
-    private suspend fun refreshUserSession(previousRefreshToken: String): UserSession =
-        userRefreshMutex.withLock {
+    private suspend fun refreshUserSession(
+        ticket: ExplicitUserSessionTicket,
+        previousRefreshToken: String,
+    ): UserSession {
+        return userRefreshMutex.withLock {
+            if (!explicitUserSessions.isCurrent(ticket)) {
+                throw ExplicitUserSessionSupersededException()
+            }
             val current = vault.userSession() ?: throw LighthouseApiException(401, "SIGNED_OUT", "请重新登录")
             if (current.refreshToken != previousRefreshToken) return@withLock current
             val result = try {
@@ -882,7 +925,14 @@ class LighthouseRepository(
                 )
             } catch (error: LighthouseApiException) {
                 if (error.status == 401) {
-                    clearUserSession()
+                    val cleared = explicitUserSessions.invalidateIfCurrent(
+                        ticket = ticket,
+                        shouldInvalidate = {
+                            vault.userSession()?.refreshToken == previousRefreshToken
+                        },
+                        clearSession = ::clearUserSessionStorage,
+                    )
+                    if (!cleared) throw ExplicitUserSessionSupersededException()
                     throw LighthouseApiException(
                         status = 401,
                         code = "SIGNED_OUT",
@@ -892,8 +942,19 @@ class LighthouseRepository(
                 }
                 throw error
             }
-            parseUserSession(result).also(::replaceUserSession)
+            val refreshed = parseUserSession(result)
+            var sessionStillMatches = false
+            val committed = explicitUserSessions.commitIfCurrent(ticket) {
+                sessionStillMatches = vault.userSession()?.refreshToken == previousRefreshToken
+                if (sessionStillMatches) replaceUserSession(refreshed)
+            }
+            if (!committed || !sessionStillMatches) {
+                revokeCapturedUserSession(refreshed)
+                throw ExplicitUserSessionSupersededException()
+            }
+            refreshed
         }
+    }
 
     private fun replaceUserSession(session: UserSession) {
         // Refresh-token rotation changes the server session ID. Pending care
@@ -909,20 +970,106 @@ class LighthouseRepository(
         vault.saveUserCareNamespace(user.id)
     }
 
-    private fun beginExplicitUserSession() {
-        // A deliberate sign-in/register action replaces any previous account
-        // intent. Token refresh never enters this boundary.
-        vault.saveCareCommandState(null)
-        vault.saveUserCareNamespace(null)
-        vault.saveUserSession(null)
-    }
+    private fun beginExplicitUserSession(): ExplicitUserSessionTicket =
+        explicitUserSessions.begin {
+            // A deliberate sign-in/register action replaces any previous
+            // account intent. Token refresh never enters this boundary.
+            clearUserSessionStorage()
+        }
 
-    private fun clearUserSession() {
+    private fun clearUserSession(): UserSession? = explicitUserSessions.invalidate {
+        val previous = vault.userSession()
         // Logout/terminal refresh failure is an explicit abandonment boundary.
         // Remove access/refresh authority before ancillary retry metadata.
+        clearUserSessionStorage()
+        previous
+    }
+
+    private fun clearUserSessionStorage() {
         vault.saveUserSession(null)
         vault.saveCareCommandState(null)
         vault.saveUserCareNamespace(null)
+    }
+
+    private fun requireCurrentExplicitUserSession(ticket: ExplicitUserSessionTicket) {
+        if (!explicitUserSessions.isCurrent(ticket)) {
+            throw ExplicitUserSessionSupersededException()
+        }
+    }
+
+    private suspend fun revokeCapturedUserSession(
+        session: UserSession,
+        beforeLogout: (suspend (String) -> Unit)? = null,
+    ) {
+        var cleanupComplete = beforeLogout == null
+
+        suspend fun runCleanup(accessToken: String) {
+            if (cleanupComplete) return
+            try {
+                requireNotNull(beforeLogout).invoke(accessToken)
+                cleanupComplete = true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                // Retry once if an expired access token can be refreshed.
+            }
+        }
+
+        runCleanup(session.accessToken)
+        try {
+            http.request("POST", "auth/logout", JSONObject(), session.accessToken)
+            return
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            if (error !is LighthouseApiException || error.status != 401) return
+        }
+
+        val refreshed = try {
+            parseUserSession(
+                requireNotNull(
+                    http.request(
+                        "POST",
+                        "auth/refresh",
+                        JSONObject()
+                            .put("clientType", "ANDROID")
+                            .put("refreshToken", session.refreshToken),
+                    ),
+                ),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // A replayed rotated token revokes the whole server-side family;
+            // transport failures fall back to server expiry.
+            return
+        }
+
+        runCleanup(refreshed.accessToken)
+        try {
+            http.request("POST", "auth/logout", JSONObject(), refreshed.accessToken)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // Local authority is already gone. Server expiry remains the final
+            // fallback when this best-effort revocation cannot be delivered.
+        }
+    }
+
+    private suspend fun fetchUser(session: UserSession): UserView = parseUser(
+        requireNotNull(http.request("GET", "me", bearerToken = session.accessToken)),
+    )
+
+    private fun commitExplicitUserSession(
+        ticket: ExplicitUserSessionTicket,
+        session: UserSession,
+        user: UserView,
+    ) {
+        val committed = explicitUserSessions.commitIfCurrent(ticket) {
+            replaceUserSession(session)
+            saveUserCareNamespace(user)
+        }
+        if (!committed) throw ExplicitUserSessionSupersededException()
     }
 
     private suspend fun deviceRequest(

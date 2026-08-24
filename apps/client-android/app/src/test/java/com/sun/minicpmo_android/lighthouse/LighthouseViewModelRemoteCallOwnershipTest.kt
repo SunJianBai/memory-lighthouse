@@ -11,6 +11,7 @@ import com.sun.minicpmo_android.lighthouse.data.RemoteCallCommandRegistry
 import com.sun.minicpmo_android.lighthouse.model.CareRecipientView
 import com.sun.minicpmo_android.lighthouse.model.CompanionBindingView
 import com.sun.minicpmo_android.lighthouse.model.ConsentStateView
+import com.sun.minicpmo_android.lighthouse.model.DeviceContextView
 import com.sun.minicpmo_android.lighthouse.model.HouseholdView
 import com.sun.minicpmo_android.lighthouse.model.RemoteJoinTicket
 import com.sun.minicpmo_android.lighthouse.model.RemoteSessionView
@@ -18,7 +19,9 @@ import com.sun.minicpmo_android.lighthouse.model.RequestedRemoteMedia
 import com.sun.minicpmo_android.lighthouse.model.RoutineView
 import com.sun.minicpmo_android.lighthouse.model.UserView
 import com.sun.minicpmo_android.lighthouse.realtime.LiveCallState
+import io.mockk.clearMocks
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
@@ -39,6 +42,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicBoolean
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LighthouseViewModelRemoteCallOwnershipTest {
@@ -158,17 +162,117 @@ class LighthouseViewModelRemoteCallOwnershipTest {
         }
     }
 
+    @Test
+    fun slowLogoutReleasesFamilyMediaBeforeTheNetworkCompletes() = runTest(mainDispatcher) {
+        val lateRevocation = CompletableDeferred<Unit>()
+        val fixture = fixture(
+            joinA = CompletableDeferred(joinTicket(SESSION_A)),
+            lateRevocation = lateRevocation,
+        )
+        try {
+            fixture.signIn(this)
+            fixture.request(this, SESSION_A, BINDING_A)
+
+            fixture.viewModel.logout()
+            runCurrent()
+
+            verify(exactly = 1) {
+                fixture.callCoordinator.disconnectFamily("signed_out")
+            }
+            coVerify(exactly = 0) {
+                fixture.repository.endFamilyRemoteSession(HOUSEHOLD_ID, SESSION_A)
+            }
+            coVerify(exactly = 1) {
+                fixture.repository.completeUserSessionRevocation(
+                    any(),
+                    match { it?.id == SESSION_A },
+                )
+            }
+        } finally {
+            lateRevocation.complete(Unit)
+            advanceUntilIdle()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun activatedDeviceLogoutStillEndsTheFamilyRemoteSession() = runTest(mainDispatcher) {
+        val lateRevocation = CompletableDeferred<Unit>()
+        val fixture = fixture(
+            joinA = CompletableDeferred(joinTicket(SESSION_A)),
+            lateRevocation = lateRevocation,
+            hasDeviceCredential = true,
+        )
+        try {
+            fixture.signIn(this)
+            fixture.request(this, SESSION_A, BINDING_A)
+
+            fixture.viewModel.logout()
+            runCurrent()
+
+            verify(exactly = 1) {
+                fixture.callCoordinator.disconnectFamily("signed_out")
+            }
+            coVerify(exactly = 1) {
+                fixture.repository.completeUserSessionRevocation(
+                    any(),
+                    match { it?.id == SESSION_A },
+                )
+            }
+        } finally {
+            lateRevocation.complete(Unit)
+            advanceUntilIdle()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun logoutUsesTheCurrentDeviceCredentialStateAfterRevocationCompletes() =
+        runTest(mainDispatcher) {
+            val lateRevocation = CompletableDeferred<Unit>()
+            val fixture = fixture(
+                joinA = CompletableDeferred(joinTicket(SESSION_A)),
+                lateRevocation = lateRevocation,
+                hasDeviceCredential = true,
+            )
+            try {
+                fixture.signIn(this)
+                clearMocks(fixture.callCoordinator, answers = false)
+
+                fixture.viewModel.logout()
+                runCurrent()
+                fixture.deviceCredentialPresent.set(false)
+                lateRevocation.complete(Unit)
+                advanceUntilIdle()
+
+                assertEquals(false, fixture.viewModel.uiState.value.deviceActivated)
+                assertEquals(false, fixture.viewModel.uiState.value.companionDeviceLocked)
+                verify(exactly = 0) {
+                    fixture.callCoordinator.ensureCompanionDiscoveryRunning()
+                }
+            } finally {
+                fixture.close()
+            }
+        }
+
     private fun fixture(
         joinA: CompletableDeferred<RemoteJoinTicket>,
         endA: CompletableDeferred<Unit>? = null,
         cancelA: CompletableDeferred<Unit>? = null,
+        lateRevocation: CompletableDeferred<Unit>? = null,
+        hasDeviceCredential: Boolean = false,
     ): Fixture {
         val repository = mockk<LighthouseRepository>(relaxed = true)
         every { repository.apiBaseUrl() } returns "https://example.invalid/openBMB/api/v1"
-        every { repository.hasDeviceCredential() } returns false
+        val deviceCredentialPresent = AtomicBoolean(hasDeviceCredential)
+        every { repository.hasDeviceCredential() } answers { deviceCredentialPresent.get() }
         every { repository.pendingDeviceActivation() } returns null
         coEvery { repository.restoreUser() } returns null
         coEvery { repository.login(any(), any()) } returns user()
+        coEvery {
+            repository.completeUserSessionRevocation(any(), any())
+        } coAnswers { lateRevocation?.await() ?: Unit }
+        coEvery { repository.getDeviceContext() } returns deviceContext()
         coEvery { repository.listHouseholds() } returns listOf(household())
         coEvery { repository.listRecipients(HOUSEHOLD_ID) } returns listOf(recipient())
         coEvery { repository.listBindings(HOUSEHOLD_ID) } returns listOf(
@@ -223,12 +327,16 @@ class LighthouseViewModelRemoteCallOwnershipTest {
                 ),
             ),
             callCoordinator = callCoordinator,
+            repository = repository,
+            deviceCredentialPresent = deviceCredentialPresent,
         )
     }
 
     private data class Fixture(
         val viewModel: LighthouseViewModel,
         val callCoordinator: RemoteCallCoordinator,
+        val repository: LighthouseRepository,
+        val deviceCredentialPresent: AtomicBoolean,
     ) {
         fun signIn(scope: TestScope) = with(scope) {
             advanceUntilIdle()
@@ -309,6 +417,19 @@ class LighthouseViewModelRemoteCallOwnershipTest {
         connectedAt = null,
         endedAt = null,
         endReason = null,
+    )
+
+    private fun deviceContext() = DeviceContextView(
+        deviceId = "device-1",
+        bindingId = BINDING_A,
+        householdId = HOUSEHOLD_ID,
+        recipientId = RECIPIENT_ID,
+        recipientName = "Recipient",
+        timezone = "Asia/Shanghai",
+        modelProvider = "OPENBMB",
+        modelName = "MiniCPM-o 4.5",
+        realtimeUrl = "wss://example.invalid/realtime",
+        consentDecisions = emptyMap(),
     )
 
     private fun joinTicket(sessionId: String) = RemoteJoinTicket(

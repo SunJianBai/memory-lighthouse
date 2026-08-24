@@ -58,6 +58,7 @@ class LighthouseViewModel internal constructor(
     private val familyOperations = FamilyOperationCoordinator()
     private val actionBusyTracker = ActionBusyTracker()
     private val activationPresentations = LatestActivationPresentation()
+    private val authenticationPresentations = LatestAuthenticationPresentation()
     private var familyCallJoinGeneration = 0L
 
     init {
@@ -108,8 +109,12 @@ class LighthouseViewModel internal constructor(
         invalidateActivationPresentation()
         familyWorkspaceLoads.invalidate()
         familyOperations.endSession()
-        return action {
+        val ticket = beginAuthenticationPresentation()
+        return action(
+            isResultOwner = { authenticationPresentations.isCurrent(ticket) },
+        ) {
             val user = repository.login(identifier, password)
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
             val scope = familyWorkspaceLoads.begin()
             familyOperations.startSession(user.id)
             _uiState.value = _uiState.value.copy(
@@ -119,7 +124,9 @@ class LighthouseViewModel internal constructor(
                 user = user,
             )
             refreshFamilyData(scope)
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
             restoreDeviceData()
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
             consumeDeferredActivation()
         }
     }
@@ -133,9 +140,13 @@ class LighthouseViewModel internal constructor(
         invalidateActivationPresentation()
         familyWorkspaceLoads.invalidate()
         familyOperations.endSession()
-        return action {
+        val ticket = beginAuthenticationPresentation()
+        return action(
+            isResultOwner = { authenticationPresentations.isCurrent(ticket) },
+        ) {
             require(!email.isNullOrBlank()) { "请填写邮箱，完成验证后才能管理家庭和设备" }
             val user = repository.register(email, username, password, displayName)
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
             val scope = familyWorkspaceLoads.begin()
             familyOperations.startSession(user.id)
             _uiState.value = _uiState.value.copy(
@@ -147,7 +158,9 @@ class LighthouseViewModel internal constructor(
                 message = "注册成功，6 位邮箱验证码已发送。",
             )
             refreshFamilyData(scope)
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
             restoreDeviceData()
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
             consumeDeferredActivation()
         }
     }
@@ -155,42 +168,58 @@ class LighthouseViewModel internal constructor(
     fun requestEmailVerification(
         emailInput: String? = null,
         currentPassword: String? = null,
-    ) = action {
-        val email = emailInput?.trim()?.takeIf(String::isNotBlank)
-            ?: _uiState.value.user?.email
-            ?: error("请先填写用于验证的邮箱")
-        if (_uiState.value.user?.email == null) {
-            require(!currentPassword.isNullOrEmpty()) { "绑定首个邮箱前，请输入当前账号密码" }
+    ): Job {
+        val ticket = beginAuthenticationPresentation()
+        return action(
+            isResultOwner = { authenticationPresentations.isCurrent(ticket) },
+        ) {
+            val email = emailInput?.trim()?.takeIf(String::isNotBlank)
+                ?: _uiState.value.user?.email
+                ?: error("请先填写用于验证的邮箱")
+            if (_uiState.value.user?.email == null) {
+                require(!currentPassword.isNullOrEmpty()) {
+                    "绑定首个邮箱前，请输入当前账号密码"
+                }
+            }
+            repository.requestEmailVerification(email, currentPassword)
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
+            val refreshedUser = try {
+                repository.getMe()
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                null
+            }
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
+            _uiState.value = _uiState.value.copy(
+                user = refreshedUser ?: _uiState.value.user,
+                emailVerificationPromptVisible = true,
+                message = if (refreshedUser != null) {
+                    "6 位邮箱验证码已发送，请查收并输入验证码"
+                } else {
+                    "验证码已发送，但账号信息暂未刷新；仍可直接输入收到的验证码"
+                },
+            )
         }
-        repository.requestEmailVerification(email, currentPassword)
-        val refreshedUser = try {
-            repository.getMe()
-        } catch (error: Exception) {
-            if (error is CancellationException) throw error
-            null
-        }
-        _uiState.value = _uiState.value.copy(
-            user = refreshedUser ?: _uiState.value.user,
-            emailVerificationPromptVisible = true,
-            message = if (refreshedUser != null) {
-                "6 位邮箱验证码已发送，请查收并输入验证码"
-            } else {
-                "验证码已发送，但账号信息暂未刷新；仍可直接输入收到的验证码"
-            },
-        )
     }
 
-    fun confirmEmailVerification(emailInput: String, code: String) = action {
-        val email = emailInput.trim().takeIf(String::isNotBlank)
-            ?: _uiState.value.user?.email
-            ?: error("请先填写用于验证的邮箱")
-        repository.confirmEmailVerification(email, code)
-        val user = repository.getMe()
-        _uiState.value = _uiState.value.copy(
-            user = user,
-            emailVerificationPromptVisible = false,
-            message = "邮箱验证成功，现在可以管理家庭和设备",
-        )
+    fun confirmEmailVerification(emailInput: String, code: String): Job {
+        val ticket = beginAuthenticationPresentation()
+        return action(
+            isResultOwner = { authenticationPresentations.isCurrent(ticket) },
+        ) {
+            val email = emailInput.trim().takeIf(String::isNotBlank)
+                ?: _uiState.value.user?.email
+                ?: error("请先填写用于验证的邮箱")
+            repository.confirmEmailVerification(email, code)
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
+            val user = repository.getMe()
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
+            _uiState.value = _uiState.value.copy(
+                user = user,
+                emailVerificationPromptVisible = false,
+                message = "邮箱验证成功，现在可以管理家庭和设备",
+            )
+        }
     }
 
     fun dismissEmailVerificationPrompt() {
@@ -201,41 +230,54 @@ class LighthouseViewModel internal constructor(
         invalidateActivationPresentation()
         familyWorkspaceLoads.invalidate()
         familyOperations.endSession()
-        return action {
-            val userId = _uiState.value.user?.id
-            _uiState.value.activeRemoteSession?.let { session ->
-                if (_uiState.value.role == AppRole.COMPANION) {
-                    runCatching { callCoordinator.endCompanionCall(session.id) }
-                } else {
-                    callCoordinator.disconnectFamily("signed_out")
+        val startingState = _uiState.value
+        val ticket = beginAuthenticationPresentation()
+        return action(
+            isResultOwner = { authenticationPresentations.isCurrent(ticket) },
+        ) {
+            val userSessionRevocation = repository.beginUserSessionRevocation()
+            val familyRemoteSession = startingState.activeRemoteSession
+                ?.takeIf { startingState.role != AppRole.COMPANION }
+            startingState.activeRemoteSession?.let { session ->
+                if (startingState.role == AppRole.COMPANION) {
                     runCatching {
-                        repository.endFamilyRemoteSession(session.householdId, session.id)
-                    }
-                }
-            }
-            stopBackgroundJobs()
-            userId?.let(remoteCallCommands::terminateAllForUser)
-            if (repository.hasDeviceCredential()) {
-                enterLockedCompanionMode(message = "已退出家属账号，陪伴设备继续安全运行")
-            } else {
-                repository.logout()
-                if (repository.hasDeviceCredential()) {
-                    val current = _uiState.value
-                    if (
-                        current.role != AppRole.COMPANION ||
-                        !current.companionDeviceLocked ||
-                        current.signedIn
-                    ) {
-                        enterLockedCompanionMode(
-                            message = "已退出家属账号，陪伴设备继续安全运行",
+                        callCoordinator.endCompanionCall(
+                            sessionId = session.id,
+                            reason = "signed_out",
+                            notifyServerAsynchronously = true,
                         )
                     }
                 } else {
-                    _uiState.value = LighthouseUiState(
-                        restoring = false,
-                        apiBaseUrl = repository.apiBaseUrl(),
-                    )
+                    callCoordinator.disconnectFamily("signed_out")
                 }
+            }
+            stopBackgroundJobs()
+            startingState.user?.id?.let(remoteCallCommands::terminateAllForUser)
+            repository.completeUserSessionRevocation(
+                revocation = userSessionRevocation,
+                familyRemoteSession = familyRemoteSession,
+            )
+            if (!authenticationPresentations.isCurrent(ticket)) return@action
+            if (repository.hasDeviceCredential()) {
+                _uiState.value = LighthouseUiState(
+                    restoring = false,
+                    role = AppRole.COMPANION,
+                    signedIn = false,
+                    companionDeviceLocked = true,
+                    pendingDeviceActivation = null,
+                    deviceActivated = true,
+                    companionContext = startingState.companionContext,
+                    incomingRemoteSession = callCoordinator.state.value.incoming,
+                    activeRemoteSession = callCoordinator.state.value.active,
+                    apiBaseUrl = repository.apiBaseUrl(),
+                    message = "已退出家属账号，陪伴设备继续安全运行",
+                )
+                callCoordinator.ensureCompanionDiscoveryRunning()
+            } else {
+                _uiState.value = LighthouseUiState(
+                    restoring = false,
+                    apiBaseUrl = repository.apiBaseUrl(),
+                )
             }
         }
     }
@@ -244,11 +286,18 @@ class LighthouseViewModel internal constructor(
         if (role == _uiState.value.role) return
         invalidateActivationPresentation()
         if (role == AppRole.COMPANION && _uiState.value.deviceActivated) {
-            action {
-                enterLockedCompanionMode(message = "陪伴设备已锁定；进入家属管理需要重新登录")
+            val ticket = beginAuthenticationPresentation()
+            action(
+                isResultOwner = { authenticationPresentations.isCurrent(ticket) },
+            ) {
+                enterLockedCompanionMode(
+                    message = "陪伴设备已锁定；进入家属管理需要重新登录",
+                    authenticationTicket = ticket,
+                )
             }
             return
         }
+        invalidateAuthenticationPresentation()
         if (role == AppRole.COMPANION) {
             familyWorkspaceLoads.invalidate()
             familyOperations.endSession()
@@ -283,6 +332,7 @@ class LighthouseViewModel internal constructor(
         val current = _uiState.value
         if (!current.companionDeviceLocked || current.activeRemoteSession != null) return
         invalidateActivationPresentation()
+        invalidateAuthenticationPresentation()
         familyWorkspaceLoads.invalidate()
         familyOperations.endSession()
         _uiState.value = LighthouseUiState(
@@ -297,9 +347,17 @@ class LighthouseViewModel internal constructor(
         )
     }
 
-    fun returnToCompanionDevice() = action {
-        require(repository.hasDeviceCredential()) { "陪伴设备凭据已失效，请重新激活" }
-        enterLockedCompanionMode(message = "已返回专用陪伴模式")
+    fun returnToCompanionDevice(): Job {
+        val ticket = beginAuthenticationPresentation()
+        return action(
+            isResultOwner = { authenticationPresentations.isCurrent(ticket) },
+        ) {
+            require(repository.hasDeviceCredential()) { "陪伴设备凭据已失效，请重新激活" }
+            enterLockedCompanionMode(
+                message = "已返回专用陪伴模式",
+                authenticationTicket = ticket,
+            )
+        }
     }
 
     fun selectHousehold(householdId: String): Job {
@@ -1056,8 +1114,13 @@ class LighthouseViewModel internal constructor(
             )
         ) return
 
-        fun applyIntent() {
+        fun applyIntent(authenticationTicket: AuthenticationPresentationTicket? = null) {
             invalidateActivationPresentation()
+            if (authenticationTicket == null) {
+                invalidateAuthenticationPresentation()
+            } else if (!authenticationPresentations.isCurrent(authenticationTicket)) {
+                return
+            }
             familyWorkspaceLoads.invalidate()
             familyOperations.endSession()
             publishActionBusy()
@@ -1071,9 +1134,15 @@ class LighthouseViewModel internal constructor(
             )
         }
         if (repository.hasDeviceCredential() && repository.hasUserSession()) {
-            action {
-                enterLockedCompanionMode(message = "已切换到专用陪伴模式处理来电")
-                applyIntent()
+            val ticket = beginAuthenticationPresentation()
+            action(
+                isResultOwner = { authenticationPresentations.isCurrent(ticket) },
+            ) {
+                enterLockedCompanionMode(
+                    message = "已切换到专用陪伴模式处理来电",
+                    authenticationTicket = ticket,
+                )
+                applyIntent(ticket)
             }
         } else {
             applyIntent()
@@ -1084,25 +1153,36 @@ class LighthouseViewModel internal constructor(
         _uiState.value = _uiState.value.copy(pendingSystemAnswerSessionId = null)
     }
 
-    private fun restore() = viewModelScope.launch {
-        runCatching {
-            if (tryRestoreLockedCompanionMode()) return@runCatching
-            val user = repository.restoreUser()
-            if (user != null) familyOperations.startSession(user.id)
-            _uiState.value = _uiState.value.copy(
-                restoring = false,
-                signedIn = user != null,
-                user = user,
-                pendingDeviceActivation = repository.pendingDeviceActivation(),
-                deviceActivated = repository.hasDeviceCredential(),
-            )
-            if (user != null) {
-                refreshFamilyData(familyWorkspaceLoads.begin())
-                restoreDeviceData()
-                consumeDeferredActivation()
+    private fun restore() {
+        val ticket = authenticationPresentations.snapshot()
+        viewModelScope.launch {
+            runCatching {
+                if (!authenticationPresentations.isCurrent(ticket)) return@runCatching
+                if (tryRestoreLockedCompanionMode()) return@runCatching
+                val user = repository.restoreUser()
+                if (!authenticationPresentations.isCurrent(ticket)) return@runCatching
+                if (user != null) familyOperations.startSession(user.id)
+                _uiState.value = _uiState.value.copy(
+                    restoring = false,
+                    signedIn = user != null,
+                    user = user,
+                    pendingDeviceActivation = repository.pendingDeviceActivation(),
+                    deviceActivated = repository.hasDeviceCredential(),
+                )
+                if (user != null) {
+                    refreshFamilyData(familyWorkspaceLoads.begin())
+                    if (!authenticationPresentations.isCurrent(ticket)) return@runCatching
+                    restoreDeviceData()
+                    if (!authenticationPresentations.isCurrent(ticket)) return@runCatching
+                    consumeDeferredActivation()
+                }
+            }.onFailure {
+                if (authenticationPresentations.isCurrent(ticket)) showError(it)
             }
-        }.onFailure { showError(it) }
-        _uiState.value = _uiState.value.copy(restoring = false)
+            if (authenticationPresentations.isCurrent(ticket)) {
+                _uiState.value = _uiState.value.copy(restoring = false)
+            }
+        }
     }
 
     private suspend fun refreshFamilyData(scope: FamilyWorkspaceLoadScope) {
@@ -1297,12 +1377,17 @@ class LighthouseViewModel internal constructor(
     private suspend fun tryRestoreLockedCompanionMode(): Boolean {
         if (!repository.hasDeviceCredential()) return false
         repository.abandonPendingDeviceActivation()
-        enterLockedCompanionMode(message = "陪伴设备已恢复，家属管理需要重新登录")
+        val ticket = beginAuthenticationPresentation()
+        enterLockedCompanionMode(
+            message = "陪伴设备已恢复，家属管理需要重新登录",
+            authenticationTicket = ticket,
+        )
         val contextResult = runCatching {
             repository.getDeviceContext().also {
                 callCoordinator.recordDeviceHeartbeat()
             }
         }
+        if (!authenticationPresentations.isCurrent(ticket)) return true
         val error = contextResult.exceptionOrNull()
         if (
             error is LighthouseApiException &&
@@ -1330,8 +1415,10 @@ class LighthouseViewModel internal constructor(
     private suspend fun enterLockedCompanionMode(
         context: DeviceContextView? = null,
         message: String,
+        authenticationTicket: AuthenticationPresentationTicket,
     ) {
         invalidateActivationPresentation()
+        if (!authenticationPresentations.isCurrent(authenticationTicket)) return
         familyWorkspaceLoads.invalidate()
         familyOperations.endSession()
         val previousUserId = _uiState.value.user?.id
@@ -1442,18 +1529,24 @@ class LighthouseViewModel internal constructor(
     private suspend fun reconcileActivatedDevice() {
         if (!repository.hasDeviceCredential()) return
         val current = _uiState.value
+        var ticket = authenticationPresentations.snapshot()
         if (
             current.role != AppRole.COMPANION ||
             !current.companionDeviceLocked ||
             current.signedIn
         ) {
-            enterLockedCompanionMode(message = "设备激活完成；家属账号已安全退出")
+            ticket = beginAuthenticationPresentation()
+            enterLockedCompanionMode(
+                message = "设备激活完成；家属账号已安全退出",
+                authenticationTicket = ticket,
+            )
         }
         runCatching {
             repository.getDeviceContext().also {
                 callCoordinator.recordDeviceHeartbeat()
             }
         }.onSuccess { context ->
+            if (!authenticationPresentations.isCurrent(ticket)) return@onSuccess
             val latest = _uiState.value
             if (latest.role == AppRole.COMPANION && latest.companionDeviceLocked) {
                 _uiState.value = latest.copy(
@@ -1462,6 +1555,7 @@ class LighthouseViewModel internal constructor(
                 )
             }
         }.onFailure { error ->
+            if (!authenticationPresentations.isCurrent(ticket)) return@onFailure
             val latest = _uiState.value
             if (latest.role == AppRole.COMPANION && latest.companionDeviceLocked) {
                 showError(error)
@@ -1729,6 +1823,17 @@ class LighthouseViewModel internal constructor(
         publishActionBusy()
     }
 
+    private fun beginAuthenticationPresentation(): AuthenticationPresentationTicket {
+        val ticket = authenticationPresentations.begin()
+        publishActionBusy()
+        return ticket
+    }
+
+    private fun invalidateAuthenticationPresentation() {
+        authenticationPresentations.invalidate()
+        publishActionBusy()
+    }
+
     private fun publishActionBusy(error: String? = _uiState.value.error) {
         _uiState.value = _uiState.value.copy(
             busy = actionBusyTracker.isBusy(),
@@ -1739,6 +1844,7 @@ class LighthouseViewModel internal constructor(
     private fun handleActionFailure(error: Throwable) {
         if (error is LighthouseApiException && error.code == "SIGNED_OUT") {
             invalidateActivationPresentation()
+            invalidateAuthenticationPresentation()
             familyWorkspaceLoads.invalidate()
             familyOperations.endSession()
             _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)

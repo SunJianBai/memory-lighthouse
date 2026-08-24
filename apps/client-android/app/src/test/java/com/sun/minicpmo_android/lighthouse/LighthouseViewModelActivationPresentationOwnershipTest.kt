@@ -437,7 +437,9 @@ class LighthouseViewModelActivationPresentationOwnershipTest {
         }
         coEvery { repository.restoreUser() } returns null
         coEvery { repository.login(any(), any()) } returns user()
-        coEvery { repository.logout() } coAnswers { lateLogout?.await() ?: Unit }
+        coEvery {
+            repository.completeUserSessionRevocation(any(), any())
+        } coAnswers { lateLogout?.await() ?: Unit }
         coEvery { repository.listHouseholds() } returns listOf(household())
         coEvery { repository.listRecipients(HOUSEHOLD_ID) } returns listOf(recipient())
         coEvery { repository.listBindings(HOUSEHOLD_ID) } returns emptyList<CompanionBindingView>()

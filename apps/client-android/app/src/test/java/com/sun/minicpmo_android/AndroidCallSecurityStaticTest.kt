@@ -70,8 +70,12 @@ class AndroidCallSecurityStaticTest {
         val repository = projectDir.resolve(
             "app/src/main/java/com/sun/minicpmo_android/lighthouse/data/LighthouseRepository.kt",
         ).readText()
+        val refresh = repository
+            .substringAfter("private suspend fun refreshUserSession")
+            .substringBefore("private fun replaceUserSession")
         assertTrue(repository.contains("vault.userCareNamespace()"))
-        assertTrue(repository.contains("parseUserSession(result).also(::replaceUserSession)"))
+        assertTrue(refresh.contains("replaceUserSession(refreshed)"))
+        assertFalse(refresh.contains("saveUserCareNamespace"))
         assertFalse(repository.contains("user-session:\$it"))
         assertFalse(repository.contains("vault.userSession()?.sessionId?.let"))
     }
@@ -155,7 +159,10 @@ class AndroidCallSecurityStaticTest {
         val isolationStart = repository.indexOf("suspend fun revokeUserSessionForCompanionMode")
         val isolationEnd = repository.indexOf("suspend fun restoreUser", isolationStart)
         val isolationBody = repository.substring(isolationStart, isolationEnd)
-        assertTrue(isolationBody.indexOf("clearUserSession()") < isolationBody.indexOf("http.request("))
+        assertTrue(
+            isolationBody.indexOf("clearUserSession()") <
+                isolationBody.indexOf("revokeCapturedUserSession(session)"),
+        )
         assertFalse(isolationBody.contains("saveDeviceCredential(null)"))
         val clearStart = repository.indexOf("private fun clearUserSession()")
         val clearEnd = repository.indexOf("private suspend fun deviceRequest", clearStart)
@@ -259,8 +266,9 @@ class AndroidCallSecurityStaticTest {
 
         assertTrue(
             logout.indexOf("callCoordinator.disconnectFamily") in
-                0 until logout.indexOf("repository.endFamilyRemoteSession"),
+                0 until logout.indexOf("repository.completeUserSessionRevocation"),
         )
+        assertFalse(logout.contains("repository.endFamilyRemoteSession"))
         assertTrue(
             endCall.indexOf("callCoordinator.disconnectFamily") in
                 0 until endCall.indexOf("repository.endFamilyRemoteSession"),
