@@ -50,11 +50,14 @@ class LighthouseViewModel internal constructor(
         callCoordinator.companionMediaHandoffState
 
     private var activationPolling: Job? = null
+    private var activationPollingGeneration = 0L
+    private var activationClaimJob: Job? = null
     private var remotePolling: Job? = null
     private var deferredActivationPayload: String? = null
     private val familyWorkspaceLoads = LatestFamilyWorkspaceLoad()
     private val familyOperations = FamilyOperationCoordinator()
     private val actionBusyTracker = ActionBusyTracker()
+    private val activationPresentations = LatestActivationPresentation()
     private var familyCallJoinGeneration = 0L
 
     init {
@@ -102,6 +105,7 @@ class LighthouseViewModel internal constructor(
     }
 
     fun login(identifier: String, password: String): Job {
+        invalidateActivationPresentation()
         familyWorkspaceLoads.invalidate()
         familyOperations.endSession()
         return action {
@@ -126,6 +130,7 @@ class LighthouseViewModel internal constructor(
         password: String,
         displayName: String,
     ): Job {
+        invalidateActivationPresentation()
         familyWorkspaceLoads.invalidate()
         familyOperations.endSession()
         return action {
@@ -193,6 +198,7 @@ class LighthouseViewModel internal constructor(
     }
 
     fun logout(): Job {
+        invalidateActivationPresentation()
         familyWorkspaceLoads.invalidate()
         familyOperations.endSession()
         return action {
@@ -213,16 +219,30 @@ class LighthouseViewModel internal constructor(
                 enterLockedCompanionMode(message = "已退出家属账号，陪伴设备继续安全运行")
             } else {
                 repository.logout()
-                _uiState.value = LighthouseUiState(
-                    restoring = false,
-                    apiBaseUrl = repository.apiBaseUrl(),
-                )
+                if (repository.hasDeviceCredential()) {
+                    val current = _uiState.value
+                    if (
+                        current.role != AppRole.COMPANION ||
+                        !current.companionDeviceLocked ||
+                        current.signedIn
+                    ) {
+                        enterLockedCompanionMode(
+                            message = "已退出家属账号，陪伴设备继续安全运行",
+                        )
+                    }
+                } else {
+                    _uiState.value = LighthouseUiState(
+                        restoring = false,
+                        apiBaseUrl = repository.apiBaseUrl(),
+                    )
+                }
             }
         }
     }
 
     fun switchRole(role: AppRole) {
         if (role == _uiState.value.role) return
+        invalidateActivationPresentation()
         if (role == AppRole.COMPANION && _uiState.value.deviceActivated) {
             action {
                 enterLockedCompanionMode(message = "陪伴设备已锁定；进入家属管理需要重新登录")
@@ -262,6 +282,7 @@ class LighthouseViewModel internal constructor(
     fun requireFamilyAuthentication() {
         val current = _uiState.value
         if (!current.companionDeviceLocked || current.activeRemoteSession != null) return
+        invalidateActivationPresentation()
         familyWorkspaceLoads.invalidate()
         familyOperations.endSession()
         _uiState.value = LighthouseUiState(
@@ -785,18 +806,19 @@ class LighthouseViewModel internal constructor(
         _uiState.value = _uiState.value.copy(qrScannerVisible = show, error = null)
     }
 
-    fun claimDynamicCode(publicId: String, dynamicCode: String) = action {
+    fun claimDynamicCode(publicId: String, dynamicCode: String) = activationClaim {
         val pending = repository.claimActivation(
             publicId,
             ActivationProofType.DYNAMIC_CODE,
             dynamicCode,
         )
+        startActivationPolling(pending, this)
+        if (!activationPresentations.isCurrent(this)) return@activationClaim
         _uiState.value = _uiState.value.copy(
             pendingDeviceActivation = pending,
             qrScannerVisible = false,
             message = "设备已认领，请家属端批准后完成激活",
         )
-        startActivationPolling()
     }
 
     fun handleActivationQr(payload: String) {
@@ -805,7 +827,7 @@ class LighthouseViewModel internal constructor(
             _uiState.value = _uiState.value.copy(message = "登录后将继续处理设备激活")
             return
         }
-        action {
+        activationClaim {
             val uri = payload.trim().toUri()
             require(uri.scheme == "memory-lighthouse" && uri.host == "activate") {
                 "这不是守忆灯塔激活二维码"
@@ -817,6 +839,8 @@ class LighthouseViewModel internal constructor(
                 ActivationProofType.QR_SECRET,
                 secret,
             )
+            startActivationPolling(pending, this)
+            if (!activationPresentations.isCurrent(this)) return@activationClaim
             familyWorkspaceLoads.invalidate()
             familyOperations.endSession()
             _uiState.value = _uiState.value.copy(
@@ -825,7 +849,6 @@ class LighthouseViewModel internal constructor(
                 qrScannerVisible = false,
                 message = "二维码已验证，请家属端批准",
             )
-            startActivationPolling()
         }
     }
 
@@ -1034,6 +1057,7 @@ class LighthouseViewModel internal constructor(
         ) return
 
         fun applyIntent() {
+            invalidateActivationPresentation()
             familyWorkspaceLoads.invalidate()
             familyOperations.endSession()
             publishActionBusy()
@@ -1256,6 +1280,7 @@ class LighthouseViewModel internal constructor(
             deviceActivated = repository.hasDeviceCredential(),
         )
         if (repository.hasDeviceCredential()) {
+            repository.abandonPendingDeviceActivation()
             val context = repository.getDeviceContext()
             callCoordinator.recordDeviceHeartbeat()
             _uiState.value = _uiState.value.copy(
@@ -1271,6 +1296,7 @@ class LighthouseViewModel internal constructor(
 
     private suspend fun tryRestoreLockedCompanionMode(): Boolean {
         if (!repository.hasDeviceCredential()) return false
+        repository.abandonPendingDeviceActivation()
         enterLockedCompanionMode(message = "陪伴设备已恢复，家属管理需要重新登录")
         val contextResult = runCatching {
             repository.getDeviceContext().also {
@@ -1305,6 +1331,7 @@ class LighthouseViewModel internal constructor(
         context: DeviceContextView? = null,
         message: String,
     ) {
+        invalidateActivationPresentation()
         familyWorkspaceLoads.invalidate()
         familyOperations.endSession()
         val previousUserId = _uiState.value.user?.id
@@ -1327,61 +1354,117 @@ class LighthouseViewModel internal constructor(
         callCoordinator.ensureCompanionDiscoveryRunning()
     }
 
-    private fun startActivationPolling() {
+    private fun startActivationPolling(
+        pending: PendingDeviceActivation? = repository.pendingDeviceActivation(),
+        presentationTicket: ActivationPresentationTicket = activationPresentations.snapshot(),
+    ) {
+        val target = pending ?: return
         activationPolling?.cancel()
+        val pollingGeneration = ++activationPollingGeneration
         activationPolling = viewModelScope.launch {
             var recoveryConflictAttempts = 0
-            while (isActive && !repository.hasDeviceCredential()) {
-                val pending = repository.pendingDeviceActivation() ?: break
+            while (
+                isActive &&
+                pollingGeneration == activationPollingGeneration &&
+                !repository.hasDeviceCredential()
+            ) {
+                val persisted = repository.pendingDeviceActivation() ?: break
+                if (persisted.challengeId != target.challengeId) return@launch
                 var retryDelayMillis = 3_000L
-                runCatching { repository.exchangeApprovedActivation(pending) }
+                runCatching { repository.exchangeApprovedActivation(target) }
                     .onSuccess { outcome ->
+                        if (outcome is ActivationExchangeOutcome.Activated) {
+                            reconcileActivatedDevice()
+                            return@launch
+                        }
+                        if (pollingGeneration != activationPollingGeneration) return@launch
                         when (outcome) {
                             ActivationExchangeOutcome.Waiting -> recoveryConflictAttempts = 0
                             is ActivationExchangeOutcome.Terminal -> {
-                                _uiState.value = _uiState.value.copy(
-                                    pendingDeviceActivation = null,
-                                    error = outcome.message,
+                                clearActivationPresentation(
+                                    challengeId = target.challengeId,
+                                    error = outcome.message.takeIf {
+                                        activationPresentations.isCurrent(presentationTicket)
+                                    },
                                 )
                                 return@launch
                             }
-                            is ActivationExchangeOutcome.Activated -> {
-                                enterLockedCompanionMode(
-                                    message = "设备激活完成；家属账号已安全退出",
-                                )
-                                runCatching { repository.getDeviceContext() }
-                                    .onSuccess { context ->
-                                        _uiState.value = _uiState.value.copy(
-                                            companionContext = context,
-                                            message = "设备激活完成，已绑定 ${context.recipientName}；家属账号已安全退出",
-                                        )
-                                    }
-                                    .onFailure(::showError)
-                                return@launch
-                            }
+                            is ActivationExchangeOutcome.Activated -> Unit
                         }
                     }
                     .onFailure { error ->
+                        if (pollingGeneration != activationPollingGeneration) return@launch
                         if (isActivationRecoveryConflict(error)) {
                             recoveryConflictAttempts += 1
                         }
                         if (!shouldRetryActivationPolling(error, recoveryConflictAttempts)) {
                             repository.abandonPendingDeviceActivation()
-                            _uiState.value = _uiState.value.copy(pendingDeviceActivation = null)
-                            if (isActivationRecoveryConflict(error)) {
-                                showError(
-                                    IllegalStateException(
-                                        "设备凭据恢复多次冲突，请重新扫描二维码或输入新的动态激活码",
-                                    ),
-                                )
-                            } else {
-                                showError(error)
+                            val ownsPresentation =
+                                activationPresentations.isCurrent(presentationTicket)
+                            clearActivationPresentation(target.challengeId)
+                            if (ownsPresentation) {
+                                if (isActivationRecoveryConflict(error)) {
+                                    showError(
+                                        IllegalStateException(
+                                            "设备凭据恢复多次冲突，请重新扫描二维码或输入新的动态激活码",
+                                        ),
+                                    )
+                                } else {
+                                    showError(error)
+                                }
                             }
                             return@launch
                         }
                         retryDelayMillis = activationPollingRetryDelayMillis(error)
                     }
                 delay(retryDelayMillis)
+            }
+            if (repository.hasDeviceCredential()) {
+                reconcileActivatedDevice()
+            } else if (repository.pendingDeviceActivation()?.challengeId != target.challengeId) {
+                clearActivationPresentation(target.challengeId)
+            }
+        }
+    }
+
+    private fun clearActivationPresentation(
+        challengeId: String,
+        error: String? = null,
+    ) {
+        val current = _uiState.value
+        _uiState.value = current.copy(
+            pendingDeviceActivation = current.pendingDeviceActivation
+                ?.takeUnless { it.challengeId == challengeId },
+            error = error ?: current.error,
+        )
+    }
+
+    private suspend fun reconcileActivatedDevice() {
+        if (!repository.hasDeviceCredential()) return
+        val current = _uiState.value
+        if (
+            current.role != AppRole.COMPANION ||
+            !current.companionDeviceLocked ||
+            current.signedIn
+        ) {
+            enterLockedCompanionMode(message = "设备激活完成；家属账号已安全退出")
+        }
+        runCatching {
+            repository.getDeviceContext().also {
+                callCoordinator.recordDeviceHeartbeat()
+            }
+        }.onSuccess { context ->
+            val latest = _uiState.value
+            if (latest.role == AppRole.COMPANION && latest.companionDeviceLocked) {
+                _uiState.value = latest.copy(
+                    companionContext = context,
+                    message = "设备激活完成，已绑定 ${context.recipientName}；家属账号已安全退出",
+                )
+            }
+        }.onFailure { error ->
+            val latest = _uiState.value
+            if (latest.role == AppRole.COMPANION && latest.companionDeviceLocked) {
+                showError(error)
             }
         }
     }
@@ -1614,6 +1697,38 @@ class LighthouseViewModel internal constructor(
         }
     }
 
+    private fun activationClaim(
+        block: suspend ActivationPresentationTicket.() -> Unit,
+    ): Job {
+        if (repository.hasDeviceCredential()) {
+            return action { error("当前设备已完成激活，无需再次认领") }
+        }
+        if (activationClaimJob?.isActive == true) {
+            return action { error("已有设备认领请求正在处理，请稍候") }
+        }
+        if (repository.pendingDeviceActivation() != null) {
+            return action { error("已有设备等待批准，请先完成当前激活") }
+        }
+
+        val ticket = activationPresentations.begin()
+        publishActionBusy()
+        val job = action(
+            isResultOwner = { activationPresentations.isCurrent(ticket) },
+        ) {
+            ticket.block()
+        }
+        activationClaimJob = job
+        job.invokeOnCompletion {
+            if (activationClaimJob === job) activationClaimJob = null
+        }
+        return job
+    }
+
+    private fun invalidateActivationPresentation() {
+        activationPresentations.invalidate()
+        publishActionBusy()
+    }
+
     private fun publishActionBusy(error: String? = _uiState.value.error) {
         _uiState.value = _uiState.value.copy(
             busy = actionBusyTracker.isBusy(),
@@ -1623,6 +1738,7 @@ class LighthouseViewModel internal constructor(
 
     private fun handleActionFailure(error: Throwable) {
         if (error is LighthouseApiException && error.code == "SIGNED_OUT") {
+            invalidateActivationPresentation()
             familyWorkspaceLoads.invalidate()
             familyOperations.endSession()
             _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
@@ -1667,6 +1783,7 @@ class LighthouseViewModel internal constructor(
     }
 
     private fun stopBackgroundJobs() {
+        activationPollingGeneration += 1
         listOf(activationPolling, remotePolling).forEach { it?.cancel() }
         activationPolling = null
         remotePolling = null
