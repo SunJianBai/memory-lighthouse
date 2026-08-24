@@ -53,6 +53,7 @@ class LighthouseViewModel internal constructor(
     private var remotePolling: Job? = null
     private var deferredActivationPayload: String? = null
     private val familyWorkspaceLoads = LatestFamilyWorkspaceLoad()
+    private val familyOperations = FamilyOperationCoordinator()
     private val actionBusyTracker = ActionBusyTracker()
 
     init {
@@ -99,18 +100,23 @@ class LighthouseViewModel internal constructor(
         restore()
     }
 
-    fun login(identifier: String, password: String) = action {
-        val user = repository.login(identifier, password)
-        val scope = familyWorkspaceLoads.begin()
-        _uiState.value = _uiState.value.copy(
-            role = AppRole.FAMILY,
-            signedIn = true,
-            companionDeviceLocked = false,
-            user = user,
-        )
-        refreshFamilyData(scope)
-        restoreDeviceData()
-        consumeDeferredActivation()
+    fun login(identifier: String, password: String): Job {
+        familyWorkspaceLoads.invalidate()
+        familyOperations.endSession()
+        return action {
+            val user = repository.login(identifier, password)
+            val scope = familyWorkspaceLoads.begin()
+            familyOperations.startSession(user.id)
+            _uiState.value = _uiState.value.copy(
+                role = AppRole.FAMILY,
+                signedIn = true,
+                companionDeviceLocked = false,
+                user = user,
+            )
+            refreshFamilyData(scope)
+            restoreDeviceData()
+            consumeDeferredActivation()
+        }
     }
 
     fun register(
@@ -118,21 +124,26 @@ class LighthouseViewModel internal constructor(
         username: String?,
         password: String,
         displayName: String,
-    ) = action {
-        require(!email.isNullOrBlank()) { "请填写邮箱，完成验证后才能管理家庭和设备" }
-        val user = repository.register(email, username, password, displayName)
-        val scope = familyWorkspaceLoads.begin()
-        _uiState.value = _uiState.value.copy(
-            role = AppRole.FAMILY,
-            signedIn = true,
-            companionDeviceLocked = false,
-            user = user,
-            emailVerificationPromptVisible = !user.emailVerified,
-            message = "注册成功，6 位邮箱验证码已发送。",
-        )
-        refreshFamilyData(scope)
-        restoreDeviceData()
-        consumeDeferredActivation()
+    ): Job {
+        familyWorkspaceLoads.invalidate()
+        familyOperations.endSession()
+        return action {
+            require(!email.isNullOrBlank()) { "请填写邮箱，完成验证后才能管理家庭和设备" }
+            val user = repository.register(email, username, password, displayName)
+            val scope = familyWorkspaceLoads.begin()
+            familyOperations.startSession(user.id)
+            _uiState.value = _uiState.value.copy(
+                role = AppRole.FAMILY,
+                signedIn = true,
+                companionDeviceLocked = false,
+                user = user,
+                emailVerificationPromptVisible = !user.emailVerified,
+                message = "注册成功，6 位邮箱验证码已发送。",
+            )
+            refreshFamilyData(scope)
+            restoreDeviceData()
+            consumeDeferredActivation()
+        }
     }
 
     fun requestEmailVerification(
@@ -182,6 +193,7 @@ class LighthouseViewModel internal constructor(
 
     fun logout(): Job {
         familyWorkspaceLoads.invalidate()
+        familyOperations.endSession()
         return action {
             val userId = _uiState.value.user?.id
             _uiState.value.activeRemoteSession?.let { session ->
@@ -218,6 +230,7 @@ class LighthouseViewModel internal constructor(
         }
         if (role == AppRole.COMPANION) {
             familyWorkspaceLoads.invalidate()
+            familyOperations.endSession()
             publishActionBusy()
         }
         _uiState.value = _uiState.value.copy(
@@ -234,6 +247,14 @@ class LighthouseViewModel internal constructor(
                 activeRemoteSession = coordinated.active,
             )
             if (_uiState.value.deviceActivated) callCoordinator.ensureCompanionDiscoveryRunning()
+        } else {
+            _uiState.value.user?.id?.takeIf { _uiState.value.signedIn }?.let { userId ->
+                familyOperations.startSession(userId)
+                familyOperations.updateSelection(
+                    _uiState.value.selectedHouseholdId,
+                    _uiState.value.selectedRecipientId,
+                )
+            }
         }
     }
 
@@ -241,6 +262,7 @@ class LighthouseViewModel internal constructor(
         val current = _uiState.value
         if (!current.companionDeviceLocked || current.activeRemoteSession != null) return
         familyWorkspaceLoads.invalidate()
+        familyOperations.endSession()
         _uiState.value = LighthouseUiState(
             restoring = false,
             role = AppRole.FAMILY,
@@ -259,6 +281,7 @@ class LighthouseViewModel internal constructor(
     }
 
     fun selectHousehold(householdId: String): Job {
+        familyOperations.updateSelection(householdId, null)
         val scope = familyWorkspaceLoads.begin()
         return action(
             isResultOwner = { familyWorkspaceLoads.isCurrent(scope) },
@@ -270,261 +293,427 @@ class LighthouseViewModel internal constructor(
                 recipients = emptyList(),
                 bindings = emptyList(),
                 householdMembers = emptyList(),
+                activation = null,
+                activationApprovalDetails = null,
             ).withoutRecipientResources()
             loadHouseholdDetails(scope, householdId)
         }
     }
 
-    fun selectRecipient(recipientId: String) = action {
-        require(_uiState.value.recipients.any { it.id == recipientId }) { "陪伴对象不存在" }
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        _uiState.value = _uiState.value.copy(selectedRecipientId = recipientId)
-            .withoutRecipientResources()
-        loadRecipientResources(householdId, recipientId)
-    }
-
-    fun createHousehold(name: String, timezone: String) = action {
-        require(name.trim().isNotEmpty()) { "请填写家庭名称" }
-        require(timezone.trim().isNotEmpty()) { "请填写家庭时区" }
-        val created = repository.createHousehold(name, timezone)
-        _uiState.value = _uiState.value.copy(
-            households = _uiState.value.households + created,
-            selectedHouseholdId = created.id,
-            selectedRecipientId = null,
-            recipients = emptyList(),
-            bindings = emptyList(),
-            householdMembers = emptyList(),
-            message = "家庭已创建，请继续添加陪伴对象",
-        ).withoutRecipientResources()
-    }
-
-    fun createRecipient(input: CareRecipientInput) = action {
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先创建或选择家庭")
-        require(input.name.trim().isNotEmpty()) { "请填写长者姓名" }
-        require(input.timezone.trim().isNotEmpty()) { "请填写长者时区" }
-        input.birthDate?.takeIf(String::isNotBlank)?.let(LocalDate::parse)
-        val created = repository.createRecipient(householdId, input)
-        _uiState.value = _uiState.value.copy(
-            recipients = _uiState.value.recipients + created,
-            selectedRecipientId = created.id,
-            message = "已添加 ${created.preferredName}",
-        ).withoutRecipientResources()
-        loadRecipientResources(householdId, created.id)
-    }
-
-    fun createMemory(input: MemoryInput) = action {
-        validateMemory(input)
-        val (householdId, recipientId) = selectedWorkspace()
-        val created = repository.createMemory(householdId, recipientId, input)
-        _uiState.value = _uiState.value.copy(
-            memories = listOf(created) + _uiState.value.memories,
-            message = "记忆已保存",
-        )
-    }
-
-    fun updateMemory(memory: MemoryView, input: MemoryInput) = action {
-        validateMemory(input)
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        val updated = repository.updateMemory(householdId, memory, input)
-        _uiState.value = _uiState.value.copy(
-            memories = _uiState.value.memories.replaceById(updated.id, updated) { it.id },
-            message = "记忆已更新为第 ${updated.currentRevision.revisionNo} 版",
-        )
-    }
-
-    fun deleteMemory(memory: MemoryView) = action {
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        repository.deleteMemory(householdId, memory)
-        _uiState.value = _uiState.value.copy(
-            memories = _uiState.value.memories.filterNot { it.id == memory.id },
-            message = "记忆已删除，不再进入新的模型上下文",
-        )
-    }
-
-    fun createRoutine(input: RoutineInput) = action {
-        validateRoutine(input)
-        val (householdId, recipientId) = selectedWorkspace()
-        val created = repository.createRoutine(householdId, recipientId, input)
-        _uiState.value = _uiState.value.copy(
-            routines = _uiState.value.routines + created,
-            message = "日程已创建",
-        )
-    }
-
-    fun updateRoutine(routine: RoutineView, input: RoutineInput) = action {
-        validateRoutine(input)
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        val updated = repository.updateRoutine(householdId, routine, input)
-        _uiState.value = _uiState.value.copy(
-            routines = _uiState.value.routines.replaceById(updated.id, updated) { it.id },
-            message = "日程已更新",
-        )
-    }
-
-    fun deleteRoutine(routine: RoutineView) = action {
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        repository.deleteRoutine(householdId, routine)
-        _uiState.value = _uiState.value.copy(
-            routines = _uiState.value.routines.filterNot { it.id == routine.id },
-            message = "日程已删除",
-        )
-    }
-
-    fun verifyOccurrence(occurrence: OccurrenceView, verified: Boolean, note: String?) = action {
-        require(occurrence.status == "NEEDS_FAMILY_REVIEW") { "该日程实例不需要家属核验" }
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        val updated = repository.familyVerifyOccurrence(
-            householdId,
-            occurrence,
-            verified,
-            note?.trim()?.takeIf(String::isNotBlank),
-        )
-        val recipientId = _uiState.value.selectedRecipientId ?: error("请先选择陪伴对象")
-        val tasks = repository.listFamilyTasks(householdId, recipientId)
-        val events = repository.listCareEvents(householdId, recipientId)
-        _uiState.value = _uiState.value.copy(
-            occurrences = _uiState.value.occurrences.replaceById(updated.id, updated) { it.id },
-            familyTasks = tasks,
-            careEvents = events.take(30),
-            message = if (verified) "已核验为完成" else "已核验为未完成",
-        )
-    }
-
-    fun claimFamilyTask(task: FamilyTaskView) = action {
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        val updated = repository.claimFamilyTask(householdId, task)
-        _uiState.value = _uiState.value.copy(
-            familyTasks = _uiState.value.familyTasks.replaceById(updated.id, updated) { it.id },
-            message = "待办已领取",
-        )
-    }
-
-    fun finishFamilyTask(task: FamilyTaskView, resolve: Boolean, note: String?) = action {
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        val updated = repository.finishFamilyTask(
-            householdId,
-            task,
-            resolve,
-            note?.trim()?.takeIf(String::isNotBlank),
-        )
-        _uiState.value = _uiState.value.copy(
-            familyTasks = _uiState.value.familyTasks.replaceById(updated.id, updated) { it.id },
-            message = if (resolve) "待办已处理" else "待办已忽略",
-        )
-    }
-
-    fun decideConsent(scope: String, grant: Boolean) = action {
-        val (householdId, recipientId) = selectedWorkspace()
-        val current = _uiState.value.consents.firstOrNull { it.scope == scope }
-            ?: error("授权状态尚未加载，请刷新后重试")
-        repository.decideConsent(householdId, recipientId, current, grant)
-        _uiState.value = _uiState.value.copy(
-            consents = repository.listConsents(householdId, recipientId),
-            message = if (grant) "授权已生效" else "授权已撤回，新的请求将被服务器拒绝",
-        )
-    }
-
-    fun loadCareAuthorities() = action {
-        val (householdId, recipientId) = selectedWorkspace()
-        require(_uiState.value.selectedHousehold?.roleCodes?.contains("OWNER") == true) {
-            "只有家庭 OWNER 可以查看成员照护权限"
+    fun selectRecipient(recipientId: String): Job {
+        val current = _uiState.value
+        if (current.recipients.none { it.id == recipientId }) {
+            return action { error("陪伴对象不存在") }
         }
-        val authorities = repository.listCareAuthorities(householdId, recipientId)
-        if (
-            _uiState.value.selectedHouseholdId == householdId &&
-            _uiState.value.selectedRecipientId == recipientId
+        val householdId = current.selectedHouseholdId
+            ?: return action { error("请先选择家庭") }
+        familyOperations.updateSelection(householdId, recipientId)
+        val scope = familyWorkspaceLoads.begin()
+        return action(
+            isResultOwner = { familyWorkspaceLoads.isCurrent(scope) },
         ) {
+            if (!familyWorkspaceLoads.isCurrent(scope)) return@action
             _uiState.value = _uiState.value.copy(
-                careAuthorities = authorities,
-                authoritiesLoadedRecipientId = recipientId,
-                message = "成员照护权限已刷新",
+                selectedRecipientId = recipientId,
+                activation = null,
+                activationApprovalDetails = null,
+            ).withoutRecipientResources()
+            loadRecipientResources(
+                householdId = householdId,
+                recipientId = recipientId,
+                isResultOwner = { familyWorkspaceLoads.isCurrent(scope) },
             )
         }
     }
+
+    fun createHousehold(name: String, timezone: String) = familyAction(
+        scope = FamilyOperationScope.SELECTION,
+        lane = "household:create",
+        reconcile = FamilyOperationReconcile.HOUSEHOLD_LIST,
+        reconcilePublishedSuccess = false,
+        validate = {
+            require(name.trim().isNotEmpty()) { "请填写家庭名称" }
+            require(timezone.trim().isNotEmpty()) { "请填写家庭时区" }
+        },
+        request = { repository.createHousehold(name, timezone) },
+        apply = { created ->
+            _uiState.value = _uiState.value.copy(
+                households = (_uiState.value.households + created).distinctBy { it.id },
+                message = "家庭已创建，请继续添加陪伴对象",
+            )
+            selectHousehold(created.id)
+        },
+    )
+
+    fun createRecipient(input: CareRecipientInput) = familyAction(
+        scope = FamilyOperationScope.SELECTION,
+        lane = "recipient:create",
+        reconcile = FamilyOperationReconcile.HOUSEHOLD,
+        reconcilePublishedSuccess = false,
+        validate = {
+            require(input.name.trim().isNotEmpty()) { "请填写长者姓名" }
+            require(input.timezone.trim().isNotEmpty()) { "请填写长者时区" }
+            input.birthDate?.takeIf(String::isNotBlank)?.let(LocalDate::parse)
+        },
+        request = {
+            repository.createRecipient(checkNotNull(householdId), input)
+        },
+        apply = { created ->
+            _uiState.value = _uiState.value.copy(
+                recipients = (_uiState.value.recipients + created).distinctBy { it.id },
+                message = "已添加 ${created.preferredName}",
+            )
+            selectRecipient(created.id)
+        },
+    )
+
+    fun createMemory(input: MemoryInput) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "memory:create",
+        policy = FamilyOperationPolicy.ADDITIVE,
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        validate = { validateMemory(input) },
+        request = {
+            repository.createMemory(checkNotNull(householdId), checkNotNull(recipientId), input)
+        },
+        apply = { created ->
+            _uiState.value = _uiState.value.copy(
+                memories = (listOf(created) + _uiState.value.memories).distinctBy { it.id },
+                message = "记忆已保存",
+            )
+        },
+    )
+
+    fun updateMemory(memory: MemoryView, input: MemoryInput) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "memory:${memory.id}",
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        validate = { validateMemory(input) },
+        request = {
+            require(memory.recipientId == recipientId) { "记忆不属于当前陪伴对象" }
+            repository.updateMemory(checkNotNull(householdId), memory, input)
+        },
+        apply = { updated ->
+            _uiState.value = _uiState.value.copy(
+                memories = _uiState.value.memories.replaceById(updated.id, updated) { it.id },
+                message = "记忆已更新为第 ${updated.currentRevision.revisionNo} 版",
+            )
+        },
+    )
+
+    fun deleteMemory(memory: MemoryView) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "memory:${memory.id}",
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        request = {
+            require(memory.recipientId == recipientId) { "记忆不属于当前陪伴对象" }
+            repository.deleteMemory(checkNotNull(householdId), memory)
+        },
+        apply = {
+            _uiState.value = _uiState.value.copy(
+                memories = _uiState.value.memories.filterNot { it.id == memory.id },
+                message = "记忆已删除，不再进入新的模型上下文",
+            )
+        },
+    )
+
+    fun createRoutine(input: RoutineInput) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "routine:create",
+        policy = FamilyOperationPolicy.ADDITIVE,
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        validate = { validateRoutine(input) },
+        request = {
+            repository.createRoutine(checkNotNull(householdId), checkNotNull(recipientId), input)
+        },
+        apply = { created ->
+            _uiState.value = _uiState.value.copy(
+                routines = (_uiState.value.routines + created).distinctBy { it.id },
+                message = "日程已创建",
+            )
+        },
+    )
+
+    fun updateRoutine(routine: RoutineView, input: RoutineInput) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "routine:${routine.id}",
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        validate = { validateRoutine(input) },
+        request = {
+            require(routine.recipientId == recipientId) { "日程不属于当前陪伴对象" }
+            repository.updateRoutine(checkNotNull(householdId), routine, input)
+        },
+        apply = { updated ->
+            _uiState.value = _uiState.value.copy(
+                routines = _uiState.value.routines.replaceById(updated.id, updated) { it.id },
+                message = "日程已更新",
+            )
+        },
+    )
+
+    fun deleteRoutine(routine: RoutineView) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "routine:${routine.id}",
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        request = {
+            require(routine.recipientId == recipientId) { "日程不属于当前陪伴对象" }
+            repository.deleteRoutine(checkNotNull(householdId), routine)
+        },
+        apply = {
+            _uiState.value = _uiState.value.copy(
+                routines = _uiState.value.routines.filterNot { it.id == routine.id },
+                message = "日程已删除",
+            )
+        },
+    )
+
+    fun verifyOccurrence(
+        occurrence: OccurrenceView,
+        verified: Boolean,
+        note: String?,
+    ) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "occurrence:${occurrence.id}",
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        validate = {
+            require(occurrence.status == "NEEDS_FAMILY_REVIEW") {
+                "该日程实例不需要家属核验"
+            }
+        },
+        request = {
+            require(occurrence.recipientId == recipientId) { "日程实例不属于当前陪伴对象" }
+            val capturedHouseholdId = checkNotNull(householdId)
+            val capturedRecipientId = checkNotNull(recipientId)
+            val updated = repository.familyVerifyOccurrence(
+                capturedHouseholdId,
+                occurrence,
+                verified,
+                note?.trim()?.takeIf(String::isNotBlank),
+            )
+            Triple(
+                updated,
+                repository.listFamilyTasks(capturedHouseholdId, capturedRecipientId),
+                repository.listCareEvents(capturedHouseholdId, capturedRecipientId),
+            )
+        },
+        apply = { (updated, tasks, events) ->
+            _uiState.value = _uiState.value.copy(
+                occurrences = _uiState.value.occurrences
+                    .replaceById(updated.id, updated) { it.id },
+                familyTasks = tasks,
+                careEvents = events.take(30),
+                message = if (verified) "已核验为完成" else "已核验为未完成",
+            )
+        },
+    )
+
+    fun claimFamilyTask(task: FamilyTaskView) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "task:${task.id}",
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        request = {
+            require(task.recipientId == recipientId) { "待办不属于当前陪伴对象" }
+            repository.claimFamilyTask(checkNotNull(householdId), task)
+        },
+        apply = { updated ->
+            _uiState.value = _uiState.value.copy(
+                familyTasks = _uiState.value.familyTasks.replaceById(updated.id, updated) { it.id },
+                message = "待办已领取",
+            )
+        },
+    )
+
+    fun finishFamilyTask(task: FamilyTaskView, resolve: Boolean, note: String?) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "task:${task.id}",
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        request = {
+            require(task.recipientId == recipientId) { "待办不属于当前陪伴对象" }
+            repository.finishFamilyTask(
+                checkNotNull(householdId),
+                task,
+                resolve,
+                note?.trim()?.takeIf(String::isNotBlank),
+            )
+        },
+        apply = { updated ->
+            _uiState.value = _uiState.value.copy(
+                familyTasks = _uiState.value.familyTasks.replaceById(updated.id, updated) { it.id },
+                message = if (resolve) "待办已处理" else "待办已忽略",
+            )
+        },
+    )
+
+    fun decideConsent(scope: String, grant: Boolean) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "consent:$scope",
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        request = {
+            val capturedHouseholdId = checkNotNull(householdId)
+            val capturedRecipientId = checkNotNull(recipientId)
+            val current = _uiState.value.consents.firstOrNull { it.scope == scope }
+                ?: error("授权状态尚未加载，请刷新后重试")
+            repository.decideConsent(capturedHouseholdId, capturedRecipientId, current, grant)
+            repository.listConsents(capturedHouseholdId, capturedRecipientId)
+        },
+        apply = { consents ->
+            _uiState.value = _uiState.value.copy(
+                consents = consents,
+                message = if (grant) "授权已生效" else "授权已撤回，新的请求将被服务器拒绝",
+            )
+        },
+    )
+
+    fun loadCareAuthorities() = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "care-authorities",
+        validate = {
+            require(_uiState.value.selectedHousehold?.roleCodes?.contains("OWNER") == true) {
+                "只有家庭 OWNER 可以查看成员照护权限"
+            }
+        },
+        request = {
+            repository.listCareAuthorities(checkNotNull(householdId), checkNotNull(recipientId))
+        },
+        apply = { authorities ->
+            _uiState.value = _uiState.value.copy(
+                careAuthorities = authorities,
+                authoritiesLoadedRecipientId = _uiState.value.selectedRecipientId,
+                message = "成员照护权限已刷新",
+            )
+        },
+    )
 
     fun updateHouseholdMember(
         member: HouseholdMemberView,
         roleCodes: Set<String>,
         currentPassword: String,
-    ) = action {
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        require(member.householdId == householdId) { "成员不属于当前家庭" }
-        val currentUserId = _uiState.value.user?.id ?: error("请先登录")
-        require(member.userId != currentUserId) { "不能修改自己的家庭角色" }
-        require(roleCodes.isNotEmpty() && roleCodes.all { it in HOUSEHOLD_ROLES }) {
-            "请至少选择一个有效家庭角色"
-        }
-        val updated = repository.updateHouseholdMember(
-            householdId,
-            member,
-            roleCodes,
-            currentPassword,
-        )
-        _uiState.value = _uiState.value.copy(
-            householdMembers = _uiState.value.householdMembers
-                .replaceById(updated.id, updated) { it.id },
-            message = "${updated.displayName} 的家庭角色已更新",
-        )
-    }
+    ) = familyAction(
+        scope = FamilyOperationScope.HOUSEHOLD,
+        lane = "member:${member.id}",
+        reconcile = FamilyOperationReconcile.HOUSEHOLD,
+        validate = {
+            val selectedHouseholdId = _uiState.value.selectedHouseholdId
+                ?: error("请先选择家庭")
+            require(member.householdId == selectedHouseholdId) { "成员不属于当前家庭" }
+            val currentUserId = _uiState.value.user?.id ?: error("请先登录")
+            require(member.userId != currentUserId) { "不能修改自己的家庭角色" }
+            require(roleCodes.isNotEmpty() && roleCodes.all { it in HOUSEHOLD_ROLES }) {
+                "请至少选择一个有效家庭角色"
+            }
+        },
+        request = {
+            repository.updateHouseholdMember(
+                checkNotNull(householdId),
+                member,
+                roleCodes,
+                currentPassword,
+            )
+        },
+        apply = { updated ->
+            _uiState.value = _uiState.value.copy(
+                householdMembers = _uiState.value.householdMembers
+                    .replaceById(updated.id, updated) { it.id },
+                message = "${updated.displayName} 的家庭角色已更新",
+            )
+        },
+    )
 
     fun removeHouseholdMember(
         member: HouseholdMemberView,
         currentPassword: String,
-    ) = action {
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        require(member.householdId == householdId) { "成员不属于当前家庭" }
-        val currentUserId = _uiState.value.user?.id ?: error("请先登录")
-        require(member.userId != currentUserId) { "不能移除自己的家庭成员身份" }
-        repository.removeHouseholdMember(householdId, member, currentPassword)
-        _uiState.value = _uiState.value.copy(
-            householdMembers = _uiState.value.householdMembers.filterNot { it.id == member.id },
-            careAuthorities = _uiState.value.careAuthorities.filterNot { it.memberId == member.id },
-            message = "${member.displayName} 已从家庭移除，相关照护权限同步失效",
-        )
-    }
+    ) = familyAction(
+        scope = FamilyOperationScope.HOUSEHOLD,
+        lane = "member:${member.id}",
+        reconcile = FamilyOperationReconcile.HOUSEHOLD,
+        validate = {
+            val selectedHouseholdId = _uiState.value.selectedHouseholdId
+                ?: error("请先选择家庭")
+            require(member.householdId == selectedHouseholdId) { "成员不属于当前家庭" }
+            val currentUserId = _uiState.value.user?.id ?: error("请先登录")
+            require(member.userId != currentUserId) { "不能移除自己的家庭成员身份" }
+        },
+        request = {
+            repository.removeHouseholdMember(checkNotNull(householdId), member, currentPassword)
+        },
+        apply = {
+            _uiState.value = _uiState.value.copy(
+                householdMembers = _uiState.value.householdMembers
+                    .filterNot { it.id == member.id },
+                careAuthorities = _uiState.value.careAuthorities
+                    .filterNot { it.memberId == member.id },
+                message = "${member.displayName} 已从家庭移除，相关照护权限同步失效",
+            )
+        },
+    )
 
     fun putCareAuthority(
         memberId: String,
         input: CareAuthorityInput,
         currentPassword: String,
-    ) = action {
-        val (householdId, recipientId) = selectedWorkspace()
-        require(_uiState.value.householdMembers.any { it.id == memberId && it.status == "ACTIVE" }) {
-            "该家庭成员已失效，请刷新后重试"
-        }
-        require(input.accessLevel.isNotBlank()) { "请填写权限级别" }
-        require(input.status in setOf("ACTIVE", "REVOKED")) { "权限状态无效" }
-        require(input.contactPriority == null || input.contactPriority in 1..100) {
-            "通知优先级需为 1 到 100"
-        }
-        val updated = repository.putCareAuthority(
-            householdId,
-            recipientId,
-            memberId,
-            input,
-            currentPassword,
-        )
-        _uiState.value = _uiState.value.copy(
-            careAuthorities = _uiState.value.careAuthorities
-                .filterNot { it.memberId == updated.memberId } + updated,
-            authoritiesLoadedRecipientId = recipientId,
-            message = "${updated.displayName} 的照护权限已更新",
-        )
-    }
+    ) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "authority:$memberId",
+        reconcile = FamilyOperationReconcile.CARE_AUTHORITIES,
+        validate = {
+            require(
+                _uiState.value.householdMembers.any {
+                    it.id == memberId && it.status == "ACTIVE"
+                },
+            ) { "该家庭成员已失效，请刷新后重试" }
+            require(input.accessLevel.isNotBlank()) { "请填写权限级别" }
+            require(input.status in setOf("ACTIVE", "REVOKED")) { "权限状态无效" }
+            require(input.contactPriority == null || input.contactPriority in 1..100) {
+                "通知优先级需为 1 到 100"
+            }
+        },
+        request = {
+            repository.putCareAuthority(
+                checkNotNull(householdId),
+                checkNotNull(recipientId),
+                memberId,
+                input,
+                currentPassword,
+            )
+        },
+        apply = { updated ->
+            _uiState.value = _uiState.value.copy(
+                careAuthorities = _uiState.value.careAuthorities
+                    .filterNot { it.memberId == updated.memberId } + updated,
+                authoritiesLoadedRecipientId = _uiState.value.selectedRecipientId,
+                message = "${updated.displayName} 的照护权限已更新",
+            )
+        },
+    )
 
     fun revokeBinding(
         binding: CompanionBindingView,
         reasonCode: String?,
         currentPassword: String,
-    ) = action {
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        require(binding.householdId == householdId) { "设备不属于当前家庭" }
-        repository.revokeBinding(householdId, binding.id, reasonCode, currentPassword)
-        _uiState.value = _uiState.value.copy(
-            bindings = _uiState.value.bindings.filterNot { it.id == binding.id },
-            message = "陪伴设备 ${binding.displayName} 已解绑，原设备凭据立即失效",
-        )
-    }
+    ) = familyAction(
+        scope = FamilyOperationScope.HOUSEHOLD,
+        lane = "binding:${binding.id}",
+        reconcile = FamilyOperationReconcile.HOUSEHOLD,
+        validate = {
+            require(binding.householdId == _uiState.value.selectedHouseholdId) {
+                "设备不属于当前家庭"
+            }
+        },
+        request = {
+            repository.revokeBinding(
+                checkNotNull(householdId),
+                binding.id,
+                reasonCode,
+                currentPassword,
+            )
+        },
+        apply = {
+            _uiState.value = _uiState.value.copy(
+                bindings = _uiState.value.bindings.filterNot { it.id == binding.id },
+                message = "陪伴设备 ${binding.displayName} 已解绑，原设备凭据立即失效",
+            )
+        },
+    )
 
     fun refresh(): Job {
         if (_uiState.value.role != AppRole.FAMILY) return action { restoreDeviceData() }
@@ -536,38 +725,60 @@ class LighthouseViewModel internal constructor(
         }
     }
 
-    fun createActivation(recipientId: String) = action {
-        val householdId = _uiState.value.selectedHouseholdId ?: error("请先选择家庭")
-        val activation = repository.createActivationChallenge(householdId, recipientId)
-        _uiState.value = _uiState.value.copy(
-            activation = activation,
-            activationApprovalDetails = null,
-            message = "激活凭据已生成；陪伴设备认领后仍需家属现场批准",
-        )
-    }
+    fun createActivation(recipientId: String) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "activation:create",
+        validate = {
+            require(recipientId == _uiState.value.selectedRecipientId) {
+                "只能为当前陪伴对象生成激活凭据"
+            }
+        },
+        request = {
+            repository.createActivationChallenge(checkNotNull(householdId), recipientId)
+        },
+        apply = { activation ->
+            _uiState.value = _uiState.value.copy(
+                activation = activation,
+                activationApprovalDetails = null,
+                message = "激活凭据已生成；陪伴设备认领后仍需家属现场批准",
+            )
+        },
+    )
 
-    fun loadActivationApprovalDetails(challengeId: String) = action {
-        val details = repository.activationApprovalDetails(challengeId)
-        _uiState.value = _uiState.value.copy(
-            activationApprovalDetails = details,
-            message = "请核对设备、认领时间和网络来源后再批准",
-        )
-    }
+    fun loadActivationApprovalDetails(challengeId: String) = familyAction(
+        scope = FamilyOperationScope.SELECTION,
+        lane = "activation:approval",
+        request = { repository.activationApprovalDetails(challengeId) },
+        apply = { details ->
+            _uiState.value = _uiState.value.copy(
+                activationApprovalDetails = details,
+                message = "请核对设备、认领时间和网络来源后再批准",
+            )
+        },
+    )
 
-    fun approveActivation(challengeId: String) = action {
-        val details = _uiState.value.activationApprovalDetails
-            ?.takeIf { it.challengeId == challengeId }
-            ?: error("请先读取并核对待批准设备信息")
-        repository.approveActivation(challengeId, details.claimSnapshotToken)
-        val householdId = _uiState.value.selectedHouseholdId
-        _uiState.value = _uiState.value.copy(
-            activation = null,
-            activationApprovalDetails = null,
-            bindings = householdId?.let { repository.listBindings(it) }.orEmpty(),
-            message = "已批准设备激活",
-        )
-        startActivationPolling()
-    }
+    fun approveActivation(challengeId: String) = familyAction(
+        scope = FamilyOperationScope.SELECTION,
+        lane = "activation:approval",
+        reconcile = FamilyOperationReconcile.HOUSEHOLD,
+        request = {
+            val capturedHouseholdId = checkNotNull(householdId)
+            val details = _uiState.value.activationApprovalDetails
+                ?.takeIf { it.challengeId == challengeId }
+                ?: error("请先读取并核对待批准设备信息")
+            repository.approveActivation(challengeId, details.claimSnapshotToken)
+            repository.listBindings(capturedHouseholdId)
+        },
+        apply = { bindings ->
+            _uiState.value = _uiState.value.copy(
+                activation = null,
+                activationApprovalDetails = null,
+                bindings = bindings,
+                message = "已批准设备激活",
+            )
+            startActivationPolling()
+        },
+    )
 
     fun showQrScanner(show: Boolean) {
         _uiState.value = _uiState.value.copy(qrScannerVisible = show, error = null)
@@ -606,6 +817,7 @@ class LighthouseViewModel internal constructor(
                 secret,
             )
             familyWorkspaceLoads.invalidate()
+            familyOperations.endSession()
             _uiState.value = _uiState.value.copy(
                 role = AppRole.COMPANION,
                 pendingDeviceActivation = pending,
@@ -775,6 +987,7 @@ class LighthouseViewModel internal constructor(
 
         fun applyIntent() {
             familyWorkspaceLoads.invalidate()
+            familyOperations.endSession()
             publishActionBusy()
             _uiState.value = _uiState.value.copy(
                 role = AppRole.COMPANION,
@@ -803,6 +1016,7 @@ class LighthouseViewModel internal constructor(
         runCatching {
             if (tryRestoreLockedCompanionMode()) return@runCatching
             val user = repository.restoreUser()
+            if (user != null) familyOperations.startSession(user.id)
             _uiState.value = _uiState.value.copy(
                 restoring = false,
                 signedIn = user != null,
@@ -833,6 +1047,12 @@ class LighthouseViewModel internal constructor(
         val selected = previousSelected
             ?.takeIf { id -> households.any { it.id == id } }
             ?: households.firstOrNull()?.id
+        familyOperations.updateSelection(
+            householdId = selected,
+            recipientId = _uiState.value.selectedRecipientId.takeIf {
+                selected == previousSelected
+            },
+        )
         _uiState.value = _uiState.value.copy(
             households = households,
             selectedHouseholdId = selected,
@@ -843,6 +1063,8 @@ class LighthouseViewModel internal constructor(
                 recipients = emptyList(),
                 bindings = emptyList(),
                 householdMembers = emptyList(),
+                activation = null,
+                activationApprovalDetails = null,
             ).withoutRecipientResources()
         }
         if (selected != null) {
@@ -853,6 +1075,8 @@ class LighthouseViewModel internal constructor(
                 selectedRecipientId = null,
                 bindings = emptyList(),
                 householdMembers = emptyList(),
+                activation = null,
+                activationApprovalDetails = null,
             ).withoutRecipientResources()
         }
     }
@@ -879,14 +1103,20 @@ class LighthouseViewModel internal constructor(
             FamilyWorkspaceLoadResult.Stale -> return
         }
         if (!familyWorkspaceLoads.isCurrent(scope)) return
-        val selectedRecipientId = _uiState.value.selectedRecipientId
+        val previousSelectedRecipientId = _uiState.value.selectedRecipientId
+        val selectedRecipientId = previousSelectedRecipientId
             ?.takeIf { id -> details.recipients.any { it.id == id } }
             ?: details.recipients.firstOrNull()?.id
+        val recipientChanged = selectedRecipientId != previousSelectedRecipientId
+        familyOperations.updateSelection(householdId, selectedRecipientId)
         _uiState.value = _uiState.value.copy(
             recipients = details.recipients,
             selectedRecipientId = selectedRecipientId,
             bindings = details.bindings,
             householdMembers = details.members,
+            activation = _uiState.value.activation.takeUnless { recipientChanged },
+            activationApprovalDetails = _uiState.value.activationApprovalDetails
+                .takeUnless { recipientChanged },
         ).withoutRecipientResources()
         if (selectedRecipientId != null) {
             loadRecipientResources(
@@ -1028,6 +1258,7 @@ class LighthouseViewModel internal constructor(
         message: String,
     ) {
         familyWorkspaceLoads.invalidate()
+        familyOperations.endSession()
         val previousUserId = _uiState.value.user?.id
         val resolvedContext = context ?: _uiState.value.companionContext
         _uiState.value = LighthouseUiState(
@@ -1171,6 +1402,151 @@ class LighthouseViewModel internal constructor(
         }
     }
 
+    private fun <T> familyAction(
+        scope: FamilyOperationScope,
+        lane: String,
+        policy: FamilyOperationPolicy = FamilyOperationPolicy.LATEST_PER_LANE,
+        reconcile: FamilyOperationReconcile = FamilyOperationReconcile.NONE,
+        reconcilePublishedSuccess: Boolean = true,
+        validate: () -> Unit = {},
+        request: suspend FamilyOperationTicket.() -> T,
+        apply: (T) -> Unit,
+    ): Job {
+        val current = _uiState.value
+        if (
+            current.role != AppRole.FAMILY ||
+            !current.signedIn ||
+            current.user == null ||
+            !familyOperations.hasSession
+        ) {
+            return action { error("请先登录家属账号") }
+        }
+        if (
+            scope in setOf(FamilyOperationScope.HOUSEHOLD, FamilyOperationScope.RECIPIENT) &&
+            current.selectedHouseholdId == null
+        ) {
+            return action { error("请先选择家庭") }
+        }
+        if (scope == FamilyOperationScope.RECIPIENT && current.selectedRecipientId == null) {
+            return action { error("请先选择陪伴对象") }
+        }
+
+        val ticket = familyOperations.begin(
+            scope = scope,
+            lane = lane,
+            policy = policy,
+            reconcile = reconcile,
+        )
+        return action(
+            isResultOwner = { familyOperations.isResultOwner(ticket) },
+        ) {
+            validate()
+            val result = try {
+                ticket.request()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (
+                    error is LighthouseApiException &&
+                    error.code == "SIGNED_OUT" &&
+                    familyOperations.isSessionCurrent(ticket)
+                ) {
+                    handleActionFailure(error)
+                    return@action
+                }
+                val decision = familyOperations.complete(
+                    ticket,
+                    FamilyOperationOutcome.FAILURE,
+                )
+                decision.reconcile?.let {
+                    scheduleFamilyReconciliation(ticket, it)
+                }
+                if (decision.publish) throw error
+                return@action
+            }
+
+            val decision = familyOperations.complete(
+                ticket,
+                FamilyOperationOutcome.SUCCESS,
+            )
+            if (decision.publish) apply(result)
+            if (!decision.publish || reconcilePublishedSuccess) {
+                decision.reconcile?.let {
+                    scheduleFamilyReconciliation(ticket, it)
+                }
+            }
+        }
+    }
+
+    private fun scheduleFamilyReconciliation(
+        ticket: FamilyOperationTicket,
+        target: FamilyOperationReconcile,
+    ) {
+        val careAuthoritiesTicket = if (target == FamilyOperationReconcile.CARE_AUTHORITIES) {
+            familyOperations.begin(
+                scope = FamilyOperationScope.RECIPIENT,
+                lane = "care-authorities",
+            )
+        } else {
+            null
+        }
+        val scope = familyWorkspaceLoads.begin()
+        viewModelScope.launch {
+            runCatching {
+                when (target) {
+                    FamilyOperationReconcile.NONE -> Unit
+                    FamilyOperationReconcile.HOUSEHOLD_LIST -> refreshFamilyData(scope)
+                    FamilyOperationReconcile.HOUSEHOLD -> {
+                        val householdId = ticket.householdId ?: return@runCatching
+                        if (_uiState.value.selectedHouseholdId != householdId) {
+                            return@runCatching
+                        }
+                        loadHouseholdDetails(scope, householdId)
+                    }
+                    FamilyOperationReconcile.RECIPIENT -> {
+                        val householdId = ticket.householdId ?: return@runCatching
+                        val recipientId = ticket.recipientId ?: return@runCatching
+                        if (
+                            _uiState.value.selectedHouseholdId != householdId ||
+                            _uiState.value.selectedRecipientId != recipientId
+                        ) {
+                            return@runCatching
+                        }
+                        loadRecipientResources(
+                            householdId = householdId,
+                            recipientId = recipientId,
+                            isResultOwner = { familyWorkspaceLoads.isCurrent(scope) },
+                        )
+                    }
+                    FamilyOperationReconcile.CARE_AUTHORITIES -> {
+                        val householdId = ticket.householdId ?: return@runCatching
+                        val recipientId = ticket.recipientId ?: return@runCatching
+                        val authorities = repository.listCareAuthorities(householdId, recipientId)
+                        if (
+                            familyWorkspaceLoads.isCurrent(scope) &&
+                            careAuthoritiesTicket?.let(familyOperations::isResultOwner) == true &&
+                            _uiState.value.selectedHouseholdId == householdId &&
+                            _uiState.value.selectedRecipientId == recipientId
+                        ) {
+                            _uiState.value = _uiState.value.copy(
+                                careAuthorities = authorities,
+                                authoritiesLoadedRecipientId = recipientId,
+                            )
+                        }
+                    }
+                }
+            }.onFailure { error ->
+                if (
+                    error is LighthouseApiException &&
+                    error.code == "SIGNED_OUT" &&
+                    familyOperations.isSessionCurrent(ticket)
+                ) {
+                    handleActionFailure(error)
+                }
+            }
+        }
+    }
+
     private fun action(
         isResultOwner: () -> Boolean = { true },
         block: suspend () -> Unit,
@@ -1200,6 +1576,7 @@ class LighthouseViewModel internal constructor(
     private fun handleActionFailure(error: Throwable) {
         if (error is LighthouseApiException && error.code == "SIGNED_OUT") {
             familyWorkspaceLoads.invalidate()
+            familyOperations.endSession()
             _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
             stopBackgroundJobs()
             callCoordinator.disconnectFamily("signed_out")

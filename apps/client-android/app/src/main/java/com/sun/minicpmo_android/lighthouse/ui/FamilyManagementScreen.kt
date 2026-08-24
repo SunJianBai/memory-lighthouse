@@ -63,6 +63,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -178,6 +179,22 @@ internal fun FamilyManagementContent(
     var memberRoleEditor by remember { mutableStateOf<HouseholdMemberView?>(null) }
     var memberRemoval by remember { mutableStateOf<HouseholdMemberView?>(null) }
     var bindingRevoke by remember { mutableStateOf<CompanionBindingView?>(null) }
+
+    LaunchedEffect(state.selectedHouseholdId, state.selectedRecipientId) {
+        memoryEditor = null
+        memoryEditorVisible = false
+        memoryDelete = null
+        routineEditor = null
+        routineEditorVisible = false
+        routineDelete = null
+        taskDecision = null
+        occurrenceDecision = null
+        consentDecision = null
+        authorityEditor = null
+        memberRoleEditor = null
+        memberRemoval = null
+        bindingRevoke = null
+    }
 
     val selectSection: (FamilySection) -> Unit = { item ->
         section = item
