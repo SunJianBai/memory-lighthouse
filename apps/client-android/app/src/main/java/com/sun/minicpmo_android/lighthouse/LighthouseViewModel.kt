@@ -52,6 +52,8 @@ class LighthouseViewModel internal constructor(
     private var activationPolling: Job? = null
     private var remotePolling: Job? = null
     private var deferredActivationPayload: String? = null
+    private val familyWorkspaceLoads = LatestFamilyWorkspaceLoad()
+    private val actionBusyTracker = ActionBusyTracker()
 
     init {
         viewModelScope.launch {
@@ -99,13 +101,14 @@ class LighthouseViewModel internal constructor(
 
     fun login(identifier: String, password: String) = action {
         val user = repository.login(identifier, password)
+        val scope = familyWorkspaceLoads.begin()
         _uiState.value = _uiState.value.copy(
             role = AppRole.FAMILY,
             signedIn = true,
             companionDeviceLocked = false,
             user = user,
         )
-        refreshFamilyData()
+        refreshFamilyData(scope)
         restoreDeviceData()
         consumeDeferredActivation()
     }
@@ -118,6 +121,7 @@ class LighthouseViewModel internal constructor(
     ) = action {
         require(!email.isNullOrBlank()) { "请填写邮箱，完成验证后才能管理家庭和设备" }
         val user = repository.register(email, username, password, displayName)
+        val scope = familyWorkspaceLoads.begin()
         _uiState.value = _uiState.value.copy(
             role = AppRole.FAMILY,
             signedIn = true,
@@ -126,7 +130,7 @@ class LighthouseViewModel internal constructor(
             emailVerificationPromptVisible = !user.emailVerified,
             message = "注册成功，6 位邮箱验证码已发送。",
         )
-        refreshFamilyData()
+        refreshFamilyData(scope)
         restoreDeviceData()
         consumeDeferredActivation()
     }
@@ -176,28 +180,31 @@ class LighthouseViewModel internal constructor(
         _uiState.value = _uiState.value.copy(emailVerificationPromptVisible = false)
     }
 
-    fun logout() = action {
-        val userId = _uiState.value.user?.id
-        _uiState.value.activeRemoteSession?.let { session ->
-            if (_uiState.value.role == AppRole.COMPANION) {
-                runCatching { callCoordinator.endCompanionCall(session.id) }
-            } else {
-                callCoordinator.disconnectFamily("signed_out")
-                runCatching {
-                    repository.endFamilyRemoteSession(session.householdId, session.id)
+    fun logout(): Job {
+        familyWorkspaceLoads.invalidate()
+        return action {
+            val userId = _uiState.value.user?.id
+            _uiState.value.activeRemoteSession?.let { session ->
+                if (_uiState.value.role == AppRole.COMPANION) {
+                    runCatching { callCoordinator.endCompanionCall(session.id) }
+                } else {
+                    callCoordinator.disconnectFamily("signed_out")
+                    runCatching {
+                        repository.endFamilyRemoteSession(session.householdId, session.id)
+                    }
                 }
             }
-        }
-        stopBackgroundJobs()
-        userId?.let(remoteCallCommands::terminateAllForUser)
-        if (repository.hasDeviceCredential()) {
-            enterLockedCompanionMode(message = "已退出家属账号，陪伴设备继续安全运行")
-        } else {
-            repository.logout()
-            _uiState.value = LighthouseUiState(
-                restoring = false,
-                apiBaseUrl = repository.apiBaseUrl(),
-            )
+            stopBackgroundJobs()
+            userId?.let(remoteCallCommands::terminateAllForUser)
+            if (repository.hasDeviceCredential()) {
+                enterLockedCompanionMode(message = "已退出家属账号，陪伴设备继续安全运行")
+            } else {
+                repository.logout()
+                _uiState.value = LighthouseUiState(
+                    restoring = false,
+                    apiBaseUrl = repository.apiBaseUrl(),
+                )
+            }
         }
     }
 
@@ -208,6 +215,10 @@ class LighthouseViewModel internal constructor(
                 enterLockedCompanionMode(message = "陪伴设备已锁定；进入家属管理需要重新登录")
             }
             return
+        }
+        if (role == AppRole.COMPANION) {
+            familyWorkspaceLoads.invalidate()
+            publishActionBusy()
         }
         _uiState.value = _uiState.value.copy(
             role = role,
@@ -229,6 +240,7 @@ class LighthouseViewModel internal constructor(
     fun requireFamilyAuthentication() {
         val current = _uiState.value
         if (!current.companionDeviceLocked || current.activeRemoteSession != null) return
+        familyWorkspaceLoads.invalidate()
         _uiState.value = LighthouseUiState(
             restoring = false,
             role = AppRole.FAMILY,
@@ -246,15 +258,21 @@ class LighthouseViewModel internal constructor(
         enterLockedCompanionMode(message = "已返回专用陪伴模式")
     }
 
-    fun selectHousehold(householdId: String) = action {
-        _uiState.value = _uiState.value.copy(
-            selectedHouseholdId = householdId,
-            selectedRecipientId = null,
-            recipients = emptyList(),
-            bindings = emptyList(),
-            householdMembers = emptyList(),
-        ).withoutRecipientResources()
-        loadHouseholdDetails(householdId)
+    fun selectHousehold(householdId: String): Job {
+        val scope = familyWorkspaceLoads.begin()
+        return action(
+            isResultOwner = { familyWorkspaceLoads.isCurrent(scope) },
+        ) {
+            if (!familyWorkspaceLoads.isCurrent(scope)) return@action
+            _uiState.value = _uiState.value.copy(
+                selectedHouseholdId = householdId,
+                selectedRecipientId = null,
+                recipients = emptyList(),
+                bindings = emptyList(),
+                householdMembers = emptyList(),
+            ).withoutRecipientResources()
+            loadHouseholdDetails(scope, householdId)
+        }
     }
 
     fun selectRecipient(recipientId: String) = action {
@@ -508,8 +526,14 @@ class LighthouseViewModel internal constructor(
         )
     }
 
-    fun refresh() = action {
-        if (_uiState.value.role == AppRole.FAMILY) refreshFamilyData() else restoreDeviceData()
+    fun refresh(): Job {
+        if (_uiState.value.role != AppRole.FAMILY) return action { restoreDeviceData() }
+        val scope = familyWorkspaceLoads.begin()
+        return action(
+            isResultOwner = { familyWorkspaceLoads.isCurrent(scope) },
+        ) {
+            refreshFamilyData(scope)
+        }
     }
 
     fun createActivation(recipientId: String) = action {
@@ -581,6 +605,7 @@ class LighthouseViewModel internal constructor(
                 ActivationProofType.QR_SECRET,
                 secret,
             )
+            familyWorkspaceLoads.invalidate()
             _uiState.value = _uiState.value.copy(
                 role = AppRole.COMPANION,
                 pendingDeviceActivation = pending,
@@ -749,6 +774,8 @@ class LighthouseViewModel internal constructor(
         ) return
 
         fun applyIntent() {
+            familyWorkspaceLoads.invalidate()
+            publishActionBusy()
             _uiState.value = _uiState.value.copy(
                 role = AppRole.COMPANION,
                 companionDeviceLocked = repository.hasDeviceCredential(),
@@ -784,7 +811,7 @@ class LighthouseViewModel internal constructor(
                 deviceActivated = repository.hasDeviceCredential(),
             )
             if (user != null) {
-                refreshFamilyData()
+                refreshFamilyData(familyWorkspaceLoads.begin())
                 restoreDeviceData()
                 consumeDeferredActivation()
             }
@@ -792,8 +819,16 @@ class LighthouseViewModel internal constructor(
         _uiState.value = _uiState.value.copy(restoring = false)
     }
 
-    private suspend fun refreshFamilyData() {
-        val households = repository.listHouseholds()
+    private suspend fun refreshFamilyData(scope: FamilyWorkspaceLoadScope) {
+        val householdsResult = familyWorkspaceLoads.load(scope) {
+            repository.listHouseholds()
+        }
+        val households = when (householdsResult) {
+            is FamilyWorkspaceLoadResult.CurrentSuccess -> householdsResult.value
+            is FamilyWorkspaceLoadResult.CurrentFailure -> throw householdsResult.error
+            FamilyWorkspaceLoadResult.Stale -> return
+        }
+        if (!familyWorkspaceLoads.isCurrent(scope)) return
         val previousSelected = _uiState.value.selectedHouseholdId
         val selected = previousSelected
             ?.takeIf { id -> households.any { it.id == id } }
@@ -810,8 +845,9 @@ class LighthouseViewModel internal constructor(
                 householdMembers = emptyList(),
             ).withoutRecipientResources()
         }
-        if (selected != null) loadHouseholdDetails(selected)
-        else {
+        if (selected != null) {
+            loadHouseholdDetails(scope, selected)
+        } else {
             _uiState.value = _uiState.value.copy(
                 recipients = emptyList(),
                 selectedRecipientId = null,
@@ -821,17 +857,28 @@ class LighthouseViewModel internal constructor(
         }
     }
 
-    private suspend fun loadHouseholdDetails(householdId: String) {
-        val details = coroutineScope {
-            val recipientsRequest = async { repository.listRecipients(householdId) }
-            val bindingsRequest = async { repository.listBindings(householdId) }
-            val membersRequest = async { repository.listHouseholdMembers(householdId) }
-            HouseholdDetails(
-                recipients = recipientsRequest.await(),
-                bindings = bindingsRequest.await(),
-                members = membersRequest.await(),
-            )
+    private suspend fun loadHouseholdDetails(
+        scope: FamilyWorkspaceLoadScope,
+        householdId: String,
+    ) {
+        val result = familyWorkspaceLoads.load(scope) {
+            coroutineScope {
+                val recipientsRequest = async { repository.listRecipients(householdId) }
+                val bindingsRequest = async { repository.listBindings(householdId) }
+                val membersRequest = async { repository.listHouseholdMembers(householdId) }
+                HouseholdDetails(
+                    recipients = recipientsRequest.await(),
+                    bindings = bindingsRequest.await(),
+                    members = membersRequest.await(),
+                )
+            }
         }
+        val details = when (result) {
+            is FamilyWorkspaceLoadResult.CurrentSuccess -> result.value
+            is FamilyWorkspaceLoadResult.CurrentFailure -> throw result.error
+            FamilyWorkspaceLoadResult.Stale -> return
+        }
+        if (!familyWorkspaceLoads.isCurrent(scope)) return
         val selectedRecipientId = _uiState.value.selectedRecipientId
             ?.takeIf { id -> details.recipients.any { it.id == id } }
             ?: details.recipients.firstOrNull()?.id
@@ -842,33 +889,49 @@ class LighthouseViewModel internal constructor(
             householdMembers = details.members,
         ).withoutRecipientResources()
         if (selectedRecipientId != null) {
-            loadRecipientResources(householdId, selectedRecipientId)
+            loadRecipientResources(
+                householdId = householdId,
+                recipientId = selectedRecipientId,
+                isResultOwner = { familyWorkspaceLoads.isCurrent(scope) },
+            )
         }
     }
 
-    private suspend fun loadRecipientResources(householdId: String, recipientId: String) {
+    private suspend fun loadRecipientResources(
+        householdId: String,
+        recipientId: String,
+        isResultOwner: () -> Boolean = { true },
+    ) {
         val now = Instant.now()
         val from = now.minus(1, ChronoUnit.DAYS).toString()
         val to = now.plus(7, ChronoUnit.DAYS).toString()
-        val resources = coroutineScope {
-            val memories = async { repository.listMemories(householdId, recipientId) }
-            val routines = async { repository.listRoutines(householdId, recipientId) }
-            val occurrences = async {
-                repository.listOccurrences(householdId, recipientId, from, to)
+        val resources = try {
+            coroutineScope {
+                val memories = async { repository.listMemories(householdId, recipientId) }
+                val routines = async { repository.listRoutines(householdId, recipientId) }
+                val occurrences = async {
+                    repository.listOccurrences(householdId, recipientId, from, to)
+                }
+                val events = async { repository.listCareEvents(householdId, recipientId) }
+                val tasks = async { repository.listFamilyTasks(householdId, recipientId) }
+                val consents = async { repository.listConsents(householdId, recipientId) }
+                FamilyResources(
+                    memories = memories.await(),
+                    routines = routines.await(),
+                    occurrences = occurrences.await(),
+                    careEvents = events.await().take(30),
+                    familyTasks = tasks.await(),
+                    consents = consents.await(),
+                )
             }
-            val events = async { repository.listCareEvents(householdId, recipientId) }
-            val tasks = async { repository.listFamilyTasks(householdId, recipientId) }
-            val consents = async { repository.listConsents(householdId, recipientId) }
-            FamilyResources(
-                memories = memories.await(),
-                routines = routines.await(),
-                occurrences = occurrences.await(),
-                careEvents = events.await().take(30),
-                familyTasks = tasks.await(),
-                consents = consents.await(),
-            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            if (!isResultOwner()) return
+            throw error
         }
         if (
+            !isResultOwner() ||
             _uiState.value.selectedHouseholdId != householdId ||
             _uiState.value.selectedRecipientId != recipientId
         ) return
@@ -964,6 +1027,7 @@ class LighthouseViewModel internal constructor(
         context: DeviceContextView? = null,
         message: String,
     ) {
+        familyWorkspaceLoads.invalidate()
         val previousUserId = _uiState.value.user?.id
         val resolvedContext = context ?: _uiState.value.companionContext
         _uiState.value = LighthouseUiState(
@@ -1107,14 +1171,35 @@ class LighthouseViewModel internal constructor(
         }
     }
 
-    private fun action(block: suspend () -> Unit): Job = viewModelScope.launch {
-        _uiState.value = _uiState.value.copy(busy = true, error = null)
-        runCatching { block() }.onFailure(::handleActionFailure)
-        _uiState.value = _uiState.value.copy(busy = false)
+    private fun action(
+        isResultOwner: () -> Boolean = { true },
+        block: suspend () -> Unit,
+    ): Job = viewModelScope.launch {
+        if (!isResultOwner()) return@launch
+        val busyLease = actionBusyTracker.begin(isResultOwner)
+        publishActionBusy(error = null)
+        try {
+            block()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            if (isResultOwner()) handleActionFailure(error)
+        } finally {
+            actionBusyTracker.end(busyLease)
+            publishActionBusy()
+        }
+    }
+
+    private fun publishActionBusy(error: String? = _uiState.value.error) {
+        _uiState.value = _uiState.value.copy(
+            busy = actionBusyTracker.isBusy(),
+            error = error,
+        )
     }
 
     private fun handleActionFailure(error: Throwable) {
         if (error is LighthouseApiException && error.code == "SIGNED_OUT") {
+            familyWorkspaceLoads.invalidate()
             _uiState.value.user?.id?.let(remoteCallCommands::terminateAllForUser)
             stopBackgroundJobs()
             callCoordinator.disconnectFamily("signed_out")
@@ -1153,7 +1238,7 @@ class LighthouseViewModel internal constructor(
                 (error.requestId?.let { "（请求号 $it）" } ?: "")
             else -> error.message ?: "操作失败，请稍后重试"
         }
-        _uiState.value = _uiState.value.copy(error = message, busy = false)
+        _uiState.value = _uiState.value.copy(error = message)
     }
 
     private fun stopBackgroundJobs() {
