@@ -63,6 +63,12 @@ import {
   startCompanionResources,
 } from "../../realtime/companion-start-lifecycle";
 import {
+  CompanionPollingGate,
+  CompanionRemoteCommandGate,
+  CompanionRemoteMediaCoordinator,
+  CompanionRemoteSessionOwner,
+} from "../../realtime/companion-polling-gate";
+import {
   acceptRemoteWithAuthoritativeHandoff,
   guardActiveCompanionHeartbeat,
   guardCompanionWrite,
@@ -255,8 +261,11 @@ export const CompanionPage = () => {
   const activeCompanionId = useRef("");
   const companionStartLifecycle = useRef(new CompanionStartLifecycle());
   const endingCompanionSessions = useRef(new Map<string, Promise<void>>());
-  const heartbeatRequestSequence = useRef(0);
-  const heartbeatAppliedSequence = useRef(0);
+  const heartbeatPolling = useRef(new CompanionPollingGate());
+  const remoteDiscoveryPolling = useRef(new CompanionPollingGate());
+  const remoteSessionOwner = useRef(new CompanionRemoteSessionOwner());
+  const remoteMedia = useRef(new CompanionRemoteMediaCoordinator());
+  const remoteCommands = useRef(new CompanionRemoteCommandGate());
   const activationExchange = useRef(new ActivationExchangeGate());
   const activationRetryBudget = useRef(new ActivationPollingRetryBudget());
   const activationPollingEpoch = useRef(0);
@@ -273,6 +282,7 @@ export const CompanionPage = () => {
   const stopLocalCompanionRuntime = useCallback(
     (commitStopped: () => void, reason: string) => {
       companionStartLifecycle.current.invalidate();
+      heartbeatPolling.current.invalidate();
       try {
         careExperience.current?.stopLocalRuntime(reason);
       } finally {
@@ -307,25 +317,71 @@ export const CompanionPage = () => {
   );
 
   const sendHeartbeat = useCallback(async () => {
-    const requestSequence = ++heartbeatRequestSequence.current;
     const reportedSessionId = activeCompanionId.current || undefined;
-    const heartbeat = await guardActiveCompanionHeartbeat(
-      deviceSession.heartbeat(reportedSessionId),
-      reportedSessionId,
-      (heartbeatError) => {
-        stopLocalCompanionRuntime(
-          () => {
-            setServerMediaStopped(true);
-            setError(readableError(heartbeatError));
-          },
-          "device_heartbeat_failed",
-        );
-      },
-    );
-    if (requestSequence < heartbeatAppliedSequence.current) return;
-    heartbeatAppliedSequence.current = requestSequence;
-    applyHeartbeat(heartbeat);
+    await heartbeatPolling.current.run(async (isPollingOwner) => {
+      const isHeartbeatOwner = () =>
+        isPollingOwner() &&
+        (activeCompanionId.current || undefined) === reportedSessionId;
+      const heartbeat = await guardActiveCompanionHeartbeat(
+        deviceSession.heartbeat(reportedSessionId),
+        reportedSessionId,
+        (heartbeatError) => {
+          stopLocalCompanionRuntime(
+            () => {
+              setOnline(false);
+              setServerMediaStopped(true);
+              setError(readableError(heartbeatError));
+            },
+            "device_heartbeat_failed",
+          );
+        },
+        isHeartbeatOwner,
+      );
+      if (isHeartbeatOwner()) applyHeartbeat(heartbeat);
+    });
   }, [applyHeartbeat, stopLocalCompanionRuntime]);
+
+  const commitRemoteSession = useCallback(
+    (session: RemoteSessionView | null, invalidateDiscovery = false) => {
+      if (invalidateDiscovery) remoteDiscoveryPolling.current.invalidate();
+      const previousVisibleSessionId =
+        remoteSessionOwner.current.currentVisibleSessionId();
+      const decision = remoteSessionOwner.current.observe(session);
+      if (decision === "stale") return false;
+      const visible = decision === "show" ? session : null;
+      const nextSessionId = visible?.id ?? null;
+      const previousMediaOwner = remoteMedia.current.currentSessionId();
+      const release = remoteMedia.current.releaseExcept(nextSessionId, () =>
+        liveMedia.current.disconnect(),
+      );
+
+      if (previousVisibleSessionId !== nextSessionId) {
+        if (nextSessionId) {
+          setCallStatus("idle");
+          setCallDetail("");
+        } else {
+          setCallStatus(previousMediaOwner ? "disconnected" : "idle");
+          setCallDetail(previousMediaOwner ? "通话已由服务端结束" : "");
+        }
+      }
+
+      if (release.released) {
+        void release.completion.catch((releaseError) => {
+          if (
+            remoteSessionOwner.current.currentVisibleSessionId() ===
+              nextSessionId &&
+            remoteMedia.current.currentSessionId() === null
+          ) {
+            setCallStatus("error");
+            setCallDetail(`旧通话媒体释放失败：${readableError(releaseError)}`);
+          }
+        });
+      }
+      setIncoming(visible);
+      return true;
+    },
+    [],
+  );
 
   const failClosedCompanionWrite = useCallback(
     (writeError: unknown) => {
@@ -378,37 +434,37 @@ export const CompanionPage = () => {
       void sendHeartbeat()
         .catch(() => setOnline(false));
     }, 5_000);
-    return () => window.clearInterval(timer);
+    return () => {
+      heartbeatPolling.current.invalidate();
+      window.clearInterval(timer);
+    };
   }, [activated, sendHeartbeat]);
 
   useEffect(() => {
     if (!activated) return;
     const adapter = new BrowserRemoteSignalAdapter();
     const unsubscribe = adapter.subscribe(({ session }) => {
-      if (session.bindingId === deviceSession.bindingId) setIncoming(session);
+      if (session.bindingId === deviceSession.bindingId) {
+        commitRemoteSession(session, true);
+      }
     });
     return () => {
       unsubscribe();
       adapter.close();
     };
-  }, [activated]);
+  }, [activated, commitRemoteSession]);
 
   useEffect(() => {
     if (!activated) return;
     let cancelled = false;
     const discover = async () => {
       try {
-        const current = await deviceSession.currentRemote();
-        if (cancelled) return;
-        setOnline(true);
-        setIncoming(current);
-        if (!current && callStatus === "connected") {
-          await liveMedia.current.disconnect();
-          if (!cancelled) {
-            setCallStatus("disconnected");
-            setCallDetail("通话已由服务端结束");
-          }
-        }
+        await remoteDiscoveryPolling.current.run(async (isPollingOwner) => {
+          const current = await deviceSession.currentRemote();
+          if (cancelled || !isPollingOwner()) return;
+          setOnline(true);
+          commitRemoteSession(current);
+        });
       } catch (discoverError) {
         if (cancelled) return;
         setOnline(false);
@@ -419,13 +475,15 @@ export const CompanionPage = () => {
     const timer = window.setInterval(() => void discover(), 2_000);
     return () => {
       cancelled = true;
+      remoteDiscoveryPolling.current.invalidate();
       window.clearInterval(timer);
     };
-  }, [activated, callStatus]);
+  }, [activated, commitRemoteSession]);
 
   const endCompanionServerSessionById = useCallback(
     (sessionId: string, reason: string): Promise<void> => {
       if (activeCompanionId.current === sessionId) {
+        heartbeatPolling.current.invalidate();
         activeCompanionId.current = "";
       }
       const existing = endingCompanionSessions.current.get(sessionId);
@@ -456,10 +514,18 @@ export const CompanionPage = () => {
 
   useEffect(() => {
     companionStartLifecycle.current.mount();
+    remoteCommands.current.mount();
     return () => {
       companionStartLifecycle.current.unmount();
+      heartbeatPolling.current.invalidate();
+      remoteDiscoveryPolling.current.invalidate();
+      remoteCommands.current.close();
+      remoteSessionOwner.current.invalidate();
       scannerStream.current?.getTracks().forEach((track) => track.stop());
-      void liveMedia.current.disconnect();
+      const release = remoteMedia.current.releaseAll(() =>
+        liveMedia.current.disconnect(),
+      );
+      void release.completion.catch(() => undefined);
       void stopCompanionServerSession("PAGE_UNMOUNTED").catch(() => undefined);
     };
   }, [stopCompanionServerSession]);
@@ -470,10 +536,14 @@ export const CompanionPage = () => {
         try {
           const { started, model, generation } = await startCompanionResources({
             lifecycle: companionStartLifecycle.current,
-            startCompanion: () => deviceSession.startCompanion(mode),
+            startCompanion: () =>
+              heartbeatPolling.current.pauseWhile(() =>
+                deviceSession.startCompanion(mode),
+              ),
             startModel: (sessionId) => deviceSession.startModel(sessionId),
             endCompanion: endCompanionServerSessionById,
             onSessionAvailable: (sessionId) => {
+              heartbeatPolling.current.invalidate();
               activeCompanionId.current = sessionId;
             },
           });
@@ -814,41 +884,71 @@ export const CompanionPage = () => {
 
   const acceptCall = async () => {
     if (!incoming) return;
+    const command = remoteCommands.current.begin();
+    if (!command) return;
+    const target = incoming;
+    const ownsTarget = () =>
+      command.isCurrent() &&
+      remoteSessionOwner.current.isVisible(target.id);
     setBusy(true);
     setError("");
     let onsiteAccepted = false;
     try {
-      await acceptRemoteWithAuthoritativeHandoff({
-        session: incoming,
-        accept: (sessionId) => deviceSession.acceptRemote(sessionId),
-        stopLocalCompanion: async (authoritative) => {
-          onsiteAccepted = true;
-          // Commit the authoritative state synchronously so CareExperience is
-          // unmounted and releases camera/microphone before LiveKit starts.
-          // The finally-path also commits it if local teardown itself throws,
-          // so the UI can never fall back to a false “still ringing” claim.
-          stopLocalCompanionRuntime(
-            () => setIncoming(authoritative),
-            "remote_assistance_accepted",
-          );
-        },
-        joinMedia: async (authoritative) => {
-          const ticket = await deviceSession.remoteTicket(authoritative.id);
-          await liveMedia.current.connect(
-            ticket,
-            "DEVICE",
-            {
-              localVideo: localVideo.current,
-              remoteAudio: remoteAudio.current,
-            },
-            (status, detail) => {
-              setCallStatus(status);
-              setCallDetail(detail ?? "");
-            },
-          );
-        },
+      remoteDiscoveryPolling.current.invalidate();
+      await remoteDiscoveryPolling.current.pauseWhile(async () => {
+        if (
+          !ownsTarget() ||
+          remoteMedia.current.currentSessionId() === target.id
+        ) {
+          return;
+        }
+        await acceptRemoteWithAuthoritativeHandoff({
+          session: target,
+          accept: (sessionId) => deviceSession.acceptRemote(sessionId),
+          stopLocalCompanion: async (authoritative) => {
+            if (!ownsTarget() || !commitRemoteSession(authoritative)) {
+              throw new Error("来电状态已更新，请重新接听");
+            }
+            onsiteAccepted = true;
+            // Commit the authoritative state synchronously so CareExperience is
+            // unmounted and releases camera/microphone before LiveKit starts.
+            stopLocalCompanionRuntime(
+              () => commitRemoteSession(authoritative),
+              "remote_assistance_accepted",
+            );
+          },
+          joinMedia: async (authoritative) => {
+            if (!ownsTarget()) {
+              throw new Error("来电状态已更新，请重新接听");
+            }
+            const ticket = await deviceSession.remoteTicket(authoritative.id);
+            if (!ownsTarget()) {
+              throw new Error("来电状态已更新，请重新接听");
+            }
+            await remoteMedia.current.connect<LiveMediaStatus>(
+              authoritative.id,
+              ownsTarget,
+              (publish) =>
+                liveMedia.current.connect(
+                  ticket,
+                  "DEVICE",
+                  {
+                    localVideo: localVideo.current,
+                    remoteAudio: remoteAudio.current,
+                  },
+                  publish,
+                ),
+              (status, detail) => {
+                setCallStatus(status);
+                setCallDetail(detail ?? "");
+              },
+              () => liveMedia.current.disconnect(),
+            );
+          },
+        });
       });
     } catch (acceptError) {
+      if (!ownsTarget()) return;
       const message = readableError(acceptError);
       if (onsiteAccepted) {
         setCallStatus("error");
@@ -856,17 +956,33 @@ export const CompanionPage = () => {
       }
       setError(message);
     } finally {
-      setBusy(false);
+      const shouldClearBusy = command.isCurrent();
+      command.finish();
+      if (shouldClearBusy) setBusy(false);
     }
   };
 
   useEffect(() => {
-    if (!incoming || callStatus !== "connected") return;
+    if (
+      !incoming ||
+      callStatus !== "connected" ||
+      remoteMedia.current.currentSessionId() !== incoming.id
+    ) {
+      return;
+    }
+    const sessionId = incoming.id;
     const timer = window.setInterval(
       () =>
         void deviceSession
-          .renewRemoteLease(incoming.id)
-          .catch(() => setCallDetail("媒体租约续期失败，请结束通话后重试")),
+          .renewRemoteLease(sessionId)
+          .catch(() => {
+            if (
+              remoteMedia.current.currentSessionId() === sessionId &&
+              remoteSessionOwner.current.isVisible(sessionId)
+            ) {
+              setCallDetail("媒体租约续期失败，请结束通话后重试");
+            }
+          }),
       20_000,
     );
     return () => window.clearInterval(timer);
@@ -874,30 +990,78 @@ export const CompanionPage = () => {
 
   const declineCall = async () => {
     if (!incoming) return;
+    const command = remoteCommands.current.begin();
+    if (!command) return;
+    const target = incoming;
+    const ownsTarget = () =>
+      command.isCurrent() &&
+      remoteSessionOwner.current.isVisible(target.id);
     setBusy(true);
     try {
-      await deviceSession.declineRemote(incoming.id);
-      setIncoming(null);
-      setCallStatus("idle");
+      remoteDiscoveryPolling.current.invalidate();
+      await remoteDiscoveryPolling.current.pauseWhile(async () => {
+        if (!ownsTarget()) return;
+        const authoritative = await deviceSession.declineRemote(target.id);
+        if (!ownsTarget()) return;
+        commitRemoteSession(authoritative);
+      });
     } catch (declineError) {
-      setError(readableError(declineError));
+      if (ownsTarget()) {
+        setError(readableError(declineError));
+      }
     } finally {
-      setBusy(false);
+      const shouldClearBusy = command.isCurrent();
+      command.finish();
+      if (shouldClearBusy) setBusy(false);
     }
   };
 
   const endCall = async () => {
     if (!incoming) return;
+    const command = remoteCommands.current.begin();
+    if (!command) return;
+    const target = incoming;
+    const ownsTarget = () =>
+      command.isCurrent() &&
+      remoteSessionOwner.current.isVisible(target.id);
     setBusy(true);
     try {
-      await liveMedia.current.disconnect();
-      await deviceSession.endRemote(incoming.id);
-      setIncoming(null);
-      setCallStatus("idle");
+      remoteDiscoveryPolling.current.invalidate();
+      await remoteDiscoveryPolling.current.pauseWhile(async () => {
+        if (!ownsTarget()) return;
+        const release = remoteMedia.current.release(target.id, () =>
+          liveMedia.current.disconnect(),
+        );
+        if (release.released) {
+          setCallStatus("disconnected");
+          setCallDetail("正在结束通话…");
+        }
+        let releaseError: unknown;
+        try {
+          await release.completion;
+        } catch (disconnectError) {
+          releaseError = disconnectError;
+        }
+        const authoritative = await deviceSession.endRemote(target.id);
+        if (!ownsTarget()) return;
+        const committed = commitRemoteSession(authoritative);
+        if (
+          releaseError &&
+          committed &&
+          !remoteSessionOwner.current.isVisible(target.id)
+        ) {
+          setCallStatus("error");
+          setCallDetail(`本地媒体释放失败：${readableError(releaseError)}`);
+        }
+      });
     } catch (endError) {
-      setError(readableError(endError));
+      if (ownsTarget()) {
+        setError(readableError(endError));
+      }
     } finally {
-      setBusy(false);
+      const shouldClearBusy = command.isCurrent();
+      command.finish();
+      if (shouldClearBusy) setBusy(false);
     }
   };
 

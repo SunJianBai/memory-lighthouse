@@ -21,6 +21,11 @@ export type LiveMediaTargets = {
 export class LiveMediaConnection {
   private room: Room | null = null;
 
+  constructor(
+    private readonly createRoom: () => Room = () =>
+      new Room({ adaptiveStream: true, dynacast: true }),
+  ) {}
+
   async connect(
     ticket: RemoteJoinTicketView,
     role: LiveMediaRole,
@@ -29,7 +34,7 @@ export class LiveMediaConnection {
   ): Promise<void> {
     await this.disconnect();
     onStatus("connecting");
-    const room = new Room({ adaptiveStream: true, dynacast: true });
+    const room = this.createRoom();
     this.room = room;
 
     room.on(
@@ -63,7 +68,12 @@ export class LiveMediaConnection {
       }
       onStatus("connected", "LiveKit 媒体已连接，等待服务器 Webhook 确认双方轨道");
     } catch (error) {
-      await this.disconnect();
+      try {
+        await this.disconnect();
+      } catch {
+        // disconnect() has already stopped local tracks and retains the Room so
+        // an owner-scoped cleanup barrier can retry the transport teardown.
+      }
       onStatus("error", error instanceof Error ? error.message : "LiveKit 连接失败");
       throw error;
     }
@@ -71,13 +81,16 @@ export class LiveMediaConnection {
 
   async disconnect(): Promise<void> {
     const room = this.room;
-    this.room = null;
     if (!room) return;
     room.remoteParticipants.forEach((participant: RemoteParticipant) => {
       participant.trackPublications.forEach((publication: RemoteTrackPublication) => publication.track?.detach());
     });
-    room.localParticipant.trackPublications.forEach((publication: LocalTrackPublication) => publication.track?.detach());
+    room.localParticipant.trackPublications.forEach((publication: LocalTrackPublication) => {
+      publication.track?.detach();
+      publication.track?.stop();
+    });
     await room.disconnect();
+    if (this.room === room) this.room = null;
   }
 }
 

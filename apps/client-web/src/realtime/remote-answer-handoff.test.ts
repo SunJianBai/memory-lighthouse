@@ -71,6 +71,50 @@ describe("remote answer handoff", () => {
     );
   });
 
+  it("serializes heartbeat and remote discovery polling behind invalidatable owners", () => {
+    expect(companionPageSource).toMatch(
+      /heartbeatPolling\.current\.run\(/,
+    );
+    expect(companionPageSource).toMatch(
+      /remoteDiscoveryPolling\.current\.run\(/,
+    );
+    expect(
+      companionPageSource.match(
+        /(?:heartbeatPolling|remoteDiscoveryPolling)\.current\.invalidate\(\)/g,
+      )?.length ?? 0,
+    ).toBeGreaterThanOrEqual(4);
+    expect(companionPageSource).toMatch(
+      /heartbeatPolling\.current\.pauseWhile\(\(\) =>\s*deviceSession\.startCompanion/,
+    );
+    expect(
+      companionPageSource.match(
+        /remoteDiscoveryPolling\.current\.pauseWhile\(/g,
+      )?.length ?? 0,
+    ).toBeGreaterThanOrEqual(3);
+    expect(companionPageSource).not.toContain("heartbeatRequestSequence");
+    expect(companionPageSource).not.toContain("heartbeatAppliedSequence");
+    expect(companionPageSource).toContain("CompanionRemoteMediaCoordinator");
+    expect(companionPageSource).toContain("CompanionRemoteCommandGate");
+    expect(companionPageSource).toMatch(
+      /remoteMedia\.current\.releaseExcept\(nextSessionId/,
+    );
+    expect(companionPageSource).toMatch(
+      /await remoteMedia\.current\.connect(?:<[^>]+>)?\(/,
+    );
+    expect(companionPageSource).toMatch(
+      /remoteSessionOwner\.current\.invalidate\(\)/,
+    );
+    expect(companionPageSource).toMatch(/remoteCommands\.current\.close\(\)/);
+    expect(companionPageSource).toMatch(/remoteCommands\.current\.mount\(\)/);
+    expect(companionPageSource).toMatch(
+      /connect(?:<[^>]+>)?\(\s*authoritative\.id,\s*ownsTarget,/,
+    );
+    expect(companionPageSource).not.toContain("remoteMediaOwnerId");
+    expect(companionPageSource).not.toMatch(
+      /releaseAll[\s\S]{0,240}else\s*{\s*void liveMedia\.current\.disconnect/,
+    );
+  });
+
   it("fails closed when an active companion heartbeat cannot authenticate", async () => {
     const rejection = new Error("device credential revoked");
     const stopLocalCompanion = vi.fn();
@@ -95,6 +139,22 @@ describe("remote answer handoff", () => {
         Promise.reject(rejection),
         undefined,
         stopLocalCompanion,
+      ),
+    ).rejects.toBe(rejection);
+
+    expect(stopLocalCompanion).not.toHaveBeenCalled();
+  });
+
+  it("does not stop a replacement session for a stale heartbeat failure", async () => {
+    const rejection = new Error("old session heartbeat failed");
+    const stopLocalCompanion = vi.fn();
+
+    await expect(
+      guardActiveCompanionHeartbeat(
+        Promise.reject(rejection),
+        "old-companion",
+        stopLocalCompanion,
+        () => false,
       ),
     ).rejects.toBe(rejection);
 

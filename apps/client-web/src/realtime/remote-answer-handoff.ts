@@ -34,11 +34,12 @@ export const guardActiveCompanionHeartbeat = async <T>(
   heartbeat: Promise<T>,
   activeCompanionSessionId: string | undefined,
   stopLocalCompanion: (error: unknown) => void,
+  isCurrent: () => boolean = () => true,
 ): Promise<T> => {
   try {
     return await heartbeat;
   } catch (error) {
-    if (activeCompanionSessionId) stopLocalCompanion(error);
+    if (activeCompanionSessionId && isCurrent()) stopLocalCompanion(error);
     throw error;
   }
 };
