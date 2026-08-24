@@ -75,6 +75,9 @@ $apiWorkflow = [System.IO.File]::ReadAllText($apiWorkflowPath)
 $ciWorkflow = [System.IO.File]::ReadAllText(
     (Join-Path $projectRoot '.github/workflows/ci.yml')
 )
+$androidWorkflow = [System.IO.File]::ReadAllText(
+    (Join-Path $projectRoot '.github/workflows/android-release.yml')
+)
 $caddyfile = [System.IO.File]::ReadAllText(
     (Join-Path $projectRoot 'infra/production/caddy/Caddyfile')
 )
@@ -107,6 +110,13 @@ Assert-Contains $ciWorkflow 'scripts/hybrid/test-delivery-static.ps1' 'CI execut
 Assert-Contains $validateStatic 'test-detect-release-changes.sh' 'CI exercises production-baseline reconciliation behavior'
 Assert-Contains $validateStatic 'test-package-api-cache.sh' 'CI proves transient Node caches stay outside API artifacts'
 Assert-Contains $validateStatic 'test-production-deployment-marker.sh' 'CI exercises durable promotion markers'
+
+Assert-Contains $androidWorkflow 'group: android-release-production' 'Android releases share one production concurrency group'
+Assert-NotContains $androidWorkflow 'android-release-${{ github.ref }}' 'Android release tags must not bypass production serialization'
+Assert-Contains $androidWorkflow "'+refs/heads/main:refs/remotes/origin/main'" 'Android release refreshes the authoritative main ref'
+Assert-Contains $androidWorkflow 'git merge-base --is-ancestor' 'Android release only accepts commits already contained in main'
+Assert-Before $androidWorkflow 'Verify tagged commit belongs to main' 'Restore fixed release signing key' 'Android source provenance is proven before signing secrets are restored'
+Assert-Before $androidWorkflow 'Verify tagged commit belongs to main' 'Test, lint, and build signed release APK' 'Android source provenance is proven before release builds'
 
 Assert-Contains $webWorkflow "  plan-web:" 'Web skip planning has a non-production job'
 Assert-Contains $webWorkflow 'needs: plan-web' 'Web production job requires a positive plan'

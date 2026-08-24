@@ -20,8 +20,10 @@ import { AdminAuthenticationApplicationService } from '../src/modules/platform-o
 import { DevelopmentContentInspectionController } from '../src/modules/platform-operations/http/development-content-inspection.controller';
 import { PlatformOperationsController } from '../src/modules/platform-operations/http/platform-operations.controller';
 import { PlatformRoleGuard } from '../src/modules/platform-operations/http/platform-role.guard';
+import { PlatformAuditIpHasher } from '../src/modules/platform-operations/platform-audit-ip-hasher';
 import { PlatformOperationsApplicationService } from '../src/modules/platform-operations/platform-operations.application.service';
 import { PlatformOperationsModule } from '../src/modules/platform-operations/platform-operations.module';
+import { PlatformPromptManagementApplicationService } from '../src/modules/platform-operations/platform-prompt-management.application.service';
 
 describe('production platform HTTP surface (e2e)', () => {
   let app: INestApplication<App>;
@@ -46,6 +48,17 @@ describe('production platform HTTP surface (e2e)', () => {
         {
           provide: PlatformOperationsApplicationService,
           useValue: operations,
+        },
+        {
+          provide: PlatformPromptManagementApplicationService,
+          useValue: {
+            getCurrentCompanionPrompt: jest.fn(),
+            publishCompanionPrompt: jest.fn(),
+          },
+        },
+        {
+          provide: PlatformAuditIpHasher,
+          useValue: { hash: jest.fn(() => 'test-source-ip-hash') },
         },
         {
           provide: IdentityApplicationService,

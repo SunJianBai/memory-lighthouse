@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: android-release-${{ github.ref }}
+  group: android-release-production
   cancel-in-progress: false
 
 jobs:
@@ -24,6 +24,23 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+
+      - name: Verify tagged commit belongs to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          tagged_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          [[ "$(git rev-parse HEAD)" == "$tagged_commit" ]] || {
+            echo '::error::Checked-out source does not match the release tag.'
+            exit 1
+          }
+          git fetch --no-tags origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor \
+            "$tagged_commit" refs/remotes/origin/main || {
+            echo '::error::Android release tag must point to a commit already contained in main.'
+            exit 1
+          }
 
       - name: Set up Java
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
