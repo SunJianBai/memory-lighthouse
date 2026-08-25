@@ -270,18 +270,31 @@ fun LighthouseRoute(
     LaunchedEffect(mediaHandoffState) {
         val stopping = mediaHandoffState as? CompanionMediaHandoffState.StoppingLocalCompanion
             ?: return@LaunchedEffect
-        viewModel.closeAiCompanion()
         when (stopping.reason) {
-            CompanionMediaStopReason.REMOTE_ANSWER -> miniCpmViewModel.stopForRemoteCall(
-                onStopped = { viewModel.completeLocalCompanionStop(stopping.requestId) },
-                onFailure = { error ->
+            CompanionMediaStopReason.REMOTE_ANSWER -> {
+                try {
+                    viewModel.closeAiCompanion()
+                    miniCpmViewModel.stopForRemoteCall(
+                        onStopped = { viewModel.completeLocalCompanionStop(stopping.requestId) },
+                        onFailure = { error ->
+                            viewModel.failLocalCompanionStop(stopping.requestId, error)
+                        },
+                    )
+                } catch (error: Throwable) {
                     viewModel.failLocalCompanionStop(stopping.requestId, error)
-                },
-            )
-            CompanionMediaStopReason.SERVER_DIRECTIVE ->
-                miniCpmViewModel.stopForServerDirective {
-                    viewModel.completeLocalCompanionStop(stopping.requestId)
                 }
+            }
+            CompanionMediaStopReason.SERVER_DIRECTIVE -> {
+                try {
+                    val stoppedCurrent = miniCpmViewModel.stopForServerDirective(stopping.sessionId)
+                    if (stoppedCurrent) {
+                        viewModel.closeAiCompanion()
+                    }
+                    viewModel.completeLocalCompanionStop(stopping.requestId)
+                } catch (error: Throwable) {
+                    viewModel.failLocalCompanionStop(stopping.requestId, error)
+                }
+            }
         }
     }
 

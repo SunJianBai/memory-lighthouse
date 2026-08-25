@@ -6,11 +6,13 @@ import com.sun.minicpmo_android.lighthouse.model.*
 import com.sun.minicpmo_android.lighthouse.network.LighthouseApiException
 import com.sun.minicpmo_android.lighthouse.network.LighthouseHttpClient
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
 import java.util.Locale
 
@@ -41,7 +43,8 @@ class LighthouseRepository(
     private val userRefreshMutex = Mutex()
     private val deviceRefreshMutex = Mutex()
     private val explicitUserSessions = ExplicitUserSessionOwnership()
-    private val activeCompanionSessionId = AtomicReference<String?>(null)
+    private val companionSessionOperationMutex = Mutex()
+    private val companionSessions = CompanionSessionOwnership()
     private val careCommands = CareCommandRetrier(
         persistence = VaultCareCommandPersistence(vault),
         namespace = {
@@ -57,7 +60,7 @@ class LighthouseRepository(
 
     fun hasDeviceCredential(): Boolean = vault.deviceCredential() != null
 
-    fun hasActiveCompanionSession(): Boolean = activeCompanionSessionId.get() != null
+    fun hasActiveCompanionSession(): Boolean = companionSessions.hasActiveSession()
 
     fun pendingDeviceActivation(): PendingDeviceActivation? = vault.pendingDeviceActivation()
 
@@ -691,66 +694,155 @@ class LighthouseRepository(
         requireNotNull(deviceRequest("GET", "device/context")),
     )
 
-    suspend fun heartbeat(): DeviceHeartbeatView {
-        val localActiveSessionId = activeCompanionSessionId.get()
-        val body = JSONObject()
-            .put("appVersion", BuildConfig.VERSION_NAME)
-            .put("osVersion", Build.VERSION.RELEASE)
-        localActiveSessionId?.let { body.put("activeCompanionSessionId", it) }
-        val result = requireNotNull(deviceRequest("POST", "device/heartbeats", body))
-        return DeviceHeartbeatView(
-            online = result.optBoolean("online", false),
-            serverTime = result.getString("serverTime"),
-            mediaDirective = DeviceMediaDirective.valueOf(
-                result.optString("mediaDirective", "CONTINUE"),
-            ),
-            activeCompanionSessionId = result.optNullableString(
-                "activeCompanionSessionId",
-            ),
-            reason = result.optNullableString("reason"),
-        ).also { heartbeat ->
-            if (heartbeat.mediaDirective == DeviceMediaDirective.STOP) {
-                localActiveSessionId?.let(::clearActiveCompanionSession)
+    internal suspend fun heartbeat(): DeviceHeartbeatView = recordCompanionHeartbeat(
+        applyDirective = { _, _ -> },
+        applyActiveFailure = { _ -> },
+    )
+
+    internal suspend fun recordCompanionHeartbeat(
+        applyDirective: suspend (DeviceMediaDirective, String?) -> Unit,
+        applyActiveFailure: suspend (String) -> Unit,
+    ): DeviceHeartbeatView {
+        val outcome = companionSessionOperationMutex.withLock {
+            val ticket = companionSessions.snapshot()
+            val body = JSONObject()
+                .put("appVersion", BuildConfig.VERSION_NAME)
+                .put("osVersion", Build.VERSION.RELEASE)
+            ticket.sessionId?.let { body.put("activeCompanionSessionId", it) }
+            val result = try {
+                requireNotNull(deviceRequest("POST", "device/heartbeats", body))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                val activeSessionId = ticket.sessionId
+                if (activeSessionId != null && companionSessions.isCurrent(ticket)) {
+                    return@withLock CompanionHeartbeatOutcome.ActiveFailure(
+                        ticket = ticket,
+                        companionSessionId = activeSessionId,
+                        error = error,
+                    )
+                }
+                return@withLock CompanionHeartbeatOutcome.Failure(error)
             }
+            val heartbeat = DeviceHeartbeatView(
+                online = result.optBoolean("online", false),
+                serverTime = result.getString("serverTime"),
+                mediaDirective = DeviceMediaDirective.valueOf(
+                    result.optString("mediaDirective", "CONTINUE"),
+                ),
+                activeCompanionSessionId = result.optNullableString(
+                    "activeCompanionSessionId",
+                ),
+                reason = result.optNullableString("reason"),
+            )
+            CompanionHeartbeatOutcome.Success(
+                heartbeat = heartbeat,
+                ticket = ticket,
+                shouldApplyDirective = companionSessions.isCurrent(ticket),
+            )
+        }
+        return when (outcome) {
+            is CompanionHeartbeatOutcome.Success -> {
+                if (outcome.shouldApplyDirective) {
+                    val stop = outcome.heartbeat.mediaDirective == DeviceMediaDirective.STOP
+                    try {
+                        if (stop) {
+                            withContext(NonCancellable) {
+                                applyDirective(
+                                    outcome.heartbeat.mediaDirective,
+                                    outcome.ticket.sessionId,
+                                )
+                            }
+                        } else {
+                            applyDirective(
+                                outcome.heartbeat.mediaDirective,
+                                outcome.ticket.sessionId,
+                            )
+                        }
+                    } finally {
+                        if (stop) companionSessions.clearIfCurrent(outcome.ticket)
+                    }
+                }
+                outcome.heartbeat
+            }
+            is CompanionHeartbeatOutcome.ActiveFailure -> {
+                try {
+                    withContext(NonCancellable) {
+                        applyActiveFailure(outcome.companionSessionId)
+                    }
+                } catch (stopFailure: Throwable) {
+                    if (stopFailure !== outcome.error) outcome.error.addSuppressed(stopFailure)
+                } finally {
+                    companionSessions.clearIfCurrent(outcome.ticket)
+                }
+                throw outcome.error
+            }
+            is CompanionHeartbeatOutcome.Failure -> throw outcome.error
         }
     }
 
-    suspend fun startCompanionModel(mode: String): CompanionModelConnection {
-        val companion = requireNotNull(
-            deviceRequest(
-                "POST",
-                "device/companion-sessions",
-                JSONObject().put("mode", mode),
-                mapOf("Idempotency-Key" to UUID.randomUUID().toString()),
-            ),
-        )
-        val companionSessionId = companion.getJSONObject("session").getString("id")
-        val model = requireNotNull(
-            deviceRequest(
-                "POST",
-                "device/companion-sessions/$companionSessionId/model-sessions",
-                JSONObject(),
-                mapOf("Idempotency-Key" to UUID.randomUUID().toString()),
-            ),
-        )
-        val decisions = model.getJSONObject("consent").getJSONObject("decisions")
-        val prompt = model.getJSONObject("prompt")
-        val careSnapshot = model.optJSONObject("careSnapshot")
-        return CompanionModelConnection(
-            companionSessionId = companionSessionId,
-            modelSessionId = model.getJSONObject("session").getString("id"),
-            realtimeUrl = model.getJSONObject("connection").getString("realtimeUrl"),
-            model = model.getJSONObject("connection").getString("model"),
-            systemPrompt = prompt.getString("content"),
-            userTranscriptionAllowed = decisions.optBoolean(
-                "MODEL_INPUT_TRANSCRIPTION",
-                false,
-            ),
-            promptVersion = prompt.optInt("version").takeIf { it > 0 },
-            memoryCount = careSnapshot?.optJSONArray("memories")?.length(),
-            routineCount = careSnapshot?.optJSONArray("occurrences")?.length(),
-        ).also { activeCompanionSessionId.set(companionSessionId) }
-    }
+    suspend fun startCompanionModel(mode: String): CompanionModelConnection =
+        companionSessionOperationMutex.withLock {
+            val ticket = companionSessions.beginStart()
+            var companionSessionId: String? = null
+            try {
+                val companion = requireNotNull(
+                    deviceRequest(
+                        "POST",
+                        "device/companion-sessions",
+                        JSONObject().put("mode", mode),
+                        mapOf("Idempotency-Key" to UUID.randomUUID().toString()),
+                    ),
+                )
+                companionSessionId = companion.getJSONObject("session").getString("id")
+                if (!companionSessions.isCurrent(ticket)) {
+                    throw CompanionSessionOperationSupersededException()
+                }
+                val model = requireNotNull(
+                    deviceRequest(
+                        "POST",
+                        "device/companion-sessions/$companionSessionId/model-sessions",
+                        JSONObject(),
+                        mapOf("Idempotency-Key" to UUID.randomUUID().toString()),
+                    ),
+                )
+                val decisions = model.getJSONObject("consent").getJSONObject("decisions")
+                val prompt = model.getJSONObject("prompt")
+                val careSnapshot = model.optJSONObject("careSnapshot")
+                val connection = CompanionModelConnection(
+                    companionSessionId = companionSessionId,
+                    modelSessionId = model.getJSONObject("session").getString("id"),
+                    realtimeUrl = model.getJSONObject("connection").getString("realtimeUrl"),
+                    model = model.getJSONObject("connection").getString("model"),
+                    systemPrompt = prompt.getString("content"),
+                    userTranscriptionAllowed = decisions.optBoolean(
+                        "MODEL_INPUT_TRANSCRIPTION",
+                        false,
+                    ),
+                    promptVersion = prompt.optInt("version").takeIf { it > 0 },
+                    memoryCount = careSnapshot?.optJSONArray("memories")?.length(),
+                    routineCount = careSnapshot?.optJSONArray("occurrences")?.length(),
+                )
+                if (!companionSessions.activate(ticket, companionSessionId)) {
+                    throw CompanionSessionOperationSupersededException()
+                }
+                connection
+            } catch (error: Throwable) {
+                companionSessions.cancelStart(ticket)
+                companionSessionId?.let { startedSessionId ->
+                    try {
+                        withContext(NonCancellable) {
+                            withTimeout(COMPANION_START_CLEANUP_TIMEOUT_MILLIS) {
+                                endStartedCompanionSession(startedSessionId, "MODEL_START_FAILED")
+                            }
+                        }
+                    } catch (cleanupFailure: Throwable) {
+                        if (cleanupFailure !== error) error.addSuppressed(cleanupFailure)
+                    }
+                }
+                throw error
+            }
+        }
 
     suspend fun appendModelEvent(
         modelSessionId: String,
@@ -787,23 +879,42 @@ class LighthouseRepository(
     }
 
     suspend fun endCompanionSession(companionSessionId: String, reason: String) {
-        try {
-            deviceRequest(
-                "POST",
-                "device/companion-sessions/$companionSessionId/end",
-                JSONObject().put("reason", reason.take(64)),
-            )
-        } finally {
-            clearActiveCompanionSession(companionSessionId)
+        clearActiveCompanionSession(companionSessionId)
+        companionSessionOperationMutex.withLock {
+            endStartedCompanionSession(companionSessionId, reason)
         }
     }
 
     fun clearActiveCompanionSession(companionSessionId: String) {
-        activeCompanionSessionId.compareAndSet(companionSessionId, null)
+        companionSessions.clearSession(companionSessionId)
     }
 
-    fun clearActiveCompanionSessionTracking() {
-        activeCompanionSessionId.set(null)
+    private suspend fun endStartedCompanionSession(companionSessionId: String, reason: String) {
+        deviceRequest(
+            "POST",
+            "device/companion-sessions/$companionSessionId/end",
+            JSONObject().put("reason", reason.take(64)),
+        )
+    }
+
+    private sealed interface CompanionHeartbeatOutcome {
+        data class Success(
+            val heartbeat: DeviceHeartbeatView,
+            val ticket: CompanionSessionTicket,
+            val shouldApplyDirective: Boolean,
+        ) : CompanionHeartbeatOutcome
+
+        data class ActiveFailure(
+            val ticket: CompanionSessionTicket,
+            val companionSessionId: String,
+            val error: Throwable,
+        ) : CompanionHeartbeatOutcome
+
+        data class Failure(val error: Throwable) : CompanionHeartbeatOutcome
+    }
+
+    private companion object {
+        const val COMPANION_START_CLEANUP_TIMEOUT_MILLIS = 8_000L
     }
 
     suspend fun requestRemoteSession(

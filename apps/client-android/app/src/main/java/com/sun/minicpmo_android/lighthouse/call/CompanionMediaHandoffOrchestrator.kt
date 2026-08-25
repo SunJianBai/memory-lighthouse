@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicLong
 
 enum class CompanionMediaStopReason { REMOTE_ANSWER, SERVER_DIRECTIVE }
@@ -40,7 +41,7 @@ class CompanionMediaHandoffOrchestrator {
     private var localStopConsumers = 0
     private var pendingStop: PendingStop? = null
     @Volatile
-    private var serverStopLatched = false
+    private var serverStopLatchedSessionId: String? = null
 
     fun attachLocalStopConsumer() = synchronized(consumerLock) {
         localStopConsumers += 1
@@ -69,26 +70,30 @@ class CompanionMediaHandoffOrchestrator {
         }
     }
 
-    suspend fun applyMediaDirective(directive: DeviceMediaDirective) {
+    suspend fun applyMediaDirective(
+        directive: DeviceMediaDirective,
+        companionSessionId: String?,
+    ) = operationMutex.withLock {
         if (directive != DeviceMediaDirective.STOP) {
-            serverStopLatched = false
-            return
-        }
-        operationMutex.withLock {
-            if (serverStopLatched) return@withLock
-            try {
-                awaitLocalStop(null, CompanionMediaStopReason.SERVER_DIRECTIVE)
-                serverStopLatched = true
-            } finally {
-                clearPendingStop()
-                _state.value = CompanionMediaHandoffState.Idle
+            if (serverStopLatchedSessionId == companionSessionId) {
+                serverStopLatchedSessionId = null
             }
+            return@withLock
+        }
+        if (companionSessionId == null || serverStopLatchedSessionId == companionSessionId) {
+            return@withLock
+        }
+        try {
+            awaitLocalStop(companionSessionId, CompanionMediaStopReason.SERVER_DIRECTIVE)
+            serverStopLatchedSessionId = companionSessionId
+        } finally {
+            clearPendingStop()
+            _state.value = CompanionMediaHandoffState.Idle
         }
     }
 
-    suspend fun applyHeartbeatFailure(localCompanionActive: Boolean) {
-        if (localCompanionActive) applyMediaDirective(DeviceMediaDirective.STOP)
-    }
+    suspend fun applyHeartbeatFailure(companionSessionId: String) =
+        applyMediaDirective(DeviceMediaDirective.STOP, companionSessionId)
 
     fun completeLocalStop(requestId: Long) = synchronized(consumerLock) {
         pendingStop?.takeIf { it.requestId == requestId }?.completion?.complete(Unit)
@@ -120,7 +125,9 @@ class CompanionMediaHandoffOrchestrator {
             sessionId = sessionId,
             reason = reason,
         )
-        completion?.await()
+        completion?.let {
+            withTimeout(LOCAL_STOP_ACK_TIMEOUT_MILLIS) { it.await() }
+        }
     }
 
     private fun clearPendingStop() = synchronized(consumerLock) {
@@ -131,4 +138,8 @@ class CompanionMediaHandoffOrchestrator {
         val requestId: Long,
         val completion: CompletableDeferred<Unit>,
     )
+
+    private companion object {
+        const val LOCAL_STOP_ACK_TIMEOUT_MILLIS = 6_000L
+    }
 }

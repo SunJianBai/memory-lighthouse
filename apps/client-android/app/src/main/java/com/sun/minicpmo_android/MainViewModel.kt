@@ -161,18 +161,27 @@ class MainViewModel(
         }
     }
 
-    /** A STOP heartbeat means the server session is already non-reusable. */
-    fun stopForServerDirective(onStopped: () -> Unit) {
-        val connection = stopLocalCompanionForHandoff()
-        connection?.let { companionBridge?.acknowledgeServerStop(it) }
-        onStopped()
+    /** A STOP heartbeat only owns the exact model session that sent it. */
+    fun stopForServerDirective(expectedCompanionSessionId: String?): Boolean {
+        val expected = expectedCompanionSessionId ?: return false
+        val connection = stopLocalCompanionForHandoff(expected) ?: return false
+        companionBridge?.acknowledgeServerStop(connection)
+        return true
     }
 
-    private fun stopLocalCompanionForHandoff(): CompanionModelConnection? {
-        pendingChat.set(null)
-        val connection = companionConnection
-        companionConnection = null
-        synchronized(mediaStateLock) {
+    private fun stopLocalCompanionForHandoff(
+        expectedCompanionSessionId: String? = null,
+    ): CompanionModelConnection? {
+        val connection = synchronized(mediaStateLock) {
+            val current = companionConnection
+            if (
+                expectedCompanionSessionId != null &&
+                current?.companionSessionId != expectedCompanionSessionId
+            ) {
+                return@synchronized null
+            }
+            pendingChat.set(null)
+            companionConnection = null
             stoppedByUser = true
             mediaGeneration.incrementAndGet()
             connectionGeneration.incrementAndGet()
@@ -189,7 +198,9 @@ class MainViewModel(
                     effectiveSession = null,
                 )
             }
+            current
         }
+        if (expectedCompanionSessionId != null && connection == null) return null
         latestVideoFrame.set(null)
         audioEngine.stop()
         realtimeClient.close("remote_call")

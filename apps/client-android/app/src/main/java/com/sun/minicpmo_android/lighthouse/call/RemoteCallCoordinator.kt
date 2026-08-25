@@ -4,7 +4,6 @@ import android.content.Context
 import android.telecom.DisconnectCause
 import com.sun.minicpmo_android.lighthouse.data.LighthouseRepository
 import com.sun.minicpmo_android.lighthouse.model.RemoteSessionView
-import com.sun.minicpmo_android.lighthouse.model.DeviceHeartbeatView
 import com.sun.minicpmo_android.lighthouse.network.LighthouseApiException
 import com.sun.minicpmo_android.lighthouse.realtime.CallLifecycleEvent
 import com.sun.minicpmo_android.lighthouse.realtime.CallLifecyclePolicy
@@ -262,22 +261,11 @@ class RemoteCallCoordinator(
         _state.value = _state.value.copy(failureTitle = null, failureMessage = null)
     }
 
-    suspend fun applyDeviceHeartbeat(heartbeat: DeviceHeartbeatView) =
-        mediaHandoff.applyMediaDirective(heartbeat.mediaDirective)
-
     suspend fun recordDeviceHeartbeat() {
-        val localCompanionActive = repository.hasActiveCompanionSession()
-        try {
-            applyDeviceHeartbeat(repository.heartbeat())
-        } catch (error: Throwable) {
-            if (localCompanionActive) {
-                runCatching {
-                    mediaHandoff.applyHeartbeatFailure(localCompanionActive = true)
-                }.exceptionOrNull()?.let(error::addSuppressed)
-                repository.clearActiveCompanionSessionTracking()
-            }
-            throw error
-        }
+        repository.recordCompanionHeartbeat(
+            applyDirective = mediaHandoff::applyMediaDirective,
+            applyActiveFailure = mediaHandoff::applyHeartbeatFailure,
+        )
     }
 
     private suspend fun acceptIncomingAfterLocalStop(
