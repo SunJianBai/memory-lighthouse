@@ -35,7 +35,7 @@ export async function findCurrentCompanionPrompt(
 }
 
 /**
- * Creates the canonical v3 seed once, but never mutates an existing audited
+ * Creates the current canonical seed once, but never mutates an existing audited
  * prompt row. Both companion startup and the admin prompt page use this path,
  * so a fresh database behaves identically whichever endpoint is opened first.
  */

@@ -62,6 +62,10 @@ import {
   DEFAULT_COMPANION_SYSTEM_PROMPT,
 } from './companion-prompt';
 import { ensureCurrentCompanionPrompt } from './companion-prompt.registry';
+import {
+  CompanionLiveContextService,
+  type CompanionLiveContext,
+} from './companion-live-context.service';
 import type {
   AppendModelEventCommand,
   AppendUtteranceCommand,
@@ -136,6 +140,7 @@ export class CompanionSessionApplicationService {
     @Inject(CARE_WORKFLOW_CONTENT_CIPHER)
     private readonly careCipher: CareWorkflowContentCipher,
     private readonly mediaSecurity: RemoteMediaSecurityCoordinator,
+    private readonly liveContext: CompanionLiveContextService,
   ) {}
 
   async getDeviceContext(
@@ -521,6 +526,13 @@ export class CompanionSessionApplicationService {
         companion.id,
         existing.id,
       );
+      const liveContext =
+        persistedPrompt.version >= 4
+          ? await this.liveContext.capture({
+              timezone: binding.recipient.timezone,
+              sessionStartedAt: existing.startedAt,
+            })
+          : undefined;
       return this.modelConnection(
         finalized.model,
         persistedPrompt,
@@ -528,6 +540,7 @@ export class CompanionSessionApplicationService {
         careSnapshot,
         consent,
         companion.mode,
+        liveContext,
       );
     }
 
@@ -605,6 +618,13 @@ export class CompanionSessionApplicationService {
       companion.id,
       created.id,
     );
+    const liveContext =
+      persistedPrompt.version >= 4
+        ? await this.liveContext.capture({
+            timezone: binding.recipient.timezone,
+            sessionStartedAt: created.startedAt,
+          })
+        : undefined;
     return this.modelConnection(
       finalized.model,
       persistedPrompt,
@@ -612,6 +632,7 @@ export class CompanionSessionApplicationService {
       careSnapshot,
       consent,
       companion.mode,
+      liveContext,
     );
   }
 
@@ -1511,6 +1532,7 @@ export class CompanionSessionApplicationService {
     careSnapshot: CareSnapshot,
     consent: ConsentSnapshot,
     mode: string,
+    liveContext: CompanionLiveContext | undefined,
   ): ModelConnectionView {
     const configuration = this.modelConfiguration();
     return {
@@ -1530,6 +1552,7 @@ export class CompanionSessionApplicationService {
           {
             mode,
             consent,
+            liveContext,
           },
         ),
       },

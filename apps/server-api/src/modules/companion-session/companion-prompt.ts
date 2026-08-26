@@ -1,8 +1,9 @@
 import type { CareSnapshot, ConsentSnapshot } from './companion-session.types';
+import type { CompanionLiveContext } from './companion-live-context.service';
 
 // Keep the complete effective prompt below 12k characters for predictable
 // realtime startup latency. Budgets are measured after JSON delimiter escaping.
-export const CURRENT_COMPANION_PROMPT_COMPOSER_VERSION = 3;
+export const CURRENT_COMPANION_PROMPT_COMPOSER_VERSION = 4;
 export const COMPANION_PROMPT_TEMPLATE_MAX_CHARS = 4_000;
 export const DEFAULT_COMPANION_SYSTEM_PROMPT = [
   '你是“守忆灯塔”的陪伴助手。',
@@ -44,6 +45,7 @@ const MAX_CONFIRMATION_QUESTION_CHARS = 240;
 interface EffectivePromptRuntime {
   mode: string;
   consent: ConsentSnapshot;
+  liveContext?: CompanionLiveContext;
 }
 
 interface BoundedList<T> {
@@ -70,15 +72,25 @@ export function composeEffectiveCompanionPrompt(
   if (promptVersion <= 2) return baseTemplate;
 
   // Prompt and composer semantics advance together. Never silently apply the
-  // latest algorithm to an unknown PromptVersion: a future version must add a
-  // new frozen branch while retaining this v3 implementation for replays.
-  if (promptVersion !== CURRENT_COMPANION_PROMPT_COMPOSER_VERSION) {
-    throw new RangeError(
-      `Unsupported companion prompt composer version: ${promptVersion}`,
+  // latest algorithm to a historical PromptVersion; every published version
+  // keeps a frozen branch so active sessions can be replayed safely.
+  if (promptVersion === 3) {
+    return composeEffectiveCompanionPromptV3(
+      baseTemplate,
+      careSnapshot,
+      runtime,
     );
   }
-
-  return composeEffectiveCompanionPromptV3(baseTemplate, careSnapshot, runtime);
+  if (promptVersion === 4) {
+    return composeEffectiveCompanionPromptV4(
+      baseTemplate,
+      careSnapshot,
+      runtime,
+    );
+  }
+  throw new RangeError(
+    `Unsupported companion prompt composer version: ${promptVersion}`,
+  );
 }
 
 export function assertCompanionPromptComposerVersion(
@@ -197,6 +209,24 @@ function composeEffectiveCompanionPromptV3(
     '<care_context encoding="escaped-json">',
     escapeJsonForPrompt(JSON.stringify(context)),
     '</care_context>',
+  ].join('\n');
+}
+
+function composeEffectiveCompanionPromptV4(
+  baseTemplate: string,
+  careSnapshot: CareSnapshot,
+  runtime: EffectivePromptRuntime,
+): string {
+  if (!runtime.liveContext) {
+    throw new RangeError('Companion prompt v4 requires live context');
+  }
+  return [
+    composeEffectiveCompanionPromptV3(baseTemplate, careSnapshot, runtime),
+    '',
+    '下面是服务端生成的实时上下文。回答日期、星期和时间时，只能使用 serverClock；它超过 freshForSeconds 后只能说明这是会话开始时刻，不得猜测当前分钟。回答天气时，AVAILABLE 可直接引用；STALE 只可引用该快照并必须说明更新时间；UNAVAILABLE 必须明确说暂时无法查询。任何状态下都不得根据季节、记忆或常识编造。',
+    '<live_context encoding="escaped-json">',
+    escapeJsonForPrompt(JSON.stringify(runtime.liveContext)),
+    '</live_context>',
   ].join('\n');
 }
 

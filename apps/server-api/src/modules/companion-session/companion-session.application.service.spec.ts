@@ -39,6 +39,28 @@ const binding = {
   },
 };
 
+function liveContextStub() {
+  return {
+    capture: jest.fn(async () => ({
+      schemaVersion: 1 as const,
+      serverClock: {
+        source: 'SERVER' as const,
+        generatedAtUtc: '2026-08-26T02:34:56.000Z',
+        timezone: 'Asia/Shanghai',
+        localDate: '2026-08-26',
+        localTime: '10:34:56',
+        localDateTime: '2026-08-26T10:34:56',
+        weekday: '星期三',
+        freshForSeconds: 300,
+      },
+      weather: {
+        status: 'UNAVAILABLE' as const,
+        reason: 'NOT_CONFIGURED' as const,
+      },
+    })),
+  };
+}
+
 function codeOf(error: unknown): string | undefined {
   if (
     typeof error !== 'object' ||
@@ -93,6 +115,7 @@ function serviceWith(options: {
     leases as unknown as MediaLeasePort,
     careCipher as unknown as CareWorkflowContentCipher,
     mediaSecurity as never,
+    liveContextStub() as never,
   );
 }
 
@@ -151,7 +174,7 @@ function lifecycleHarness(
   const promptA = {
     id: '01J00000000000000000000008',
     code: 'companion-system',
-    version: options.currentPromptVersion ?? 3,
+    version: options.currentPromptVersion ?? 4,
     provider: 'modelbest',
     model: 'openbmb/MiniCPM-o-4_5',
     contentHash: Uint8Array.from([1]),
@@ -449,6 +472,7 @@ function lifecycleHarness(
     hasPendingCleanup: jest.fn(async () => false),
     hasRemoteMediaBarrier: jest.fn(async () => false),
   };
+  const liveContext = liveContextStub();
   const service = new CompanionSessionApplicationService(
     prisma as unknown as PrismaService,
     { get: jest.fn(() => undefined) } as unknown as ConfigService,
@@ -482,6 +506,7 @@ function lifecycleHarness(
       ),
     } as unknown as CareWorkflowContentCipher,
     mediaSecurity as never,
+    liveContext as never,
   );
   const start = () =>
     service.startCompanionSession({
@@ -506,6 +531,7 @@ function lifecycleHarness(
     startModel,
     leases,
     mediaSecurity,
+    liveContext,
     modelSession,
     memory: prisma.memory,
     promptVersion: prisma.promptVersion,
@@ -986,6 +1012,7 @@ describe('CompanionSessionApplicationService media lifecycle', () => {
       content: 'prompt-A',
     });
     expect(replay.prompt.content).not.toContain('新沟通偏好');
+    expect(test.liveContext.capture).not.toHaveBeenCalled();
     expect(test.modelSession.create).not.toHaveBeenCalled();
   });
 
@@ -995,11 +1022,11 @@ describe('CompanionSessionApplicationService media lifecycle', () => {
     const futurePrompt = test.publishPromptB();
 
     await expect(
-      test.startModel(companion.session.id, 'model-unsupported-prompt-v4'),
+      test.startModel(companion.session.id, 'model-unsupported-prompt-v5'),
     ).rejects.toThrow(
       `Unsupported companion prompt composer version: ${futurePrompt.version}`,
     );
-    expect(futurePrompt.version).toBe(4);
+    expect(futurePrompt.version).toBe(5);
     expect(test.modelSession.create).not.toHaveBeenCalled();
   });
 
@@ -1009,10 +1036,10 @@ describe('CompanionSessionApplicationService media lifecycle', () => {
 
     const model = await test.startModel(
       companion.session.id,
-      'model-upgrade-prompt-v3',
+      'model-upgrade-prompt-v4',
     );
 
-    expect(model.prompt.version).toBe(3);
+    expect(model.prompt.version).toBe(4);
     expect(model.prompt.content).toContain(
       '你是“守忆灯塔”的陪伴助手。\n请使用自然、温和、尊重的简体中文。',
     );
@@ -1024,12 +1051,15 @@ describe('CompanionSessionApplicationService media lifecycle', () => {
     expect(test.promptVersion.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         code: 'COMPANION_SYSTEM',
-        version: 3,
+        version: 4,
       }),
     });
     expect(test.storedModelSession()).toMatchObject({
       promptVersionId: model.prompt.id,
     });
+    expect(model.prompt.content).toContain('<live_context');
+    expect(model.prompt.content).toContain('2026-08-26T10:34:56');
+    expect(model.prompt.content).toContain('"status":"UNAVAILABLE"');
   });
 
   it('returns the authorized care snapshot inside the effective prompt without allowing delimiter escape', async () => {
@@ -1074,7 +1104,7 @@ describe('CompanionSessionApplicationService media lifecycle', () => {
 
     expect(model.prompt).toMatchObject({
       code: 'COMPANION_SYSTEM',
-      version: 3,
+      version: 4,
     });
     expect(model.prompt.content).toContain('王奶奶');
     expect(model.prompt.content).toContain('语速慢一些，每次只说一件事。');
@@ -1232,7 +1262,7 @@ describe('CompanionSessionApplicationService media lifecycle', () => {
   it('keeps the effective prompt valid and bounded when authorized care data is large', async () => {
     const longText = '家属提供的详细资料。'.repeat(2_000);
     const test = lifecycleHarness({
-      currentPromptVersion: 3,
+      currentPromptVersion: 4,
       currentPromptContent: '经审核的基础模板。'.repeat(2_000),
       memories: Array.from({ length: 40 }, (_, index) => ({
         id: `memory-${index}`,
