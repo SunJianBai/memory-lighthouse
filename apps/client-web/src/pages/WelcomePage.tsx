@@ -2,6 +2,7 @@ import {
   ArrowRight,
   BellRing,
   Download,
+  Github,
   HeartHandshake,
   ShieldCheck,
   Sparkles,
@@ -35,13 +36,25 @@ export const WelcomePage = () => {
     <main id="main-content" className="welcome-page" tabIndex={-1}>
       <header className="welcome-header">
         <BrandMark />
-        <button
-          className="quiet-button"
-          type="button"
-          onClick={() => navigate(primaryRoute)}
-        >
-          {auth.status === "authenticated" ? "进入家属工作区" : "登录 / 注册"}
-        </button>
+        <div className="welcome-header-actions">
+          <a
+            className="github-source-link"
+            href="https://github.com/SunJianBai/memory-lighthouse"
+            target="_blank"
+            rel="noreferrer"
+            aria-label="在 GitHub 查看守忆灯塔开源项目"
+          >
+            <Github aria-hidden="true" size={20} />
+            <span>开源项目</span>
+          </a>
+          <button
+            className="quiet-button"
+            type="button"
+            onClick={() => navigate(primaryRoute)}
+          >
+            {auth.status === "authenticated" ? "进入家属工作区" : "登录 / 注册"}
+          </button>
+        </div>
       </header>
 
       <section className="welcome-hero" aria-labelledby="welcome-title">
