@@ -120,6 +120,9 @@ function snapshotHarness(rows: ReturnType<typeof careOccurrence>[]) {
     leases as unknown as MediaLeasePort,
     careCipher as unknown as CareWorkflowContentCipher,
     mediaSecurity as never,
+    {
+      capture: jest.fn(),
+    } as never,
   );
   return { service, findOccurrences, careCipher };
 }

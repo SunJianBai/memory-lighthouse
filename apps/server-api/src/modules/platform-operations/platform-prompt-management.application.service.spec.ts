@@ -40,7 +40,7 @@ class PromptPrismaHarness {
   readonly auditLogs: Row[] = [];
   failAuditWrite = false;
 
-  constructor(version = 3, content = '当前提示词') {
+  constructor(version = 4, content = '当前提示词') {
     this.prompts = [
       {
         id: CURRENT_ID,
@@ -111,7 +111,7 @@ class PromptPrismaHarness {
   );
 }
 
-function makeService(version = 3, currentContent = '当前提示词') {
+function makeService(version = 4, currentContent = '当前提示词') {
   const prisma = new PromptPrismaHarness(version, currentContent);
   const encryption = {
     openFields: jest.fn((sealed: Row) => ({
@@ -167,7 +167,7 @@ describe('PlatformPromptManagementApplicationService', () => {
     await expect(service.getCurrentCompanionPrompt()).resolves.toEqual({
       id: CURRENT_ID,
       code: 'COMPANION_SYSTEM',
-      composerVersion: 3,
+      composerVersion: 4,
       provider: 'modelbest',
       model: 'openbmb/MiniCPM-o-4_5',
       content: '当前提示词',
@@ -185,7 +185,7 @@ describe('PlatformPromptManagementApplicationService', () => {
     });
   });
 
-  it('publishes an immutable v3-compatible revision and audit entry atomically', async () => {
+  it('publishes an immutable v4-compatible revision and audit entry atomically', async () => {
     const { prisma, encryption, service } = makeService();
 
     await expect(
@@ -193,20 +193,20 @@ describe('PlatformPromptManagementApplicationService', () => {
     ).resolves.toMatchObject({
       id: NEXT_ID,
       code: `COMPANION_SYSTEM.REVISION.${NEXT_ID}`,
-      composerVersion: 3,
+      composerVersion: 4,
       content: '新的简洁提示词',
       publishedAt: '2026-08-24T08:01:00.000Z',
     });
 
     expect(encryption.sealFields).toHaveBeenCalledWith(
       { content: '新的简洁提示词' },
-      `prompt:${NEXT_ID}:version:3`,
+      `prompt:${NEXT_ID}:version:4`,
     );
     expect(prisma.prompts).toHaveLength(2);
     expect(prisma.prompts[1]).toMatchObject({
       id: NEXT_ID,
       code: `COMPANION_SYSTEM.REVISION.${NEXT_ID}`,
-      version: 3,
+      version: 4,
       provider: 'modelbest',
       model: 'openbmb/MiniCPM-o-4_5',
     });
@@ -293,7 +293,7 @@ describe('PlatformPromptManagementApplicationService', () => {
   });
 
   it('keeps an unknown future composer version blocked', async () => {
-    const { prisma, service } = makeService(4);
+    const { prisma, service } = makeService(5);
 
     await expect(
       service.publishCompanionPrompt(publishCommand()),

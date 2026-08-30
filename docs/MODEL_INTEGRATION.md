@@ -12,6 +12,18 @@ Model               openbmb/MiniCPM-o-4_5
 
 陪伴端使用 Realtime WebSocket。连接参数包含 `duplex=1`、`minicpmo45_native_duplex=1` 和 `autostart=0`；初始化消息提供系统提示、文本/音频模态与参考音。麦克风转为 16 kHz PCM，200ms 一包；摄像头约 1fps 压缩为 JPEG 并与音频共同发送。模型音频以 24 kHz PCM 进入 AudioWorklet 播放队列。
 
+## 实时时间与天气上下文
+
+MiniCPM-o 不内置可信的当前日期、时间或天气。设备建立 `ModelSession` 时，API 会按长者资料中的 IANA 时区生成服务端时间快照，并随系统提示写入只读 `live_context`。模型只能依据该快照回答日期、星期和时间；超过五分钟后必须说明这是会话开始时刻，不能猜当前分钟。
+
+天气通过可选的 Open-Meteo 适配器注入。部署时在 API 环境变量中配置粗粒度城市/区县：
+
+```text
+WEATHER_LOCATION_QUERY=上海市
+```
+
+也可以配置 `WEATHER_LOCATION_LATITUDE`、`WEATHER_LOCATION_LONGITUDE` 和 `WEATHER_LOCATION_NAME`，避免地名歧义。查询结果默认缓存 10 分钟，上游短暂失败时最多使用 30 分钟内的旧快照并明确标为 `STALE`。没有配置、配置无效或上游不可用时，`weather.status` 为 `UNAVAILABLE`，提示词要求模型明确说暂时无法查询，禁止按季节或常识编造。不要把精确家庭住址写入 `WEATHER_LOCATION_QUERY`，因为该值会发送给 Open-Meteo 地理编码接口。
+
 `public/ref_minicpm_signature.wav` 随项目提供本地参考音，来源于工作区 MiniCPM-o Demo 资产。它避免本地模式为取得参考音访问公网。部署或公开分发前仍应确认所用资产的授权范围；也可以在 Provider 配置中换成团队自有、明确授权的声音。
 
 本地启动前验证：
