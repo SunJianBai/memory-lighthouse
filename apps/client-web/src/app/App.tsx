@@ -3,6 +3,7 @@ import type { SensitiveFragmentAction } from "../security/sensitive-fragment";
 import { useAuth } from "../auth/auth-context";
 import { ProductShell } from "../components/ProductShell";
 import { WelcomePage } from "../pages/WelcomePage";
+import { GuidePage } from "../pages/GuidePage";
 import { AccountSettingsPage } from "../pages/product/AccountSettingsPage";
 import { AuthPage } from "../pages/product/AuthPage";
 import { InvitationAcceptPage } from "../pages/product/InvitationAcceptPage";
@@ -60,7 +61,7 @@ const productMeta: Partial<
     description: "管理长者的隐私授权。",
   },
   "workspace-remote": {
-    title: "远程关怀通话",
+    title: "远程通话",
     description: "呼叫陪伴设备并进行实时对话。",
   },
   "workspace-settings": {
@@ -122,6 +123,7 @@ export const App = ({
   }, [route]);
 
   if (route === "home") return <WelcomePage />;
+  if (route === "guide") return <GuidePage />;
 
   const sensitiveToken = sensitiveAction?.token;
   if (route === "verify-email" && auth.status === "bootstrapping")

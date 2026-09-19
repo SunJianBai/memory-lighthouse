@@ -569,7 +569,7 @@ export const RemoteCallPage = () => {
     return (
       <section className="empty-resource-state">
         <PhoneCall aria-hidden="true" size={34} />
-        <h2>没有可呼叫的陪伴设备</h2>
+        <h2>无可用陪伴设备</h2>
         <p>先在“陪伴设备”中为当前长者完成激活，并确保设备在线。</p>
       </section>
     );
@@ -625,7 +625,7 @@ export const RemoteCallPage = () => {
         <div className="panel-heading">
           <div>
             <p className="eyebrow">现场接听</p>
-            <h2>远程关怀通话</h2>
+            <h2>远程通话</h2>
           </div>
           <PhoneCall aria-hidden="true" size={25} />
         </div>

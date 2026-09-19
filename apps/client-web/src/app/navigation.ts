@@ -1,5 +1,6 @@
 export type ProductRoute =
   | "home"
+  | "guide"
   | "login"
   | "register"
   | "forgot-password"
@@ -19,6 +20,7 @@ export type ClientRoute = ProductRoute;
 
 const paths: Record<ClientRoute, string> = {
   home: "",
+  guide: "guide",
   login: "login",
   register: "register",
   "forgot-password": "forgot-password",

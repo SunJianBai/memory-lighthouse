@@ -291,7 +291,7 @@ export const DevicesPage = () => {
         <div className="panel-heading"><div><p className="eyebrow">设备激活</p><h2>添加陪伴设备</h2></div><QrCode aria-hidden="true" size={25} /></div>
         {!displayedChallenge ? (
           <div className="activation-intro">
-            <p>让陪伴设备扫码或输入动态码，然后在这里确认。</p>
+            <p>在陪伴设备上扫描二维码或输入动态码，然后在此确认绑定。</p>
             <button className="primary-button" type="button" disabled={busy || !workspace.recipientId} onClick={() => void createChallenge()}>{busy ? "正在生成…" : "生成激活二维码与动态码"}</button>
           </div>
         ) : (

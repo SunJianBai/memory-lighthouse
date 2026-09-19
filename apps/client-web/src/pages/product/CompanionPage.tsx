@@ -1,5 +1,6 @@
 import {
   ArrowLeft,
+  BookOpenText,
   Camera,
   CheckCircle2,
   CircleStop,
@@ -29,7 +30,7 @@ import type {
   DeviceContextView,
   RemoteSessionView,
 } from "../../api/types";
-import { navigate } from "../../app/navigation";
+import { hrefFor, navigate } from "../../app/navigation";
 import { useAuth } from "../../auth/auth-context";
 import { BrandMark } from "../../components/BrandMark";
 import {
@@ -1139,6 +1140,7 @@ export const CompanionPage = () => {
           </button>
         </div>
         <div className="companion-account">
+          <a className="companion-help-link" href={hrefFor("guide")} target="_blank" rel="noopener noreferrer" aria-label="使用指南（在新标签页打开，不中断陪伴）"><BookOpenText aria-hidden="true" size={18} />使用指南</a>
           <span>
             {online ? (
               <Wifi aria-hidden="true" size={18} />
@@ -1158,7 +1160,7 @@ export const CompanionPage = () => {
               <ShieldCheck aria-hidden="true" size={32} />
             </span>
             <p className="eyebrow">首次使用</p>
-            <h1>把此浏览器激活为陪伴设备</h1>
+            <h1>陪伴设备激活</h1>
             <p>扫描家属端二维码以激活此设备。</p>
             <ol>
               <li>扫码或输入动态码</li>
@@ -1290,9 +1292,9 @@ export const CompanionPage = () => {
             <PhoneCall aria-hidden="true" size={42} />
           </div>
           <p className="eyebrow">家庭成员来电</p>
-          <h1>{context?.recipient.preferredName}，家人想和你说话</h1>
+          <h1>家属来电</h1>
           <p>
-            接听后将开启摄像头和麦克风。本次通话不会录制。
+            {context?.recipient.preferredName}，接听后将开启摄像头和麦克风。本次通话不会录制。
           </p>
           <div
             className={`device-call-media ${

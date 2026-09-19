@@ -237,7 +237,7 @@ export const MemoriesApiPage = () => {
   };
 
   if (!recipientId) {
-    return <EmptyMemory title="尚未选择陪伴对象" copy="请先在家庭概览中添加并选择一位陪伴对象。" />;
+    return <EmptyMemory title="未选择陪伴对象" copy="请先在家庭概览中添加并选择一位陪伴对象。" />;
   }
 
   return (
@@ -287,7 +287,7 @@ export const MemoriesApiPage = () => {
       {loading ? (
         <div className="resource-skeleton" aria-label="正在加载记忆"><span /><span /><span /></div>
       ) : items.length === 0 ? (
-        <EmptyMemory title="还没有记忆" copy="点击新增开始记录。" />
+        <EmptyMemory title="暂无记忆" copy="点击新增开始记录。" />
       ) : (
         <section className="memory-api-grid" aria-label="记忆列表">
           {items.map((memory) => (

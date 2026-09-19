@@ -103,6 +103,7 @@ import java.time.format.DateTimeFormatter
 import java.util.TimeZone
 
 internal class FamilyUiActions(
+    val loadTodayCare: suspend (String, String) -> com.sun.minicpmo_android.lighthouse.model.TodayCareView,
     val requestEmailVerification: (String?, String?) -> Unit,
     val confirmEmailVerification: (String, String) -> Unit,
     val dismissEmailVerificationPrompt: () -> Unit,
@@ -235,6 +236,8 @@ internal fun FamilyManagementContent(
                     onCreateActivation = actions.createActivation,
                     onRequestCall = actions.requestCall,
                     onRevokeBinding = { bindingRevoke = it },
+                    loadTodayCare = actions.loadTodayCare,
+                    onOpenCare = { section = FamilySection.CARE },
                 )
                 FamilySection.MEMORIES -> MemoriesSection(
                     state = state,
@@ -579,6 +582,8 @@ private fun WorkspaceContextRow(
 @Composable
 private fun OverviewSection(
     state: LighthouseUiState,
+    loadTodayCare: suspend (String, String) -> com.sun.minicpmo_android.lighthouse.model.TodayCareView,
+    onOpenCare: () -> Unit,
     onRequestEmailVerification: () -> Unit,
     onAddHousehold: () -> Unit,
     onAddRecipient: () -> Unit,
@@ -649,6 +654,15 @@ private fun OverviewSection(
                                 )
                             }
                         }
+                    }
+                    item {
+                        TodayCareCard(
+                            householdId = state.selectedHouseholdId.orEmpty(),
+                            recipientId = recipient.id,
+                            userId = state.user?.id.orEmpty(),
+                            load = loadTodayCare,
+                            onOpenCare = onOpenCare,
+                        )
                     }
                     item {
                         SectionHeading("陪伴设备", Icons.Rounded.Devices)

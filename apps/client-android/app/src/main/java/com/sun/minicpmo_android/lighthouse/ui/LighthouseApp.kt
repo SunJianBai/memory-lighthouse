@@ -168,6 +168,7 @@ fun LighthouseRoute(
     val remoteHandoffInProgress = mediaHandoffState !is CompanionMediaHandoffState.Idle
     val familyActions = remember(viewModel) {
         FamilyUiActions(
+            loadTodayCare = viewModel::loadTodayCare,
             requestEmailVerification = viewModel::requestEmailVerification,
             confirmEmailVerification = viewModel::confirmEmailVerification,
             dismissEmailVerificationPrompt = viewModel::dismissEmailVerificationPrompt,

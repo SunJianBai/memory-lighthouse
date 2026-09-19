@@ -16,6 +16,7 @@ describe("family session route boundary", () => {
 
   it("does not put public or companion routes behind family authentication", () => {
     expect(requiresFamilySession("home")).toBe(false);
+    expect(requiresFamilySession("guide")).toBe(false);
     expect(requiresFamilySession("companion")).toBe(false);
   });
 

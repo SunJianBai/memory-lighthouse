@@ -360,6 +360,9 @@ class LighthouseViewModel internal constructor(
         }
     }
 
+    suspend fun loadTodayCare(householdId: String, recipientId: String): TodayCareView =
+        repository.todayCare(householdId, recipientId)
+
     fun selectHousehold(householdId: String): Job {
         familyOperations.updateSelection(householdId, null)
         val scope = familyWorkspaceLoads.begin()

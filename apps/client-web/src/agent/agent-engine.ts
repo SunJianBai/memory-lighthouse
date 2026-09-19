@@ -4,7 +4,7 @@ export const createInitialAgentState = (at = new Date().toISOString()): AgentSta
   phase: "idle",
   reminderCount: 0,
   lastTransitionAt: at,
-  message: "守忆灯塔已待命",
+  message: "陪伴助手已就绪",
 });
 
 export const transitionAgent = (
@@ -25,7 +25,7 @@ export const transitionAgent = (
         activeRoutineId: action.routineId,
         reminderCount: state.reminderCount,
         lastTransitionAt: action.at,
-        message: "既定日程已到，准备进行温和提醒",
+        message: "日程时间已到，等待开始提醒",
       };
     case "REMINDER_DELIVERED":
       if (!state.activeRoutineId) return state;

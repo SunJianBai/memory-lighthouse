@@ -35,7 +35,7 @@ type AuthPageProps = {
 };
 
 const modeCopy: Record<AuthMode, { title: string; description: string }> = {
-  login: { title: "欢迎回来", description: "登录守忆灯塔。" },
+  login: { title: "登录账号", description: "使用邮箱或用户名登录。" },
   register: { title: "创建守忆灯塔账号", description: "注册后输入邮件中的 6 位验证码，即可完成邮箱验证。" },
   "forgot-password": { title: "重置密码", description: "输入邮箱或用户名，我们会发送一次性重置链接。" },
   "reset-password": { title: "设置新密码", description: "此链接只能使用一次；提交后其他会话将失效。" },
@@ -201,7 +201,7 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
         </button>
         <div>
           <p className="eyebrow">守忆灯塔</p>
-          <h1>登录后管理家人和陪伴设备。</h1>
+          <h1>家属端</h1>
         </div>
         <ul>
           <li><ShieldCheck aria-hidden="true" size={20} /> 管理家庭与长者资料</li>

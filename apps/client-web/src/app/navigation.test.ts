@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { resolveRoute } from "./navigation";
 
 describe("client navigation", () => {
+  it("exposes the guide as a public route", () => {
+    expect(resolveRoute("/openBMB/guide", "/openBMB/")).toEqual({
+      route: "guide",
+    });
+  });
+
   it("resolves the current authenticated memory workspace", () => {
     expect(resolveRoute("/openBMB/app/memories", "/openBMB/")).toEqual({
       route: "workspace-memories",

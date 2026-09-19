@@ -34,7 +34,7 @@ export const InvitationAcceptPage = ({ token }: { token?: string }) => {
   return (
     <section className="center-state-card">
       <span className="state-illustration"><MailCheck aria-hidden="true" size={35} /></span>
-      <h2>{accepted ? "已加入家庭" : "接受家庭邀请"}</h2>
+      <h2>家庭邀请</h2>
       <p>{accepted ? "你已加入该家庭。" : "接受后，你将加入该家庭。"}</p>
       {error && <div className="form-message error" role="alert">{error}</div>}
       {accepted ? (

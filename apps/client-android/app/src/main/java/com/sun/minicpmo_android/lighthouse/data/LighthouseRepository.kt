@@ -322,6 +322,11 @@ class LighthouseRepository(
         )
     }
 
+    suspend fun todayCare(householdId: String, recipientId: String): TodayCareView =
+        TodayCareView.fromJson(requireNotNull(userRequest(
+            "GET", "households/$householdId/care-recipients/$recipientId/today-care",
+        )))
+
     suspend fun listRoutines(householdId: String, recipientId: String): List<RoutineView> =
         FamilyJsonMapper.parseArray(
             userRequest("GET", FamilyApiContract.routinesPath(householdId, recipientId)),

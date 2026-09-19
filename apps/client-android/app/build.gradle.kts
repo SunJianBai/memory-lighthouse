@@ -42,6 +42,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Opt-in emulator test install; never replace a release-signed app or its data.
+            if (providers.gradleProperty("isolatedTestApp").orNull == "true") {
+                applicationIdSuffix = ".iterationtest"
+                versionNameSuffix = "-iteration"
+            }
+        }
         release {
             signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false

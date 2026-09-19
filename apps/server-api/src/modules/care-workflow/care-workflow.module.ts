@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { TodayCareController } from './http/today-care.controller';
+import { TodayCareService } from './today-care.service';
 
 import { PrismaModule } from '../../infrastructure/database/prisma.module';
 import { DeviceActivationModule } from '../device-activation/device-activation.module';
@@ -27,12 +29,14 @@ import { SystemCareWorkflowClock } from './ports/care-workflow-clock.port';
     HouseholdModule,
   ],
   controllers: [
+    TodayCareController,
     RoutinesController,
     OccurrencesController,
     DeviceOccurrencesController,
     FamilyTasksController,
   ],
   providers: [
+    TodayCareService,
     SystemCareWorkflowClock,
     { provide: CARE_WORKFLOW_CLOCK, useExisting: SystemCareWorkflowClock },
     AesGcmContentCipherAdapter,

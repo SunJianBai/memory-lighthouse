@@ -4,10 +4,11 @@ import {
   Download,
   Github,
   HeartHandshake,
+  BookOpenText,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
-import { navigate } from "../app/navigation";
+import { hrefFor, navigate } from "../app/navigation";
 import { useAuth } from "../auth/auth-context";
 import { BrandMark } from "../components/BrandMark";
 
@@ -38,6 +39,13 @@ export const WelcomePage = () => {
         <BrandMark />
         <div className="welcome-header-actions">
           <a
+            className="quiet-button"
+            href={hrefFor("guide")}
+          >
+            <BookOpenText aria-hidden="true" size={19} />
+            使用指南
+          </a>
+          <a
             className="github-source-link"
             href="https://github.com/SunJianBai/memory-lighthouse"
             target="_blank"
@@ -63,12 +71,9 @@ export const WelcomePage = () => {
             <Sparkles aria-hidden="true" size={18} />
             MiniCPM-o 4.5 全双工全模态应用
           </span>
-          <h1 id="welcome-title">
-            记得住生活细节，
-            <span>也懂得何时轻声提醒。</span>
-          </h1>
+          <h1 id="welcome-title">守忆灯塔</h1>
           <p>
-            记录生活、按时提醒，让家人随时了解陪伴情况。
+            长者陪伴、记忆档案、日程提醒和家庭远程通话。
           </p>
           <div className="hero-actions">
             <button
@@ -115,9 +120,9 @@ export const WelcomePage = () => {
             <div className="beacon-pulse">
               <BellRing aria-hidden="true" size={36} />
             </div>
-            <span>正在温和守候</span>
-            <strong>准备开始今天的陪伴</strong>
-            <p>登录家属工作区，或激活陪伴设备</p>
+            <span>陪伴设备</span>
+            <strong>设备尚未激活</strong>
+            <p>登录家属工作区进行配置，或激活此设备</p>
           </div>
           <div className="floating-note note-top">
             <span className="status-dot green" />
@@ -132,8 +137,8 @@ export const WelcomePage = () => {
 
       <section className="role-section" aria-labelledby="role-title">
         <div className="section-heading">
-          <p className="eyebrow">选择体验入口</p>
-          <h2 id="role-title">选择使用方式</h2>
+          <p className="eyebrow">产品入口</p>
+          <h2 id="role-title">选择使用端</h2>
         </div>
         <div className="role-grid">
           {roleCards.map((card) => {

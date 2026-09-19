@@ -508,7 +508,7 @@ export const RoutinesApiPage = () => {
     return (
       <section className="empty-resource-state">
         <CalendarClock aria-hidden="true" size={34} />
-        <h2>尚未选择陪伴对象</h2>
+        <h2>未选择陪伴对象</h2>
         <p>请先创建并选择一位长者。</p>
       </section>
     );
@@ -681,7 +681,7 @@ export const RoutinesApiPage = () => {
           <div className="panel-heading">
             <div>
               <p className="eyebrow">待办</p>
-              <h2>需要家属处理</h2>
+              <h2>家庭待办</h2>
             </div>
             <span className="count-badge attention">{openTasks.length}</span>
           </div>

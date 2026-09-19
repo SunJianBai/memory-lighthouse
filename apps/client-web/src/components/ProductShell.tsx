@@ -2,6 +2,7 @@ import {
   Bell,
   BellRing,
   BookHeart,
+  BookOpenText,
   CalendarDays,
   ChevronDown,
   CircleAlert,
@@ -130,6 +131,7 @@ export const ProductShell = ({
             );
           })}
         </nav>
+        <a className="product-help-link" href={hrefFor("guide")}><BookOpenText aria-hidden="true" size={19} />使用指南</a>
         <details className="authority-note">
           <summary><ShieldCheck aria-hidden="true" size={19} /> 权限说明</summary>
           <p>功能权限由家庭所有者管理。</p>
@@ -281,6 +283,7 @@ export const ProductShell = ({
                   </a>
                 );
               })}
+              <a href={hrefFor("guide")}><BookOpenText aria-hidden="true" size={19} /> 使用指南</a>
             </div>
           </details>
         </nav>

@@ -1,3 +1,4 @@
+import { TodayCareCard } from "../../components/TodayCareCard";
 import {
   BookHeart,
   CalendarCheck,
@@ -109,7 +110,7 @@ export const OverviewPage = () => {
       <section className="setup-callout warning">
         <ShieldCheck aria-hidden="true" size={28} />
         <div>
-          <h2>先完成邮箱验证</h2>
+          <h2>邮箱验证</h2>
           <p>验证邮箱后即可创建家庭和添加设备。</p>
           <button className="primary-button" type="button" onClick={() => navigate("workspace-settings")}>前往账号设置</button>
         </div>
@@ -176,6 +177,8 @@ export const OverviewPage = () => {
         <span className="status-pill success"><ShieldCheck aria-hidden="true" size={17} /> 配置正常</span>
       </section>
 
+      <TodayCareCard key={`${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}`} householdId={workspace.householdId} recipientId={workspace.recipientId} />
+
       <section className="metric-grid" aria-label="家庭配置摘要">
         <article><small>家庭角色</small><strong>{workspace.household?.roleCodes.join(" / ")}</strong><p>由成员关系决定</p></article>
         <article><small>陪伴对象</small><strong>{workspace.recipients.length}</strong><p>当前家庭内</p></article>
@@ -183,7 +186,7 @@ export const OverviewPage = () => {
       </section>
 
       <section className="quick-action-grid" aria-labelledby="quick-actions-title">
-        <div className="section-heading span-full"><p className="eyebrow">下一步</p><h2 id="quick-actions-title">完成陪伴配置</h2></div>
+        <div className="section-heading span-full"><p className="eyebrow">常用功能</p><h2 id="quick-actions-title">快捷操作</h2></div>
         {quickActions.map((action) => {
           const Icon = action.icon;
           return (

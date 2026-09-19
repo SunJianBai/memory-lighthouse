@@ -361,7 +361,7 @@ export const PrivacyPage = () => {
       </section>
 
       {!workspace.recipientId ? (
-        <section className="empty-resource-state"><ShieldCheck aria-hidden="true" size={34} /><h2>尚未选择陪伴对象</h2><p>请先选择要管理的长者。</p></section>
+        <section className="empty-resource-state"><ShieldCheck aria-hidden="true" size={34} /><h2>未选择陪伴对象</h2><p>请先选择要管理的长者。</p></section>
       ) : (
         <>
           {error && <div className="inline-alert danger" role="alert"><span>{error}</span><button type="button" onClick={() => void load()}>重试</button></div>}
