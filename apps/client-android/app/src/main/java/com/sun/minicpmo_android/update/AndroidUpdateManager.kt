@@ -167,8 +167,7 @@ class AndroidUpdateManager(private val activity: Activity) {
 
     fun close() {
         scope.cancel()
-        client.dispatcher.executorService.shutdown()
-        client.connectionPool.evictAll()
+        closeUpdateHttpClient(client)
     }
 
     private fun downloadAndVerify(release: AndroidReleaseInfo): File {
