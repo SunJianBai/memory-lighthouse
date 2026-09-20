@@ -10,12 +10,12 @@
 | 002 | 家庭待办协作 | 三端验收及双轴审查完成，本地提交 81416b2、b4b8390 | [需求与验收](002-task-collaboration.md) · [调研](002-task-collaboration-research.md) |
 | 003 | 提醒周期与日期范围 | 三端验收及双轴审查完成，本地提交 e45d1ca、3e8da32 | [需求与验收](003-routine-schedules.md) · [调研](003-routine-schedules-research.md) |
 | 004 | 陪伴启动检查 | 三端实现与双轴审查完成，本地提交 81531c5、64be4c4；模拟器回归批次异常见验收记录 | [需求与验收](004-companion-readiness.md) · [调研](004-companion-readiness-research.md) |
-| 005 | 设备激活结果与恢复 | Web 修复及三端验证完成；待双轴审查，窄屏工具限制见记录 | [需求与验收](005-activation-recovery.md) · [调研](005-activation-recovery-research.md) |
+| 005 | 设备激活结果与恢复 | 三端验证及双轴审查完成，提交 4452c25、ddb471e；陪伴页 375px 追加验证通过，其余限制见记录 | [需求与验收](005-activation-recovery.md) · [调研](005-activation-recovery-research.md) |
+| 006 | 家庭待办释放与交接恢复 | 官方调研完成，OWNER 回收权限待产品确认；尚未实施 | [候选调研](006-task-handoff-research.md) |
 
 ## 后续候选
 
 - 历史任务的负责人交接与成员退出后的处理。
 - 日程周视图或更复杂的重复规则；单次与指定星期已在 003 实现。
-- 设备激活结果与恢复：已激活页面仍残留激活终态错误的现象待定位，优先进入 005 调研。
 
 候选必须在对应轮次重新核对用户价值、现有实现和竞品证据后确定，不代表全部承诺实现。

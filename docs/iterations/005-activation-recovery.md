@@ -52,11 +52,12 @@
 - Android：强制重新执行 `testDebugUnitTest --rerun-tasks -PisolatedTestApp=true`，48 个 XML 套件、249 项、0 失败/错误/跳过。新增真实 Keystore/Repository/Activity 测试：使用本地 API 完成激活，在 Activity 启动前保留该测试的旧 pending，确认恢复后清理 pending、家属会话为空、绑定不变；重建 Activity 后仍保持设备模式。模拟器最终 1 项通过、0 跳过；只改测试，不改已正确的生产恢复流程。
 - Android 首次失败原因：测试在现存 ViewModel 之后注入 pending，再调用 `ActivityScenario.recreate()`，错误地期待启动恢复重跑；Activity 重建会保留 ViewModel，并非进程重启。将残留句柄放到真实 Activity 首次启动前，保留重建后的绑定校验，不增加等待时间。失败 XML 和成功 XML 位于忽略目录 `tmp/iteration005-qa/`；已看过 `activation-recovered-app.png`，完整设备截图显示专用陪伴模式和恢复消息。
 - Web 实际截图为 1280px，主按钮约 133×46px，无横向溢出。浏览器视口能力两次设置 375px 均返回成功但 DOM 仍报告 1280px，新测试标签也未生效；已撤销覆盖，不把这些截图称为窄屏通过。375px/横屏/深色/最大字体尚未在本轮完成真实浏览器验证。没有为了截图改动应用 DOM 或绕开工具。
+- 复审补丁后的追加检查：刷新后的陪伴页实际 DOM 报告 `innerWidth=375`、`clientWidth=scrollWidth=360`（含滚动条宽度差）；已查看完整上下两部分截图，卡片与按钮不重叠、无横向溢出，“开始陪伴”按钮约 297×64px。绑定仍为 `47JTYP`、在线、无错误提示，未开启媒体。补齐的是陪伴页 375px 验证；前面的工具未立即生效记录仍保留，家属激活页 375px、横屏、深色、最大字体仍未在本轮验证。结束后再次撤销临时视口覆盖。
 - Vite 生产构建通过；仍有原有约 530KB 的 LiveKit 媒体分包警告，未调整警告阈值。
 
 ## 7. 双轴审查及收尾
 
-审查固定范围为 `git diff d1948c7...4452c25`，实现提交 `4452c25`。独立规范审查与需求审查分开进行，修复后再次复审；没有推送或部署。
+审查固定范围为 `git diff d1948c7...4452c25`，实现提交 `4452c25`，复审修复提交 `ddb471e`。独立规范审查与需求审查分开进行，修复后再次复审；没有推送或部署。
 
 ### Standards
 
