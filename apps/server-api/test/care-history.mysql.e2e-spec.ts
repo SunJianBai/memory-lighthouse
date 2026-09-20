@@ -1,8 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import request from 'supertest';
-import { ulid } from 'ulid';
-import { CARE_WORKFLOW_CONTENT_CIPHER } from '../src/modules/care-workflow/care-workflow.constants';
-import type { CareWorkflowContentCipher } from '../src/modules/care-workflow/ports/content-cipher.port';
+import { seedCareHistory } from './support/care-history-fixture';
 import { createTodayCareHarness } from './support/today-care-harness';
 
 const describeMySql = process.env.TODAY_CARE_MYSQL_TEST_URL
@@ -13,7 +11,7 @@ describeMySql(
   'care history: actual MySQL pagination and authenticated HTTP',
   () => {
     let fixture: Awaited<ReturnType<typeof createTodayCareHarness>>;
-    const eventIds: string[] = [];
+    let eventIds: string[];
     let oldOccurrenceId: string;
     const dates = { startDate: '2026-09-01', endDate: '2026-09-01' };
     const path = (kind: string, recipient = fixture.recipientId) =>
@@ -31,52 +29,7 @@ describeMySql(
 
     beforeAll(async () => {
       fixture = await createTodayCareHarness();
-      const cipher = fixture.app.get<CareWorkflowContentCipher>(
-        CARE_WORKFLOW_CONTENT_CIPHER,
-      );
-      // All rows have the same instant: IDs must provide the stable tie breaker.
-      for (let index = 0; index < 67; index++) {
-        const id = ulid();
-        const content = cipher.encrypt(
-          JSON.stringify([`历史记录 ${index + 1}`, '隔离测试记录']),
-        );
-        if (index < 65) eventIds.push(id);
-        await fixture.db.careEvent.create({
-          data: {
-            id,
-            householdId: fixture.householdId,
-            recipientId: fixture.recipientId,
-            type: 'ROUTINE_CONFIRMED',
-            severity: 'INFO',
-            sourceType: 'FAMILY',
-            titleCiphertext: new Uint8Array(content.ciphertext),
-            summaryCiphertext: new Uint8Array(),
-            contentNonce: new Uint8Array(content.nonce),
-            encryptionKeyId: content.encryptionKeyId,
-            dedupeKey: `history-${id}`,
-            occurredAt: new Date(
-              index < 65
-                ? '2026-08-31T16:00:00Z'
-                : index === 65
-                  ? '2026-08-31T15:59:59.999Z'
-                  : '2026-09-01T16:00:00Z',
-            ),
-          },
-        });
-      }
-      oldOccurrenceId = ulid();
-      await fixture.db.routineOccurrence.create({
-        data: {
-          id: oldOccurrenceId,
-          householdId: fixture.householdId,
-          recipientId: fixture.recipientId,
-          routineId: fixture.review.routineId,
-          scheduleId: fixture.review.scheduleId,
-          status: 'NEEDS_FAMILY_REVIEW',
-          scheduledAtUtc: new Date('2026-08-31T16:00:00Z'),
-          scheduledLocalDate: new Date('2026-09-01T00:00:00Z'),
-        },
-      });
+      ({ eventIds, oldOccurrenceId } = await seedCareHistory(fixture));
     }, 30_000);
     afterAll(async () => {
       if (fixture) await fixture.cleanup();
@@ -114,7 +67,9 @@ describeMySql(
         await read('occurrences', {
           ...dates,
           status: 'NEEDS_FAMILY_REVIEW',
-        }).expect(200)
+        })
+          .expect(200)
+          .expect('Cache-Control', 'no-store')
       ).body.data;
       expect(history.items.map((item: { id: string }) => item.id)).toEqual([
         oldOccurrenceId,

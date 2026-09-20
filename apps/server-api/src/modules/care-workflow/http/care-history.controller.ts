@@ -1,4 +1,11 @@
-import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Header,
+  Param,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { CurrentUser } from '../../identity/http/current-user.decorator';
 import { UserAccessGuard } from '../../identity/http/user-access.guard';
 import type { UserPrincipal } from '../../identity/identity.types';
@@ -14,6 +21,7 @@ export class CareHistoryController {
   constructor(private readonly history: CareHistoryService) {}
 
   @Get('occurrences/history')
+  @Header('Cache-Control', 'no-store')
   occurrences(
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
@@ -30,6 +38,7 @@ export class CareHistoryController {
   }
 
   @Get('events/history')
+  @Header('Cache-Control', 'no-store')
   events(
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,

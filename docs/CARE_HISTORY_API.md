@@ -1,6 +1,6 @@
 # 照护记录分页查询
 
-第 008 轮开发契约。Server／Web／Android 已接入代码；隔离 MySQL 与真实 API 三端全链路验收尚未完成。这不是已部署说明。完整规格和验收进度见[迭代文档](iterations/008-care-history-navigation.md)。
+第 008 轮开发契约。Server／Web／Android 已接入代码，并完成隔离 MySQL、真实 Web 页面及 Android MainActivity 的本地联调。这不是已部署说明。完整规格、审查状态和验收边界见[迭代文档](iterations/008-care-history-navigation.md)。
 
 ## 路径与权限
 
@@ -12,6 +12,8 @@
 | GET | `/households/:householdId/care-recipients/:recipientId/events/history` | 照护动态，按发生时间查询 |
 
 使用现有 User Session，**每页**执行 `VIEW_EVENTS` 策略；不能用设备或管理员会话代替。家庭／长者组合必须有效，OWNER 和普通成员遵守原有不同的角色／授权规则。响应仍由统一 API envelope 包装，以下分页对象位于 `data`。
+
+两条历史查询成功响应均带 `Cache-Control: no-store`，不允许缓存私人记录页。
 
 ## 查询参数
 

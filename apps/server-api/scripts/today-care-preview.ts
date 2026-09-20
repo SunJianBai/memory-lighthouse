@@ -3,9 +3,11 @@ import {
   createTodayCareHarness,
 } from '../test/support/today-care-harness';
 import { ulid } from 'ulid';
+import { seedCareHistory } from '../test/support/care-history-fixture';
 
 async function main() {
   const fixture = await createTodayCareHarness();
+  if (process.env.CARE_HISTORY_PREVIEW === 'true') await seedCareHistory(fixture);
   // Preview-only device setup for this synthetic family, not a production grant.
   await fixture.db.recipientMember.createMany({
     data: [fixture.recipientId, fixture.emptyRecipientId].map((recipientId) => ({
