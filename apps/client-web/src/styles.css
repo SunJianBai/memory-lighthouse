@@ -654,6 +654,10 @@ h3 {
 .today-care-footer small { color: var(--color-muted-foreground); }
 @media (max-width: 620px) { .today-care-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
+.task-dismiss-confirmation { flex-basis: 100%; min-width: 0; padding: 12px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface-soft); }
+.task-dismiss-confirmation p { margin: 0 0 8px; color: var(--color-foreground); }
+.task-dismiss-confirmation button + button { margin-inline-start: 8px; }
+
 /* Public guide: scoped styles, no new assets or dependencies. */
 .guide-page { min-height: 100dvh; padding: 0 clamp(18px, 5vw, 76px) 32px; background: var(--color-background); }
 .guide-page a { text-decoration: none; }
@@ -786,6 +790,18 @@ h3 {
 }
 
 /* Shared panels and forms */
+.task-board-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.task-board-filters button { min-height: 44px; padding: 8px 12px; border: 1px solid var(--color-border); border-radius: 10px; color: var(--color-foreground); background: var(--color-surface); cursor: pointer; }
+.task-board-filters button span { margin-left: 8px; font-variant-numeric: tabular-nums; }
+.task-board-filters button[aria-pressed="true"] { color: var(--color-accent-strong); border-color: var(--color-accent); background: var(--color-accent-soft); }
+.task-board-filters button:focus-visible { outline: 3px solid var(--color-ring); outline-offset: 3px; }
+.task-board-list > article { flex-wrap: wrap; }
+.task-board-content { min-width: 0; overflow-wrap: anywhere; }
+.task-board-content h3 { margin: 10px 0 6px; font-size: 1.06rem; }
+.task-board-badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.task-board-content .task-board-owner { color: var(--color-accent-strong); font-weight: 600; }
+.task-board-list .task-actions { flex-wrap: wrap; }
+.task-board-list .task-actions button { min-height: 44px; }
 .panel-card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);

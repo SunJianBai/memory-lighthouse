@@ -5,7 +5,6 @@ import {
   ClipboardCheck,
   Plus,
   RefreshCw,
-  UserRoundCheck,
 } from "lucide-react";
 import {
   useCallback,
@@ -38,6 +37,11 @@ import {
   type ScopedPageState,
 } from "./family-page-state";
 import { dateInTimeZone } from "./routine-date";
+import {
+  parseFamilyTaskBoard,
+  type FamilyTaskBoardItem,
+} from "../../api/family-task-board";
+import { FamilyTaskPanel } from "../../components/FamilyTaskPanel";
 
 const toMinutes = (value: string) => {
   const [hours, minutes] = value.split(":").map(Number);
@@ -48,9 +52,12 @@ const showTime = (minutes: number) =>
 
 type RoutinePageData = {
   routines: RoutineView[];
-  tasks: FamilyTaskView[];
+  tasks: FamilyTaskBoardItem[];
   occurrences: OccurrenceView[];
   events: CareEventView[];
+  errors: Partial<
+    Record<"routines" | "tasks" | "occurrences" | "events", string>
+  >;
 };
 
 const EMPTY_ROUTINE_PAGE_DATA: RoutinePageData = {
@@ -58,14 +65,15 @@ const EMPTY_ROUTINE_PAGE_DATA: RoutinePageData = {
   tasks: [],
   occurrences: [],
   events: [],
+  errors: {},
 };
 
 export const RoutinesApiPage = () => {
   const { user } = useAuth();
   const workspace = useWorkspace();
-  const [pageState, setPageState] = useState<
-    ScopedPageState<RoutinePageData>
-  >(() => createScopedPageState("", EMPTY_ROUTINE_PAGE_DATA));
+  const [pageState, setPageState] = useState<ScopedPageState<RoutinePageData>>(
+    () => createScopedPageState("", EMPTY_ROUTINE_PAGE_DATA),
+  );
   const [loadingScopeKey, setLoadingScopeKey] = useState("");
   const [busyState, setBusyState] = useState<ScopedPageState<string>>(() =>
     createScopedPageState("", ""),
@@ -74,8 +82,7 @@ export const RoutinesApiPage = () => {
     createScopedPageState("", ""),
   );
   const [formOpen, setFormOpen] = useState(false);
-  const [formOwner, setFormOwner] =
-    useState<ScopedMutationOwner | null>(null);
+  const [formOwner, setFormOwner] = useState<ScopedMutationOwner | null>(null);
   const [type, setType] = useState("OTHER");
   const [title, setTitle] = useState("");
   const [instructions, setInstructions] = useState("");
@@ -95,25 +102,20 @@ export const RoutinesApiPage = () => {
     workspace.workspaceScopeKey,
     EMPTY_ROUTINE_PAGE_DATA,
   );
-  const { routines, tasks, occurrences, events } = pageData;
+  const {
+    routines,
+    tasks,
+    occurrences,
+    events,
+    errors: resourceErrors,
+  } = pageData;
   const loading =
     loadingScopeKey === workspace.workspaceScopeKey ||
     (Boolean(workspace.householdId && workspace.recipientId) &&
       pageState.scopeKey !== workspace.workspaceScopeKey);
-  const busyId = pageValueForScope(
-    busyState,
-    workspace.workspaceScopeKey,
-    "",
-  );
-  const error = pageValueForScope(
-    errorState,
-    workspace.workspaceScopeKey,
-    "",
-  );
-  const formIsCurrent = isScopedMutationOwnerCurrent(
-    formOwner,
-    scopeIdentity,
-  );
+  const busyId = pageValueForScope(busyState, workspace.workspaceScopeKey, "");
+  const error = pageValueForScope(errorState, workspace.workspaceScopeKey, "");
+  const formIsCurrent = isScopedMutationOwnerCurrent(formOwner, scopeIdentity);
   const careCommands = useMemo(
     () =>
       new IdempotentCommandRegistry(undefined, {
@@ -142,19 +144,28 @@ export const RoutinesApiPage = () => {
       workspace.recipientId,
     );
     const request = loadRequests.current.begin(owner.scopeKey);
+    const ownerEpoch = workspace.workspaceScopeEpoch;
+    const requestIsCurrent = () =>
+      loadRequests.current.isCurrent(request) &&
+      currentScopeKey.current === owner.scopeKey &&
+      currentScopeIdentity.current.epoch === ownerEpoch;
     setLoadingScopeKey(owner.scopeKey);
     setErrorState(createScopedPageState(owner.scopeKey, ""));
     try {
       const from = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
       const to = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
       const [nextRoutines, nextTasks, nextOccurrences, nextEvents] =
-        await Promise.all([
+        await Promise.allSettled([
           apiClient.request<RoutineView[]>(
             `/households/${owner.householdId}/care-recipients/${owner.recipientId}/routines`,
           ),
-          apiClient.request<FamilyTaskView[]>(
-            `/households/${owner.householdId}/family-tasks?recipientId=${owner.recipientId}`,
-          ),
+          apiClient
+            .request<unknown>(
+              `/households/${owner.householdId}/care-recipients/${owner.recipientId}/family-task-board`,
+            )
+            .then((board) =>
+              parseFamilyTaskBoard(board, owner.householdId, owner.recipientId),
+            ),
           apiClient.request<OccurrenceView[]>(
             `/households/${owner.householdId}/care-recipients/${owner.recipientId}/occurrences?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
           ),
@@ -162,33 +173,65 @@ export const RoutinesApiPage = () => {
             `/households/${owner.householdId}/care-recipients/${owner.recipientId}/events`,
           ),
         ]);
-      if (
-        !loadRequests.current.isCurrent(request) ||
-        currentScopeKey.current !== owner.scopeKey
-      )
-        return;
+      if (!requestIsCurrent()) return;
+      const results = {
+        routines: nextRoutines,
+        tasks: nextTasks,
+        occurrences: nextOccurrences,
+        events: nextEvents,
+      };
+      const errors = Object.fromEntries(
+        Object.entries(results).flatMap(([key, result]) =>
+          result.status === "rejected"
+            ? [[key, readableError(result.reason)]]
+            : [],
+        ),
+      );
+      const labels = {
+        routines: "日程",
+        tasks: "待办",
+        occurrences: "提醒记录",
+        events: "最近动态",
+      };
+      setErrorState(
+        createScopedPageState(
+          owner.scopeKey,
+          Object.entries(errors)
+            .map(
+              ([key, message]) =>
+                `${labels[key as keyof typeof labels]}：${message}`,
+            )
+            .join("；"),
+        ),
+      );
       setPageState(
         createScopedPageState(owner.scopeKey, {
-          routines: nextRoutines,
-          tasks: nextTasks,
-          occurrences: nextOccurrences,
-          events: nextEvents.slice(0, 30),
+          routines:
+            nextRoutines.status === "fulfilled" ? nextRoutines.value : [],
+          tasks: nextTasks.status === "fulfilled" ? nextTasks.value : [],
+          occurrences:
+            nextOccurrences.status === "fulfilled" ? nextOccurrences.value : [],
+          events:
+            nextEvents.status === "fulfilled"
+              ? nextEvents.value.slice(0, 30)
+              : [],
+          errors,
         }),
       );
     } catch (loadError) {
-      if (
-        loadRequests.current.isCurrent(request) &&
-        currentScopeKey.current === owner.scopeKey
-      ) {
+      if (requestIsCurrent()) {
         setErrorState(
           createScopedPageState(owner.scopeKey, readableError(loadError)),
         );
+        setPageState(
+          createScopedPageState(owner.scopeKey, {
+            ...EMPTY_ROUTINE_PAGE_DATA,
+            errors: { tasks: readableError(loadError) },
+          }),
+        );
       }
     } finally {
-      if (
-        loadRequests.current.isCurrent(request) &&
-        currentScopeKey.current === owner.scopeKey
-      ) {
+      if (requestIsCurrent()) {
         setLoadingScopeKey("");
       }
     }
@@ -196,6 +239,7 @@ export const RoutinesApiPage = () => {
     workspace.householdId,
     workspace.recipientId,
     workspace.workspaceScopeKey,
+    workspace.workspaceScopeEpoch,
   ]);
 
   useEffect(() => {
@@ -216,10 +260,11 @@ export const RoutinesApiPage = () => {
     setInstructions("");
     setQuestion("");
     setTime("08:30");
-  }, [workspace.workspaceScopeKey]);
+  }, [workspace.workspaceScopeKey, workspace.workspaceScopeEpoch]);
 
   useEffect(() => {
     void load();
+    return () => loadRequests.current.invalidate();
   }, [load]);
 
   const create = async (event: FormEvent) => {
@@ -236,8 +281,7 @@ export const RoutinesApiPage = () => {
       return;
     }
     const owner = formOwner;
-    const recipientTimezone =
-      workspace.recipient?.timezone || "Asia/Shanghai";
+    const recipientTimezone = workspace.recipient?.timezone || "Asia/Shanghai";
     setBusyState(createScopedPageState(owner.scopeKey, "create"));
     setErrorState(createScopedPageState(owner.scopeKey, ""));
     try {
@@ -261,20 +305,10 @@ export const RoutinesApiPage = () => {
           },
         },
       );
-      if (
-        !isScopedMutationOwnerCurrent(
-          owner,
-          currentScopeIdentity.current,
-        )
-      )
+      if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
         return;
       setPageState((current) => {
-        if (
-          !isScopedMutationOwnerCurrent(
-            owner,
-            currentScopeIdentity.current,
-          )
-        )
+        if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
           return current;
         const currentValue =
           current.scopeKey === owner.scopeKey
@@ -291,17 +325,13 @@ export const RoutinesApiPage = () => {
       setFormOpen(false);
       setFormOwner(null);
     } catch (createError) {
-      if (
-        isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)
-      ) {
+      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
         setErrorState(
           createScopedPageState(owner.scopeKey, readableError(createError)),
         );
       }
     } finally {
-      if (
-        isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)
-      ) {
+      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
         setBusyState((current) =>
           current.scopeKey === owner.scopeKey && current.value === "create"
             ? createScopedPageState(owner.scopeKey, "")
@@ -332,7 +362,7 @@ export const RoutinesApiPage = () => {
               resolutionCode:
                 action === "resolve" ? "FAMILY_CONFIRMED" : "NOT_ACTIONABLE",
             };
-      const updated = await careCommands.execute(
+      await careCommands.execute(
         JSON.stringify([
           "family-task",
           owner.householdId,
@@ -350,38 +380,23 @@ export const RoutinesApiPage = () => {
             },
           ),
       );
-      if (
-        !isScopedMutationOwnerCurrent(
-          owner,
-          currentScopeIdentity.current,
-        )
-      )
+      if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
         return;
-      setPageState((current) =>
-        !isScopedMutationOwnerCurrent(
-          owner,
-          currentScopeIdentity.current,
-        ) || current.scopeKey !== owner.scopeKey
-          ? current
-          : createScopedPageState(owner.scopeKey, {
-              ...current.value,
-              tasks: current.value.tasks.map((item) =>
-                item.id === updated.id ? updated : item,
-              ),
-            }),
-      );
+      await load();
     } catch (actionError) {
-      if (
-        isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)
-      ) {
+      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
+        await load();
+        if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
+          return;
         setErrorState(
-          createScopedPageState(owner.scopeKey, readableError(actionError)),
+          createScopedPageState(
+            owner.scopeKey,
+            `${readableError(actionError)}。已尝试刷新待办，请核对最新状态。`,
+          ),
         );
       }
     } finally {
-      if (
-        isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)
-      ) {
+      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
         setBusyState((current) =>
           current.scopeKey === owner.scopeKey && current.value === task.id
             ? createScopedPageState(owner.scopeKey, "")
@@ -433,18 +448,11 @@ export const RoutinesApiPage = () => {
             },
           ),
       );
-      if (
-        !isScopedMutationOwnerCurrent(
-          owner,
-          currentScopeIdentity.current,
-        )
-      )
+      if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
         return;
       setPageState((current) =>
-        !isScopedMutationOwnerCurrent(
-          owner,
-          currentScopeIdentity.current,
-        ) || current.scopeKey !== owner.scopeKey
+        !isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current) ||
+        current.scopeKey !== owner.scopeKey
           ? current
           : createScopedPageState(owner.scopeKey, {
               ...current.value,
@@ -455,20 +463,15 @@ export const RoutinesApiPage = () => {
       );
       await load();
     } catch (verifyError) {
-      if (
-        isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)
-      ) {
+      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
         setErrorState(
           createScopedPageState(owner.scopeKey, readableError(verifyError)),
         );
       }
     } finally {
-      if (
-        isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)
-      ) {
+      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
         setBusyState((current) =>
-          current.scopeKey === owner.scopeKey &&
-          current.value === occurrence.id
+          current.scopeKey === owner.scopeKey && current.value === occurrence.id
             ? createScopedPageState(owner.scopeKey, "")
             : current,
         );
@@ -497,12 +500,6 @@ export const RoutinesApiPage = () => {
     setFormOpen(false);
     setFormOwner(null);
   };
-
-  const openTasks = useMemo(
-    () =>
-      tasks.filter((task) => !["RESOLVED", "DISMISSED"].includes(task.status)),
-    [tasks],
-  );
 
   if (!workspace.recipientId) {
     return (
@@ -644,10 +641,16 @@ export const RoutinesApiPage = () => {
               <p className="eyebrow">日程</p>
               <h2>已启用规则</h2>
             </div>
-            <span className="count-badge">{routines.length}</span>
+            <span className="count-badge">
+              {resourceErrors.routines ? "—" : routines.length}
+            </span>
           </div>
           {loading ? (
             <div className="list-loading">正在加载日程…</div>
+          ) : resourceErrors.routines ? (
+            <div className="compact-empty" role="status">
+              日程未能加载，请核对权限或刷新重试。
+            </div>
           ) : routines.length === 0 ? (
             <div className="compact-empty">
               <CalendarClock aria-hidden="true" size={28} />
@@ -677,54 +680,15 @@ export const RoutinesApiPage = () => {
           )}
         </section>
 
-        <section className="panel-card">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">待办</p>
-              <h2>家庭待办</h2>
-            </div>
-            <span className="count-badge attention">{openTasks.length}</span>
-          </div>
-          {loading ? (
-            <div className="list-loading">正在加载待办…</div>
-          ) : openTasks.length === 0 ? (
-            <div className="compact-empty">
-              <CheckCircle2 aria-hidden="true" size={28} />
-              <strong>暂无待办</strong>
-              <p>当前没有需要处理的事项。</p>
-            </div>
-          ) : (
-            <div className="family-task-list">
-              {openTasks.map((task) => (
-                <article key={task.id}>
-                  <div>
-                    <span className="status-pill neutral">{task.priority}</span>
-                    <strong>家庭协同事项</strong>
-                    <p>来源事件：{task.sourceEventId}</p>
-                  </div>
-                  <div className="task-actions">
-                    {task.status !== "CLAIMED" && (
-                      <button
-                        type="button"
-                        disabled={busyId === task.id}
-                        onClick={() => void taskAction(task, "claim")}
-                      >
-                        <UserRoundCheck aria-hidden="true" size={17} /> 领取
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      disabled={busyId === task.id}
-                      onClick={() => void taskAction(task, "resolve")}
-                    >
-                      <ClipboardCheck aria-hidden="true" size={17} /> 已处理
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
+        <FamilyTaskPanel
+          key={`${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}`}
+          tasks={tasks}
+          loading={loading}
+          error={resourceErrors.tasks ?? ""}
+          busyId={busyId}
+          timezone={workspace.recipient?.timezone ?? "Asia/Shanghai"}
+          onAction={(task, action) => void taskAction(task, action)}
+        />
       </div>
 
       <div className="routine-task-columns">
@@ -744,6 +708,10 @@ export const RoutinesApiPage = () => {
           </div>
           {loading ? (
             <div className="list-loading">正在加载日程实例…</div>
+          ) : resourceErrors.occurrences ? (
+            <div className="compact-empty" role="status">
+              提醒记录未能加载，请核对权限或刷新重试。
+            </div>
           ) : occurrences.length === 0 ? (
             <div className="compact-empty">
               <CalendarClock aria-hidden="true" size={28} />
@@ -803,6 +771,10 @@ export const RoutinesApiPage = () => {
           </div>
           {loading ? (
             <div className="list-loading">正在加载事件…</div>
+          ) : resourceErrors.events ? (
+            <div className="compact-empty" role="status">
+              最近动态未能加载，请核对权限或刷新重试。
+            </div>
           ) : events.length === 0 ? (
             <div className="compact-empty">
               <ClipboardCheck aria-hidden="true" size={28} />

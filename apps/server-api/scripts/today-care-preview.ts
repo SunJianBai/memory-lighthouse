@@ -10,6 +10,8 @@ async function main() {
     JSON.stringify({
       localTestOnly: true,
       username: fixture.owner.username,
+      caregiverUsername: fixture.caregiver.username,
+      outsiderUsername: fixture.outsider.username,
       password: CARE_TEST_PASSWORD,
       householdId: fixture.householdId,
       recipientId: fixture.recipientId,

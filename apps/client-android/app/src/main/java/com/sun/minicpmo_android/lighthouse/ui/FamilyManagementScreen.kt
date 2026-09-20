@@ -72,6 +72,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -89,6 +90,7 @@ import com.sun.minicpmo_android.lighthouse.model.CompanionBindingView
 import com.sun.minicpmo_android.lighthouse.model.ConsentCatalog
 import com.sun.minicpmo_android.lighthouse.model.ConsentScopeDefinition
 import com.sun.minicpmo_android.lighthouse.model.FamilyTaskView
+import com.sun.minicpmo_android.lighthouse.model.FamilyTaskFilter
 import com.sun.minicpmo_android.lighthouse.model.LighthouseUiState
 import com.sun.minicpmo_android.lighthouse.model.HouseholdMemberView
 import com.sun.minicpmo_android.lighthouse.model.MemoryInput
@@ -1347,12 +1349,14 @@ private fun CareSection(
     onClaimTask: (FamilyTaskView) -> Unit,
     onFinishTask: (FamilyTaskView, Boolean) -> Unit,
 ) {
+    var taskFilter by remember(state.selectedHouseholdId, state.selectedRecipientId, state.user?.id) { mutableStateOf(FamilyTaskFilter.UNFINISHED) }
+    val visibleTasks = taskFilter.select(state.familyTasks)
     if (state.selectedRecipient == null) {
         ResourceEmpty(Icons.Rounded.CalendarMonth, "尚未选择陪伴对象", "日程、实例、事件和待办都归属于具体长者。")
         return
     }
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().testTag("care-list"),
         contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 32.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -1365,28 +1369,42 @@ private fun CareSection(
             )
         }
         item { SectionHeading("日程规则", Icons.Rounded.Schedule) }
-        if (state.routines.isEmpty()) {
+        if (state.routineLoadError != null) {
+            item { InlineEmpty("日程未能加载", state.routineLoadError) }
+        } else if (state.busy && state.routines.isEmpty()) {
+            item { InlineEmpty("正在加载日程", "请稍候。") }
+        } else if (state.routines.isEmpty()) {
             item { InlineEmpty("暂无日程", "点击新增开始安排。") }
         } else {
             items(state.routines, key = { "routine-${it.id}" }) { routine ->
                 RoutineCard(routine, onEditRoutine, onDeleteRoutine)
             }
         }
-        item { SectionHeading("需要家属处理", Icons.AutoMirrored.Rounded.Assignment) }
-        if (state.familyTasks.isEmpty()) {
-            item { InlineEmpty("暂无家庭待办", "当前没有需要处理的事项。") }
+        item { SectionHeading("家庭待办", Icons.AutoMirrored.Rounded.Assignment) }
+        item { FamilyTaskFilters(state.familyTasks, taskFilter, state.busy || state.familyTaskError != null) { taskFilter = it } }
+        if (state.familyTaskError != null) {
+            item { InlineEmpty("待办加载失败", "请使用顶部刷新重新读取。") }
+        } else if (state.busy && state.familyTasks.isEmpty()) {
+            item { InlineEmpty("正在加载待办", "请稍候。") }
+        } else if (visibleTasks.isEmpty()) {
+            item { InlineEmpty(taskFilter.emptyLabel, "可切换筛选查看其他事项。") }
         } else {
-            items(state.familyTasks, key = { "task-${it.id}" }) { task ->
-                TaskCard(
+            items(visibleTasks, key = { "task-${it.id}" }) { task ->
+                FamilyTaskCard(
                     task = task,
-                    sourceEvent = state.careEvents.firstOrNull { it.id == task.sourceEventId },
+                    busy = state.busy,
+                    timezone = state.selectedRecipient?.timezone ?: "Asia/Shanghai",
                     onClaim = onClaimTask,
                     onFinish = onFinishTask,
                 )
             }
         }
         item { SectionHeading("近期日程实例", Icons.AutoMirrored.Rounded.EventNote) }
-        if (state.occurrences.isEmpty()) {
+        if (state.occurrenceLoadError != null) {
+            item { InlineEmpty("提醒记录未能加载", state.occurrenceLoadError) }
+        } else if (state.busy && state.occurrences.isEmpty()) {
+            item { InlineEmpty("正在加载提醒记录", "请稍候。") }
+        } else if (state.occurrences.isEmpty()) {
             item { InlineEmpty("暂无近期实例", "暂无提醒记录。") }
         } else {
             items(state.occurrences, key = { "occurrence-${it.id}" }) { occurrence ->
@@ -1394,7 +1412,11 @@ private fun CareSection(
             }
         }
         item { SectionHeading("照护事件", Icons.Rounded.TaskAlt) }
-        if (state.careEvents.isEmpty()) {
+        if (state.careEventLoadError != null) {
+            item { InlineEmpty("动态未能加载", state.careEventLoadError) }
+        } else if (state.busy && state.careEvents.isEmpty()) {
+            item { InlineEmpty("正在加载动态", "请稍候。") }
+        } else if (state.careEvents.isEmpty()) {
             item { InlineEmpty("暂无事件", "暂无动态。") }
         } else {
             items(state.careEvents, key = { "event-${it.id}" }) { event ->
@@ -1561,13 +1583,14 @@ private fun RoutineCard(
 }
 
 @Composable
-private fun TaskCard(
+internal fun FamilyTaskCard(
     task: FamilyTaskView,
-    sourceEvent: CareEventView?,
+    busy: Boolean,
+    timezone: String,
     onClaim: (FamilyTaskView) -> Unit,
     onFinish: (FamilyTaskView, Boolean) -> Unit,
 ) {
-    OutlinedCard(Modifier.fillMaxWidth()) {
+    OutlinedCard(Modifier.fillMaxWidth().testTag("family-task-card")) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1577,45 +1600,68 @@ private fun TaskCard(
                 Spacer(Modifier.width(8.dp))
                 StatusLabel(taskStatusLabel(task.status))
             }
-            Text(sourceEvent?.title ?: "家庭协同事项", style = MaterialTheme.typography.titleMedium)
+            Text(task.sourceTitle ?: "家庭待办", style = MaterialTheme.typography.titleMedium)
             Text(
-                sourceEvent?.summary ?: "来源事件：${task.sourceEventId}",
+                task.sourceSummary.orEmpty(),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                if (task.assignedToMe) "我负责" else task.assigneeDisplayName?.let { "负责人：$it" } ?: "尚未认领",
+                color = MaterialTheme.colorScheme.primary,
             )
             task.dueAt?.let {
                 Text(
-                    "截止：${formatInstant(it)}",
+                    "截止：${DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneId.of(timezone)).format(Instant.parse(it))}（$timezone）",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (task.status in setOf("OPEN", "CLAIMED")) {
-                Row(
+            if (task.canClaim || task.canFinish) {
+                Column(
                     Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    if (task.status == "OPEN") {
+                    if (task.canClaim) {
                         OutlinedButton(
                             onClick = { onClaim(task) },
-                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                        ) { Text("领取") }
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) { Text("认领") }
                     }
-                    Button(
-                        onClick = { onFinish(task, true) },
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                    ) { Text("已处理") }
-                    TextButton(
-                        onClick = { onFinish(task, false) },
-                        modifier = Modifier.heightIn(min = 48.dp),
-                    ) { Text("忽略") }
+                    if (task.canFinish) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { onFinish(task, true) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("完成") }
+                            TextButton(onClick = { onFinish(task, false) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("不再处理") }
+                        }
+                    }
                 }
-            } else {
-                task.resolutionCode?.let {
+            } else if (task.status == "CLAIMED") {
+                Text("由负责人处理", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else if (task.status in setOf("RESOLVED", "DISMISSED")) {
+                task.resolvedAt?.let {
+                    Text("结束：${DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneId.of(timezone)).format(Instant.parse(it))}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                task.resolutionNote?.let {
                     Text(
-                        "处理结果：$it${task.resolutionNote?.let { note -> " · $note" }.orEmpty()}",
+                        "处理备注：$it",
                         style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun FamilyTaskFilters(tasks: List<FamilyTaskView>, selected: FamilyTaskFilter, loading: Boolean, onSelect: (FamilyTaskFilter) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        FamilyTaskFilter.entries.chunked(2).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                row.forEach { filter ->
+                    FilterChip(
+                        selected = selected == filter, onClick = { onSelect(filter) },
+                        label = { Text("${filter.label} ${if (loading) "—" else filter.select(tasks).size}") },
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                     )
                 }
             }
@@ -2311,6 +2357,7 @@ private fun TaskDecisionDialog(
         title = { Text(if (decision.resolve) "完成家庭待办" else "忽略家庭待办") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(decision.task.sourceTitle ?: "家庭待办", fontWeight = FontWeight.SemiBold)
                 Text(
                     if (decision.resolve) {
                         "将标记为已处理。"
@@ -2458,10 +2505,10 @@ private fun occurrenceStatusLabel(value: String) = when (value) {
 }
 
 private fun taskStatusLabel(value: String) = when (value) {
-    "OPEN" -> "待领取"
+    "OPEN" -> "待认领"
     "CLAIMED" -> "处理中"
-    "RESOLVED" -> "已处理"
-    "DISMISSED" -> "已忽略"
+    "RESOLVED" -> "已完成"
+    "DISMISSED" -> "不再处理"
     else -> value
 }
 

@@ -385,9 +385,10 @@ class LighthouseRepository(
         ).mapObjects(FamilyJsonMapper::parseCareEvent)
 
     suspend fun listFamilyTasks(householdId: String, recipientId: String): List<FamilyTaskView> =
-        FamilyJsonMapper.parseArray(
-            userRequest("GET", FamilyApiContract.familyTasksPath(householdId, recipientId)),
-        ).mapObjects(FamilyJsonMapper::parseFamilyTask)
+        FamilyJsonMapper.parseFamilyTaskBoard(
+            requireNotNull(userRequest("GET", "households/$householdId/care-recipients/$recipientId/family-task-board")),
+            householdId, recipientId,
+        )
 
     suspend fun familyVerifyOccurrence(
         householdId: String,

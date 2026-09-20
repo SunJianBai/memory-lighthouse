@@ -357,7 +357,33 @@ internal object FamilyJsonMapper {
         resolutionCode = json.nullableString("resolutionCode"),
         resolutionNote = json.nullableString("resolutionNote"),
         version = json.getInt("version"),
+        sourceTitle = json.nullableString("sourceTitle"),
+        sourceSummary = json.nullableString("sourceSummary"),
+        assigneeDisplayName = json.nullableString("assigneeDisplayName"),
+        assignedToMe = json.optBoolean("assignedToMe", false),
+        canClaim = json.optBoolean("canClaim", false),
+        canFinish = json.optBoolean("canFinish", false),
     )
+
+    fun parseFamilyTaskBoard(json: JSONObject, householdId: String, recipientId: String): List<FamilyTaskView> {
+        require(json.getString("householdId") == householdId && json.getString("recipientId") == recipientId) { "待办范围已变更，请刷新重试" }
+        val items = json.getJSONArray("tasks")
+        val tasks = (0 until items.length()).map { index ->
+            val item = items.getJSONObject(index)
+            require(item.getString("householdId") == householdId && item.getString("recipientId") == recipientId)
+            require(item.getString("sourceTitle").isNotBlank())
+            item.getString("sourceSummary")
+            for (key in listOf("assignedToMe", "canClaim", "canFinish")) require(item.get(key) is Boolean)
+            parseFamilyTask(item).also { task ->
+                require(task.id.isNotBlank() && task.version >= 0)
+                require(task.status in setOf("OPEN", "CLAIMED", "RESOLVED", "DISMISSED"))
+                task.dueAt?.let(java.time.Instant::parse)
+                task.resolvedAt?.let(java.time.Instant::parse)
+            }
+        }
+        require(tasks.map { it.id }.distinct().size == tasks.size)
+        return tasks
+    }
 
     fun parseConsentState(json: JSONObject) = ConsentStateView(
         scope = json.getString("scope"),

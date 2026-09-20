@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { TodayCareController } from './http/today-care.controller';
 import { TodayCareService } from './today-care.service';
+import { FamilyTaskBoardService } from './family-task-board.service';
+import { FamilyTaskBoardController } from './http/family-task-board.controller';
 
 import { PrismaModule } from '../../infrastructure/database/prisma.module';
 import { DeviceActivationModule } from '../device-activation/device-activation.module';
@@ -29,6 +31,7 @@ import { SystemCareWorkflowClock } from './ports/care-workflow-clock.port';
     HouseholdModule,
   ],
   controllers: [
+    FamilyTaskBoardController,
     TodayCareController,
     RoutinesController,
     OccurrencesController,
@@ -36,6 +39,7 @@ import { SystemCareWorkflowClock } from './ports/care-workflow-clock.port';
     FamilyTasksController,
   ],
   providers: [
+    FamilyTaskBoardService,
     TodayCareService,
     SystemCareWorkflowClock,
     { provide: CARE_WORKFLOW_CLOCK, useExisting: SystemCareWorkflowClock },

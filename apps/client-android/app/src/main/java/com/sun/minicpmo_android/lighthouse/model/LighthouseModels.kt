@@ -232,6 +232,12 @@ data class FamilyTaskView(
     val resolutionCode: String?,
     val resolutionNote: String?,
     val version: Int,
+    val sourceTitle: String? = null,
+    val sourceSummary: String? = null,
+    val assigneeDisplayName: String? = null,
+    val assignedToMe: Boolean = false,
+    val canClaim: Boolean = false,
+    val canFinish: Boolean = false,
 )
 
 data class ConsentDocumentVersionView(
@@ -495,9 +501,13 @@ data class LighthouseUiState(
     val authoritiesLoadedRecipientId: String? = null,
     val memories: List<MemoryView> = emptyList(),
     val routines: List<RoutineView> = emptyList(),
+    val routineLoadError: String? = null,
     val occurrences: List<OccurrenceView> = emptyList(),
+    val occurrenceLoadError: String? = null,
     val careEvents: List<CareEventView> = emptyList(),
+    val careEventLoadError: String? = null,
     val familyTasks: List<FamilyTaskView> = emptyList(),
+    val familyTaskError: String? = null,
     val consents: List<ConsentStateView> = emptyList(),
     val activation: ActivationPresentation? = null,
     val activationApprovalDetails: ActivationApprovalDetails? = null,

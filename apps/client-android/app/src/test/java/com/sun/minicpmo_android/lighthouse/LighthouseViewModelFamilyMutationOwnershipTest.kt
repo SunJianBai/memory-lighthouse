@@ -21,6 +21,7 @@ import com.sun.minicpmo_android.lighthouse.model.MemoryInput
 import com.sun.minicpmo_android.lighthouse.model.MemoryRevisionView
 import com.sun.minicpmo_android.lighthouse.model.MemoryView
 import com.sun.minicpmo_android.lighthouse.model.RoutineView
+import com.sun.minicpmo_android.lighthouse.model.FamilyTaskView
 import com.sun.minicpmo_android.lighthouse.model.UserView
 import com.sun.minicpmo_android.lighthouse.network.LighthouseApiException
 import com.sun.minicpmo_android.lighthouse.realtime.LiveCallState
@@ -45,12 +46,48 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LighthouseViewModelFamilyMutationOwnershipTest {
     private val mainDispatcher = StandardTestDispatcher()
+
+    @Test
+    fun routineDenialDoesNotHideAuthorizedFamilyTasks() = runTest(mainDispatcher) {
+        val task = mockk<FamilyTaskView>(relaxed = true)
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+            coEvery { repository.listRoutines(any(), any()) } throws IOException("没有日程管理权限")
+            coEvery { repository.listFamilyTasks(any(), any()) } returns listOf(task)
+        })
+        try {
+            fixture.signIn(this)
+            val state = fixture.viewModel.uiState.value
+            assertEquals(listOf(task), state.familyTasks)
+            assertNull(state.familyTaskError)
+            assertTrue(state.routineLoadError.orEmpty().contains("权限"))
+            assertTrue(state.error.orEmpty().contains("日程"))
+            assertFalse(state.busy)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun taskFailureIsVisibleWithoutHidingLoadedRoutines() = runTest(mainDispatcher) {
+        val routine = mockk<RoutineView>(relaxed = true)
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+            coEvery { repository.listRoutines(any(), any()) } returns listOf(routine)
+            coEvery { repository.listFamilyTasks(any(), any()) } throws IOException("待办不可用")
+        })
+        try {
+            fixture.signIn(this)
+            val state = fixture.viewModel.uiState.value
+            assertEquals(listOf(routine), state.routines)
+            assertNull(state.routineLoadError)
+            assertTrue(state.familyTaskError.orEmpty().contains("待办"))
+            assertTrue(state.familyTasks.isEmpty())
+        } finally { fixture.close() }
+    }
 
     @Before
     fun setUp() {
@@ -385,6 +422,7 @@ class LighthouseViewModelFamilyMutationOwnershipTest {
         firstCareAuthorities: CompletableDeferred<List<CareAuthorityView>>? = null,
         authorityUpdate: CareAuthorityView? = null,
         careAuthorityReconcileFailure: Throwable? = null,
+        configureRepository: (LighthouseRepository) -> Unit = {},
     ): Fixture {
         val repository = mockk<LighthouseRepository>(relaxed = true)
         val storedMemories = mutableMapOf<String, List<MemoryView>>()
@@ -439,6 +477,7 @@ class LighthouseViewModelFamilyMutationOwnershipTest {
         }
         coEvery { repository.createActivationChallenge(any(), any()) } returns activation()
         coEvery { repository.activationApprovalDetails(any()) } returns activationApproval()
+        configureRepository(repository)
 
         val callCoordinator = mockk<RemoteCallCoordinator>(relaxed = true)
         every { callCoordinator.state } returns MutableStateFlow(CoordinatedRemoteCallState())

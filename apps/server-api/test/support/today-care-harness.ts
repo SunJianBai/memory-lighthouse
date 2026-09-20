@@ -286,6 +286,7 @@ export async function createTodayCareHarness() {
           householdId,
           recipientId,
           sourceEventId: eventId,
+          assigneeMemberId: status === 'CLAIMED' ? ownerMemberId : null,
           status,
           priority: 'NORMAL',
           dueAt: new Date('2026-09-18T00:00:00Z'),
@@ -299,6 +300,31 @@ export async function createTodayCareHarness() {
       );
       try {
         await db.$transaction(async (tx) => {
+          const tasks = await tx.familyTask.findMany({
+            where: { householdId: { in: homes } },
+            select: { id: true },
+          });
+          const taskIds = tasks.map((task) => task.id);
+          const actions = await tx.familyTaskAction.findMany({
+            where: { taskId: { in: taskIds } },
+            select: { idempotencyKey: true },
+          });
+          await tx.careCommandReceipt.deleteMany({
+            where: {
+              idempotencyKey: {
+                in: actions.map((action) => action.idempotencyKey),
+              },
+            },
+          });
+          await tx.familyTaskAction.deleteMany({
+            where: { taskId: { in: taskIds } },
+          });
+          await tx.outboxEvent.deleteMany({
+            where: {
+              aggregateType: 'FAMILY_TASK',
+              aggregateId: { in: taskIds },
+            },
+          });
           await tx.familyTask.deleteMany({
             where: { householdId: { in: homes } },
           });
@@ -348,6 +374,8 @@ export async function createTodayCareHarness() {
       otherHouseholdId,
       otherRecipientId,
       authorityId,
+      ownerMemberId,
+      caregiverMemberId,
       review,
       cleanup,
     };

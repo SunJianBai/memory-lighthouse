@@ -69,18 +69,31 @@ const persist = (key: string, value: string): void => {
 };
 
 export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
+  const { status, user } = useAuth();
+  // Changing accounts can leave auth status unchanged. Remount the entire scope,
+  // including page drafts and in-flight request owners, when its identity changes.
+  return (
+    <AccountWorkspaceProvider key={`${status}:${user?.id ?? "anonymous"}`}>
+      {children}
+    </AccountWorkspaceProvider>
+  );
+};
+
+const AccountWorkspaceProvider = ({ children }: PropsWithChildren) => {
   const { status } = useAuth();
   const [households, setHouseholds] = useState<HouseholdView[]>([]);
   const [recipients, setRecipients] = useState<CareRecipientView[]>([]);
   const [bindings, setBindings] = useState<CompanionBindingView[]>([]);
-  const [householdId, setHouseholdId] = useState(() => stored(HOUSEHOLD_KEY));
-  const [recipientId, setRecipientId] = useState(() => stored(RECIPIENT_KEY));
+  // Remembered IDs are preferences, not evidence that the current user can see them.
+  const [householdId, setHouseholdId] = useState("");
+  const [recipientId, setRecipientId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const householdListRequests = useRef(new LatestScopedRequest());
   const householdResourceRequests = useRef(new LatestScopedRequest());
   const bindingRefreshRequests = useRef(new LatestScopedRequest());
   const scopeTracker = useRef(new WorkspaceScopeTracker());
+  const resourceHousehold = useRef("");
 
   const scopeIdentity = scopeTracker.current.observe(
     createWorkspaceScopeKey(householdId, recipientId),
@@ -90,6 +103,12 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
     async (id: string): Promise<boolean> => {
       const request = householdResourceRequests.current.begin(id);
       bindingRefreshRequests.current.invalidate();
+      if (resourceHousehold.current !== id) {
+        resourceHousehold.current = id;
+        setRecipients([]);
+        setBindings([]);
+        setRecipientId("");
+      }
       if (!id) {
         setRecipients([]);
         setBindings([]);
@@ -109,8 +128,9 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
         setRecipients(nextRecipients);
         setBindings(nextBindings);
         setRecipientId((current) => {
-          const next = nextRecipients.some((item) => item.id === current)
-            ? current
+          const preferred = current || stored(RECIPIENT_KEY);
+          const next = nextRecipients.some((item) => item.id === preferred)
+            ? preferred
             : (nextRecipients[0]?.id ?? "");
           persist(RECIPIENT_KEY, next);
           return next;
@@ -133,9 +153,10 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
       const next = await apiClient.request<HouseholdView[]>("/households");
       if (!householdListRequests.current.isCurrent(request)) return;
       setHouseholds(next);
-      const selected = next.some((item) => item.id === householdId)
-        ? householdId
-        : next[0]?.id ?? "";
+      const preferred = householdId || stored(HOUSEHOLD_KEY);
+      const selected = next.some((item) => item.id === preferred)
+        ? preferred
+        : (next[0]?.id ?? "");
       setHouseholdId(selected);
       persist(HOUSEHOLD_KEY, selected);
       await loadHouseholdResources(selected);
@@ -158,6 +179,11 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
       setRecipients([]);
       setBindings([]);
     }
+    return () => {
+      householdListRequests.current.invalidate();
+      householdResourceRequests.current.invalidate();
+      bindingRefreshRequests.current.invalidate();
+    };
   }, [status]); // refresh deliberately runs once when authentication changes.
 
   const selectHousehold = useCallback(
@@ -227,8 +253,7 @@ export const WorkspaceProvider = ({ children }: PropsWithChildren) => {
     [householdId, selectRecipient],
   );
 
-  const household =
-    households.find((item) => item.id === householdId) ?? null;
+  const household = households.find((item) => item.id === householdId) ?? null;
   const recipient = recipients.find((item) => item.id === recipientId) ?? null;
 
   const value = useMemo<WorkspaceContextValue>(

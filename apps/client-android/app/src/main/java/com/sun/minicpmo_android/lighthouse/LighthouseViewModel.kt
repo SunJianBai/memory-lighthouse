@@ -594,14 +594,19 @@ class LighthouseViewModel internal constructor(
         scope = FamilyOperationScope.RECIPIENT,
         lane = "task:${task.id}",
         reconcile = FamilyOperationReconcile.RECIPIENT,
+        reconcilePublishedSuccess = false,
         request = {
             require(task.recipientId == recipientId) { "待办不属于当前陪伴对象" }
-            repository.claimFamilyTask(checkNotNull(householdId), task)
+            val capturedHouseholdId = checkNotNull(householdId)
+            val capturedRecipientId = checkNotNull(recipientId)
+            repository.claimFamilyTask(capturedHouseholdId, task)
+            repository.listFamilyTasks(capturedHouseholdId, capturedRecipientId)
         },
-        apply = { updated ->
+        apply = { tasks ->
             _uiState.value = _uiState.value.copy(
-                familyTasks = _uiState.value.familyTasks.replaceById(updated.id, updated) { it.id },
-                message = "待办已领取",
+                familyTasks = tasks,
+                familyTaskError = null,
+                message = "待办已认领",
             )
         },
     )
@@ -610,6 +615,7 @@ class LighthouseViewModel internal constructor(
         scope = FamilyOperationScope.RECIPIENT,
         lane = "task:${task.id}",
         reconcile = FamilyOperationReconcile.RECIPIENT,
+        reconcilePublishedSuccess = false,
         request = {
             require(task.recipientId == recipientId) { "待办不属于当前陪伴对象" }
             repository.finishFamilyTask(
@@ -618,10 +624,12 @@ class LighthouseViewModel internal constructor(
                 resolve,
                 note?.trim()?.takeIf(String::isNotBlank),
             )
+            repository.listFamilyTasks(checkNotNull(householdId), checkNotNull(recipientId))
         },
-        apply = { updated ->
+        apply = { tasks ->
             _uiState.value = _uiState.value.copy(
-                familyTasks = _uiState.value.familyTasks.replaceById(updated.id, updated) { it.id },
+                familyTasks = tasks,
+                familyTaskError = null,
                 message = if (resolve) "待办已处理" else "待办已忽略",
             )
         },
@@ -1292,19 +1300,19 @@ class LighthouseViewModel internal constructor(
         val to = now.plus(7, ChronoUnit.DAYS).toString()
         val resources = try {
             coroutineScope {
-                val memories = async { repository.listMemories(householdId, recipientId) }
-                val routines = async { repository.listRoutines(householdId, recipientId) }
+                val memories = async { readFamilyResource { repository.listMemories(householdId, recipientId) } }
+                val routines = async { readFamilyResource { repository.listRoutines(householdId, recipientId) } }
                 val occurrences = async {
-                    repository.listOccurrences(householdId, recipientId, from, to)
+                    readFamilyResource { repository.listOccurrences(householdId, recipientId, from, to) }
                 }
-                val events = async { repository.listCareEvents(householdId, recipientId) }
-                val tasks = async { repository.listFamilyTasks(householdId, recipientId) }
-                val consents = async { repository.listConsents(householdId, recipientId) }
+                val events = async { readFamilyResource { repository.listCareEvents(householdId, recipientId).take(30) } }
+                val tasks = async { readFamilyResource { repository.listFamilyTasks(householdId, recipientId) } }
+                val consents = async { readFamilyResource { repository.listConsents(householdId, recipientId) } }
                 FamilyResources(
                     memories = memories.await(),
                     routines = routines.await(),
                     occurrences = occurrences.await(),
-                    careEvents = events.await().take(30),
+                    careEvents = events.await(),
                     familyTasks = tasks.await(),
                     consents = consents.await(),
                 )
@@ -1313,6 +1321,7 @@ class LighthouseViewModel internal constructor(
             throw cancelled
         } catch (error: Throwable) {
             if (!isResultOwner()) return
+            _uiState.value = _uiState.value.copy(familyTasks = emptyList(), familyTaskError = "待办加载失败，请刷新重试")
             throw error
         }
         if (
@@ -1321,13 +1330,29 @@ class LighthouseViewModel internal constructor(
             _uiState.value.selectedRecipientId != recipientId
         ) return
         _uiState.value = _uiState.value.copy(
-            memories = resources.memories,
-            routines = resources.routines,
-            occurrences = resources.occurrences,
-            careEvents = resources.careEvents,
-            familyTasks = resources.familyTasks,
-            consents = resources.consents,
+            memories = resources.memories.getOrDefault(emptyList()),
+            routines = resources.routines.getOrDefault(emptyList()),
+            routineLoadError = if (resources.routines.isFailure) "请核对日程权限或使用顶部刷新重试。" else null,
+            occurrences = resources.occurrences.getOrDefault(emptyList()),
+            occurrenceLoadError = if (resources.occurrences.isFailure) "请核对提醒记录权限或使用顶部刷新重试。" else null,
+            careEvents = resources.careEvents.getOrDefault(emptyList()),
+            careEventLoadError = if (resources.careEvents.isFailure) "请核对动态权限或使用顶部刷新重试。" else null,
+            familyTasks = resources.familyTasks.getOrDefault(emptyList()),
+            familyTaskError = if (resources.familyTasks.isFailure) "家庭待办未能加载，请核对权限或刷新重试。" else null,
+            consents = resources.consents.getOrDefault(emptyList()),
         )
+        val failed = listOf(
+            "记忆" to resources.memories, "日程" to resources.routines,
+            "提醒记录" to resources.occurrences, "最近动态" to resources.careEvents,
+            "家庭待办" to resources.familyTasks, "隐私授权" to resources.consents,
+        ).filter { it.second.isFailure }
+        // Expired credentials must retain the existing sign-out handling.
+        failed.mapNotNull { it.second.exceptionOrNull() }
+            .firstOrNull { it is LighthouseApiException && it.code == "SIGNED_OUT" }
+            ?.let { throw it }
+        if (failed.isNotEmpty()) {
+            throw IllegalStateException("部分资料未能加载：${failed.joinToString("、") { it.first }}。请核对权限或刷新重试。")
+        }
     }
 
     private fun selectedWorkspace(): Pair<String, String> {
@@ -1944,13 +1969,22 @@ private data class FamilyCallJoinOwner(
 )
 
 private data class FamilyResources(
-    val memories: List<MemoryView>,
-    val routines: List<RoutineView>,
-    val occurrences: List<OccurrenceView>,
-    val careEvents: List<CareEventView>,
-    val familyTasks: List<FamilyTaskView>,
-    val consents: List<ConsentStateView>,
+    val memories: Result<List<MemoryView>>,
+    val routines: Result<List<RoutineView>>,
+    val occurrences: Result<List<OccurrenceView>>,
+    val careEvents: Result<List<CareEventView>>,
+    val familyTasks: Result<List<FamilyTaskView>>,
+    val consents: Result<List<ConsentStateView>>,
 )
+
+/** Independent permissions must not cancel another authorized resource read. */
+private suspend fun <T> readFamilyResource(read: suspend () -> T): Result<T> = try {
+    Result.success(read())
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (error: Throwable) {
+    Result.failure(error)
+}
 
 private data class HouseholdDetails(
     val recipients: List<CareRecipientView>,
@@ -1961,9 +1995,13 @@ private data class HouseholdDetails(
 private fun LighthouseUiState.withoutRecipientResources() = copy(
     memories = emptyList(),
     routines = emptyList(),
+    routineLoadError = null,
     occurrences = emptyList(),
+    occurrenceLoadError = null,
     careEvents = emptyList(),
+    careEventLoadError = null,
     familyTasks = emptyList(),
+    familyTaskError = null,
     consents = emptyList(),
     careAuthorities = emptyList(),
     authoritiesLoadedRecipientId = null,
