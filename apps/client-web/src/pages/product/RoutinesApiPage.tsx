@@ -268,18 +268,29 @@ export const RoutinesApiPage = () => {
     setBusyState(createScopedPageState(owner.scopeKey, "save-routine"));
     setErrorState(createScopedPageState(owner.scopeKey, ""));
     try {
-      const created = await apiClient.request<RoutineView>(
-        editingRoutine
-          ? `/households/${owner.householdId}/routines/${editingRoutine.id}`
-          : `/households/${owner.householdId}/care-recipients/${owner.recipientId}/routines`,
-        {
-          method: editingRoutine ? "PATCH" : "POST",
-          body: {
-            ...input,
-            ...(editingRoutine ? { version: editingRoutine.version } : {}),
-          },
-        },
-      );
+      const created = editingRoutine
+        ? await careCommands.execute(
+            JSON.stringify([
+              "routine-update",
+              owner.householdId,
+              editingRoutine.id,
+              editingRoutine.version,
+              input,
+            ]),
+            (idempotencyKey) =>
+              apiClient.request<RoutineView>(
+                `/households/${owner.householdId}/routines/${editingRoutine.id}`,
+                {
+                  method: "PATCH",
+                  headers: { "Idempotency-Key": idempotencyKey },
+                  body: { ...input, version: editingRoutine.version },
+                },
+              ),
+          )
+        : await apiClient.request<RoutineView>(
+            `/households/${owner.householdId}/care-recipients/${owner.recipientId}/routines`,
+            { method: "POST", body: input },
+          );
       if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
         return;
       setPageState((current) => {

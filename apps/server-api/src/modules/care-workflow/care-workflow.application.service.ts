@@ -298,7 +298,15 @@ export class CareWorkflowApplicationService {
     command: UpdateRoutineCommand,
   ): Promise<RoutineView> {
     const now = this.clock.now();
-    return this.serializable(async (transaction) => {
+    const { idempotencyKey, ...edit } = command;
+    const commandType = 'ROUTINE_UPDATE';
+    const fingerprint = fingerprintCareCommand({
+      actorUserId: principal.userId,
+      householdId,
+      routineId,
+      edit,
+    });
+    return this.retrySerializable(async (transaction) => {
       const current = (await transaction.routine.findFirst({
         where: {
           id: routineId,
@@ -316,6 +324,16 @@ export class CareWorkflowApplicationService {
         current.recipientId,
         'MANAGE_ROUTINE',
       );
+      if (idempotencyKey) {
+        const replay = await replayCareCommand<RoutineView>(
+          transaction,
+          idempotencyKey,
+          commandType,
+          fingerprint,
+          this.cipher,
+        );
+        if (replay) return replay;
+      }
       if (current.version !== command.version) {
         throw new CareWorkflowVersionConflictException();
       }
@@ -419,7 +437,18 @@ export class CareWorkflowApplicationService {
         where: { id: routineId },
         include: ACTIVE_SCHEDULE_INCLUDE,
       })) as RoutineRecord;
-      return this.toRoutineView(result);
+      const view = this.toRoutineView(result);
+      return idempotencyKey
+        ? saveCareCommand(
+            transaction,
+            now,
+            idempotencyKey,
+            commandType,
+            fingerprint,
+            view,
+            this.cipher,
+          )
+        : view;
     });
   }
 

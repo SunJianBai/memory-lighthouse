@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RoutinesApiPage } from "./RoutinesApiPage";
+import { NetworkError } from "../../api/api-client";
 
 const fixture = vi.hoisted(() => ({
   request: vi.fn(),
@@ -34,6 +35,7 @@ describe("independent routine and task loading", () => {
     fixture.request.mockReset();
     fixture.recipientId = "elder";
     fixture.epoch = 1;
+    localStorage.clear();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -93,6 +95,12 @@ describe("independent routine and task loading", () => {
       );
     });
   }
+  async function settle(assertion: () => void) {
+    await vi.waitFor(async () => {
+      await act(async () => {});
+      assertion();
+    });
+  }
   it("edits the complete rule with version and displays the returned once summary", async () => {
     let stored = original;
     fixture.request.mockImplementation(
@@ -130,6 +138,7 @@ describe("independent routine and task loading", () => {
     await field("重复周期", "once");
     await field("提醒日期", "2026-09-26");
     await click("保存日程");
+    await settle(() => expect(container.querySelector("form")).toBeNull());
     expect(fixture.request).toHaveBeenCalledWith(
       "/households/home/routines/routine",
       expect.objectContaining({
@@ -161,6 +170,11 @@ describe("independent routine and task loading", () => {
     await click("编辑");
     await field("标题", "保留我的输入");
     await click("保存日程");
+    await settle(() =>
+      expect(container.querySelector("form")?.textContent).toContain(
+        "版本已变更",
+      ),
+    );
     expect(container.querySelector("form")?.textContent).toContain(
       "版本已变更",
     );
@@ -177,6 +191,37 @@ describe("independent routine and task loading", () => {
         (node) => node.textContent === "保存日程",
       )?.disabled,
     ).toBe(true);
+  });
+  it("preserves a same-day rule's original weekday mask when only its title changes", async () => {
+    const sameDay = {
+      ...original,
+      schedules: [
+        { ...original.schedules[0], endDate: original.schedules[0].startDate },
+      ],
+    };
+    fixture.request.mockImplementation(
+      async (path: string, options?: { method?: string }) => {
+        if (options?.method === "PATCH") return sameDay;
+        if (path.endsWith("/routines")) return [sameDay];
+        if (path.endsWith("/family-task-board"))
+          return { householdId: "home", recipientId: "elder", tasks: [] };
+        return [];
+      },
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("编辑");
+    await field("标题", "仅修改标题");
+    await click("保存日程");
+    await settle(() => expect(container.querySelector("form")).toBeNull());
+    expect(fixture.request).toHaveBeenCalledWith(
+      "/households/home/routines/routine",
+      expect.objectContaining({
+        method: "PATCH",
+        body: expect.objectContaining({
+          schedule: expect.objectContaining({ weekdayMask: 62 }),
+        }),
+      }),
+    );
   });
   it("drops an old save and editor when the recipient changes", async () => {
     let complete!: (value: unknown) => void;
@@ -200,6 +245,12 @@ describe("independent routine and task loading", () => {
     await act(async () => root.render(<RoutinesApiPage />));
     await click("编辑");
     await click("保存日程");
+    await settle(() =>
+      expect(fixture.request).toHaveBeenCalledWith(
+        "/households/home/routines/routine",
+        expect.objectContaining({ method: "PATCH" }),
+      ),
+    );
     fixture.recipientId = "other";
     fixture.epoch++;
     await act(async () => root.render(<RoutinesApiPage />));
@@ -207,6 +258,32 @@ describe("independent routine and task loading", () => {
     expect(container.querySelector("form")).toBeNull();
     expect(container.textContent).not.toContain("旧保存不能出现");
     expect(container.textContent).not.toContain("每周散步");
+  });
+  it("retries an edit with the same nonempty idempotency key after a lost response", async () => {
+    const keys: string[] = [];
+    fixture.request.mockImplementation(
+      async (
+        path: string,
+        options?: { method?: string; headers?: Record<string, string> },
+      ) => {
+        if (options?.method === "PATCH") {
+          keys.push(options.headers?.["Idempotency-Key"] ?? "");
+          if (keys.length === 1) throw new NetworkError();
+          return original;
+        }
+        if (path.endsWith("/routines")) return [original];
+        if (path.endsWith("/family-task-board"))
+          return { householdId: "home", recipientId: "elder", tasks: [] };
+        return [];
+      },
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("编辑");
+    await click("保存日程");
+    await settle(() => expect(container.querySelector("form")).toBeNull());
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe("");
+    expect(keys[1]).toBe(keys[0]);
   });
   it("shows authorized tasks even when routine management is denied", async () => {
     fixture.request.mockImplementation(async (path: string) => {

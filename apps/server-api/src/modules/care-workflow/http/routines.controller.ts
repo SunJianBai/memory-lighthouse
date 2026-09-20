@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -17,6 +18,7 @@ import { UserAccessGuard } from '../../identity/http/user-access.guard';
 import type { UserPrincipal } from '../../identity/identity.types';
 import { CareWorkflowApplicationService } from '../care-workflow.application.service';
 import type { RoutineView } from '../care-workflow.types';
+import { requireMatchingIdempotencyKey } from './idempotency-key';
 import {
   CreateRoutineDto,
   UpdateRoutineDto,
@@ -58,8 +60,15 @@ export class RoutinesController {
     @Param('householdId') householdId: string,
     @Param('routineId') routineId: string,
     @Body() body: UpdateRoutineDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ): Promise<RoutineView> {
-    return this.workflow.updateRoutine(principal, householdId, routineId, body);
+    return this.workflow.updateRoutine(principal, householdId, routineId, {
+      ...body,
+      // Older clients remain version-guarded; keyed edits additionally support replay.
+      ...(idempotencyKey === undefined
+        ? {}
+        : { idempotencyKey: requireMatchingIdempotencyKey(idempotencyKey) }),
+    });
   }
 
   @Delete('routines/:routineId')

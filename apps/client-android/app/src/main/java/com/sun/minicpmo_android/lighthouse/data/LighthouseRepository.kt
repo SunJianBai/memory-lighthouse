@@ -350,15 +350,16 @@ class LighthouseRepository(
         householdId: String,
         routine: RoutineView,
         input: RoutineInput,
-    ): RoutineView = FamilyJsonMapper.parseRoutine(
-        requireNotNull(
-            userRequest(
-                "PATCH",
-                FamilyApiContract.routinePath(householdId, routine.id),
-                FamilyApiContract.updateRoutineBody(input, routine.version),
-            ),
-        ),
-    )
+    ): RoutineView {
+        val body = FamilyApiContract.updateRoutineBody(input, routine.version)
+        val command = JSONArray().put("routine-update").put(householdId).put(routine.id).put(body).toString()
+        return careCommands.execute(command) { idempotencyKey ->
+            FamilyJsonMapper.parseRoutine(requireNotNull(userRequest(
+                "PATCH", FamilyApiContract.routinePath(householdId, routine.id), body,
+                headers = mapOf("Idempotency-Key" to idempotencyKey),
+            )))
+        }
+    }
 
     suspend fun deleteRoutine(householdId: String, routine: RoutineView) {
         userRequest(

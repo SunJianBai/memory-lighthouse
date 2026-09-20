@@ -2152,7 +2152,9 @@ internal fun RoutineEditorDialog(
     val parsedTime = parseTime(timeText)
     val grace = graceMinutes.toIntOrNull()
     val notice = noticeMinutes.toIntOrNull()
-    val effectiveMask = if (repeat == RoutineRepeat.ONCE) 127 else weekdayMask
+    val effectiveMask = if (repeat == RoutineRepeat.ONCE) {
+        if (schedule?.startDate == startDate && schedule.endDate == startDate) schedule.weekdayMask else 127
+    } else weekdayMask
     val effectiveEnd = if (repeat == RoutineRepeat.ONCE) startDate else endDate.trim().takeIf(String::isNotBlank)
     val scheduleError = RoutineScheduleRules.error(timezone, parsedTime, effectiveMask, startDate, effectiveEnd, grace, notice)
     val valid = title.isNotBlank() && instructions.isNotBlank() && question.isNotBlank() &&

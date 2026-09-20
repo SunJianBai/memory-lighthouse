@@ -52,6 +52,7 @@ export interface CreateRoutineCommand {
 }
 
 export interface UpdateRoutineCommand {
+  idempotencyKey?: string;
   version: number;
   type?: string;
   medicationId?: string | null;

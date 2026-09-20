@@ -57,7 +57,12 @@ export function RoutineEditor({
   const schedule = {
     timezone: zone,
     localTimeMinutes: minutes,
-    weekdayMask: mode === "once" ? 127 : mask,
+    weekdayMask:
+      mode === "once"
+        ? existing?.startDate === start && existing.endDate === start
+          ? existing.weekdayMask
+          : 127
+        : mask,
     startDate: start,
     endDate: mode === "once" ? start : end || null,
     graceMinutes: grace === "" ? NaN : Number(grace),

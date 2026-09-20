@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import request from 'supertest';
+import { randomUUID } from 'node:crypto';
 import { createTodayCareHarness } from './support/today-care-harness';
 import { PrismaOccurrenceScheduler } from '../src/modules/care-workflow/occurrence-scheduler.application';
 import { CARE_WORKFLOW_CONTENT_CIPHER } from '../src/modules/care-workflow/care-workflow.constants';
@@ -12,6 +13,7 @@ describeMySql(
   () => {
     let fixture: Awaited<ReturnType<typeof createTodayCareHarness>>;
     const createdIds: string[] = [];
+    const receiptKeys: string[] = [];
     const schedule = {
       timezone: 'Asia/Shanghai',
       localTimeMinutes: 540,
@@ -38,6 +40,9 @@ describeMySql(
     afterAll(async () => {
       if (!fixture) return;
       try {
+        await fixture.db.careCommandReceipt.deleteMany({
+          where: { idempotencyKey: { in: receiptKeys } },
+        });
         // Only resources created by this suite; the fixture owns its remaining cleanup.
         await fixture.db.routineOccurrence.deleteMany({
           where: { routineId: { in: createdIds } },
@@ -75,6 +80,59 @@ describeMySql(
         }),
       ).toBe(0);
     });
+    it('replays identical edits without a second version and rejects key reuse or unauthorized replay', async () => {
+      const http = fixture.app.getHttpServer();
+      const token = fixture.owner.session.accessToken;
+      const created = (
+        await request(http)
+          .post(collection())
+          .auth(token, { type: 'bearer' })
+          .send(body)
+          .expect(201)
+      ).body.data;
+      createdIds.push(created.id);
+      const key = randomUUID();
+      receiptKeys.push(key);
+      const edit = {
+        title: '重试只执行一次',
+        version: created.version,
+        schedule,
+      };
+      const patch = () =>
+        request(http)
+          .patch(endpoint(created.id))
+          .auth(token, { type: 'bearer' })
+          .set('Idempotency-Key', key)
+          .send(edit);
+      const [first, retry] = await Promise.all([patch(), patch()]);
+      expect(first.status).toBe(200);
+      expect(retry.status).toBe(200);
+      expect(retry.body.data).toEqual(first.body.data);
+      expect(first.body.data.version).toBe(created.version + 1);
+      expect(
+        await fixture.db.routineSchedule.count({
+          where: { routineId: created.id },
+        }),
+      ).toBe(1);
+      await request(http)
+        .patch(endpoint(created.id))
+        .auth(token, { type: 'bearer' })
+        .set('Idempotency-Key', key)
+        .send({ ...edit, title: '同键不同内容' })
+        .expect(409);
+      await request(http)
+        .patch(endpoint(created.id))
+        .auth(fixture.outsider.session.accessToken, { type: 'bearer' })
+        .set('Idempotency-Key', key)
+        .send(edit)
+        .expect(403);
+      const record = await fixture.db.careCommandReceipt.findUniqueOrThrow({
+        where: { idempotencyKey: key },
+      });
+      expect(
+        Buffer.from(record.resultCiphertext).toString('utf8'),
+      ).not.toContain(edit.title);
+    });
     it('preserves an unchanged schedule, versions an edit, and generates only the intended dates', async () => {
       const http = fixture.app.getHttpServer();
       const token = fixture.owner.session.accessToken;
@@ -108,7 +166,7 @@ describeMySql(
             findMany: (query: { where: object; include: object }) =>
               fixture.db.routineSchedule.findMany({
                 ...query,
-                where: { ...query.where, routineId: { in: createdIds } },
+                where: { ...query.where, routineId: created.id },
               }),
           },
           routineOccurrence: fixture.db.routineOccurrence,

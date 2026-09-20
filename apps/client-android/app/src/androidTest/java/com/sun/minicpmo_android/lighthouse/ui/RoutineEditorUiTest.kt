@@ -58,4 +58,12 @@ class RoutineEditorUiTest {
         onView(withId(android.R.id.button1)).perform(click())
         compose.onNodeWithText("开始日期").assertTextContains("2026-09-25")
     }
+    @Test fun titleOnlyEditPreservesSameDayWeekdayMask() {
+        var saved: RoutineInput? = null
+        val sameDay = routine.copy(schedules = listOf(routine.schedules.single().copy(endDate = "2026-09-21")))
+        compose.setContent { MaterialTheme { RoutineEditorDialog(sameDay, "Asia/Shanghai", false, onDismiss = {}, onSave = { saved = it }) } }
+        compose.onNodeWithText("标题").performScrollTo().performTextReplacement("仅修改标题")
+        compose.onNodeWithText("保存日程").performClick()
+        compose.runOnIdle { assertEquals(62, saved?.weekdayMask) }
+    }
 }
