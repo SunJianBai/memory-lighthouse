@@ -39,6 +39,25 @@ import {
   type FamilyTaskBoardItem,
 } from "../../api/family-task-board";
 import { FamilyTaskPanel } from "../../components/FamilyTaskPanel";
+import {
+  careEventSeverityLabel,
+  careEventSourceLabel,
+  careEventTypeLabel,
+  careHistoryTimezoneLabel,
+  formatCareHistoryTime,
+  occurrenceStatusLabel,
+} from "./care-history-presentation";
+
+function CareHistoryTime({
+  value,
+  timezone,
+}: {
+  value: string;
+  timezone: string | undefined;
+}) {
+  const formatted = formatCareHistoryTime(value, timezone);
+  return <time dateTime={formatted.dateTime}>{formatted.text}</time>;
+}
 
 type RoutinePageData = {
   routines: RoutineView[];
@@ -403,7 +422,7 @@ export const RoutinesApiPage = () => {
     if (!workspace.householdId || !workspace.recipientId) return;
     if (
       !verified &&
-      !window.confirm("确认记录为未完成吗？此操作会关闭本次日程实例。")
+      !window.confirm("确认记录为未完成吗？此操作会关闭本次提醒。")
     )
       return;
     const owner = createScopedMutationOwner(
@@ -644,8 +663,10 @@ export const RoutinesApiPage = () => {
         <section className="panel-card">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">日程实例</p>
               <h2>提醒记录</h2>
+              <p className="care-history-timezone">
+                {careHistoryTimezoneLabel(workspace.recipient?.timezone)}
+              </p>
             </div>
             <span className="count-badge attention">
               {
@@ -656,7 +677,7 @@ export const RoutinesApiPage = () => {
             </span>
           </div>
           {loading ? (
-            <div className="list-loading">正在加载日程实例…</div>
+            <div className="list-loading">正在加载提醒记录…</div>
           ) : resourceErrors.occurrences ? (
             <div className="compact-empty" role="status">
               提醒记录未能加载，请核对权限或刷新重试。
@@ -664,27 +685,26 @@ export const RoutinesApiPage = () => {
           ) : occurrences.length === 0 ? (
             <div className="compact-empty">
               <CalendarClock aria-hidden="true" size={28} />
-              <strong>暂无近期实例</strong>
-              <p>暂无提醒记录。</p>
+              <strong>暂无提醒记录</strong>
             </div>
           ) : (
-            <div className="family-task-list">
+            <div className="family-task-list care-history-list">
               {occurrences.map((occurrence) => (
                 <article key={occurrence.id}>
                   <div>
                     <span
                       className={`status-pill ${occurrence.status === "CONFIRMED" ? "success" : occurrence.status === "NEEDS_FAMILY_REVIEW" ? "attention" : "neutral"}`}
                     >
-                      {occurrence.status}
+                      {occurrenceStatusLabel(occurrence.status)}
                     </span>
                     <strong>{occurrence.routineTitle}</strong>
                     <p>
-                      {new Date(occurrence.scheduledAtUtc).toLocaleString(
-                        "zh-CN",
-                      )}{" "}
-                      · {occurrence.instructions}
+                      <CareHistoryTime
+                        value={occurrence.scheduledAtUtc}
+                        timezone={workspace.recipient?.timezone}
+                      />
                     </p>
-                    <small>家属填写的提醒内容</small>
+                    <p>{occurrence.instructions}</p>
                   </div>
                   {occurrence.status === "NEEDS_FAMILY_REVIEW" && (
                     <div className="task-actions">
@@ -713,13 +733,15 @@ export const RoutinesApiPage = () => {
         <section className="panel-card">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">动态</p>
               <h2>最近动态</h2>
+              <p className="care-history-timezone">
+                {careHistoryTimezoneLabel(workspace.recipient?.timezone)}
+              </p>
             </div>
             <span className="count-badge">{events.length}</span>
           </div>
           {loading ? (
-            <div className="list-loading">正在加载事件…</div>
+            <div className="list-loading">正在加载动态…</div>
           ) : resourceErrors.events ? (
             <div className="compact-empty" role="status">
               最近动态未能加载，请核对权限或刷新重试。
@@ -727,33 +749,31 @@ export const RoutinesApiPage = () => {
           ) : events.length === 0 ? (
             <div className="compact-empty">
               <ClipboardCheck aria-hidden="true" size={28} />
-              <strong>暂无事件</strong>
-              <p>暂无动态。</p>
+              <strong>暂无动态</strong>
             </div>
           ) : (
-            <div className="api-routine-list">
+            <div className="family-task-list care-history-list">
               {events.map((event) => (
                 <article key={event.id}>
-                  <time>
-                    {new Date(event.occurredAt).toLocaleString("zh-CN", {
-                      month: "2-digit",
-                      day: "2-digit",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </time>
                   <div>
+                    <span
+                      className={`status-pill ${event.severity === "ATTENTION" ? "attention" : "neutral"}`}
+                    >
+                      {careEventSeverityLabel(event.severity)}
+                    </span>
                     <strong>{event.title}</strong>
+                    <p>
+                      <CareHistoryTime
+                        value={event.occurredAt}
+                        timezone={workspace.recipient?.timezone}
+                      />
+                    </p>
                     <p>{event.summary}</p>
-                    <small>
-                      {event.sourceType} · {event.type}
-                    </small>
+                    <p>
+                      {careEventSourceLabel(event.sourceType)} ·{" "}
+                      {careEventTypeLabel(event.type)}
+                    </p>
                   </div>
-                  <span
-                    className={`status-pill ${event.severity === "ATTENTION" ? "attention" : "neutral"}`}
-                  >
-                    {event.severity}
-                  </span>
                 </article>
               ))}
             </div>

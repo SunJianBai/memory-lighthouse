@@ -1372,7 +1372,7 @@ private fun CareSection(
     var taskFilter by remember(state.selectedHouseholdId, state.selectedRecipientId, state.user?.id) { mutableStateOf(FamilyTaskFilter.UNFINISHED) }
     val visibleTasks = taskFilter.select(state.familyTasks)
     if (state.selectedRecipient == null) {
-        ResourceEmpty(Icons.Rounded.CalendarMonth, "尚未选择陪伴对象", "日程、实例、事件和待办都归属于具体长者。")
+        ResourceEmpty(Icons.Rounded.CalendarMonth, "尚未选择陪伴对象", "请先选择要管理的长者。")
         return
     }
     LazyColumn(
@@ -1420,44 +1420,34 @@ private fun CareSection(
                 )
             }
         }
-        item { SectionHeading("近期日程实例", Icons.AutoMirrored.Rounded.EventNote) }
+        item {
+            SectionHeading("提醒记录", Icons.AutoMirrored.Rounded.EventNote)
+            Text(careHistoryTimezoneLabel(state.selectedRecipient?.timezone), style = MaterialTheme.typography.bodyLarge)
+        }
         if (state.occurrenceLoadError != null) {
             item { InlineEmpty("提醒记录未能加载", state.occurrenceLoadError) }
         } else if (state.busy && state.occurrences.isEmpty()) {
             item { InlineEmpty("正在加载提醒记录", "请稍候。") }
         } else if (state.occurrences.isEmpty()) {
-            item { InlineEmpty("暂无近期实例", "暂无提醒记录。") }
+            item { InlineEmpty("暂无提醒记录", "新提醒将在这里显示。") }
         } else {
             items(state.occurrences, key = { "occurrence-${it.id}" }) { occurrence ->
-                OccurrenceCard(occurrence, onVerifyOccurrence)
+                OccurrenceCard(occurrence, state.selectedRecipient?.timezone, onVerifyOccurrence)
             }
         }
-        item { SectionHeading("照护事件", Icons.Rounded.TaskAlt) }
+        item {
+            SectionHeading("最近动态", Icons.Rounded.TaskAlt)
+            Text(careHistoryTimezoneLabel(state.selectedRecipient?.timezone), style = MaterialTheme.typography.bodyLarge)
+        }
         if (state.careEventLoadError != null) {
             item { InlineEmpty("动态未能加载", state.careEventLoadError) }
         } else if (state.busy && state.careEvents.isEmpty()) {
             item { InlineEmpty("正在加载动态", "请稍候。") }
         } else if (state.careEvents.isEmpty()) {
-            item { InlineEmpty("暂无事件", "暂无动态。") }
+            item { InlineEmpty("暂无动态", "新的照护记录将在这里显示。") }
         } else {
             items(state.careEvents, key = { "event-${it.id}" }) { event ->
-                OutlinedCard(Modifier.fillMaxWidth()) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(16.dp),
-                        verticalAlignment = Alignment.Top,
-                    ) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(event.title, fontWeight = FontWeight.SemiBold)
-                            Text(event.summary, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(
-                                "${formatInstant(event.occurredAt)} · ${event.sourceType} · ${event.type}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        StatusLabel(severityLabel(event.severity))
-                    }
-                }
+                CareEventCard(event, state.selectedRecipient?.timezone)
             }
         }
     }
@@ -1719,30 +1709,20 @@ internal fun FamilyTaskFilters(tasks: List<FamilyTaskView>, selected: FamilyTask
 }
 
 @Composable
-private fun OccurrenceCard(
+internal fun OccurrenceCard(
     occurrence: OccurrenceView,
+    timezone: String?,
     onVerify: (OccurrenceView, Boolean) -> Unit,
 ) {
-    OutlinedCard(Modifier.fillMaxWidth()) {
+    OutlinedCard(Modifier.fillMaxWidth().testTag("care-occurrence-card")) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusLabel(occurrenceStatusLabel(occurrence.status))
-                Spacer(Modifier.weight(1f))
-                Text(
-                    formatInstant(occurrence.scheduledAtUtc),
-                    style = MaterialTheme.typography.labelLarge,
-                )
-            }
+            StatusLabel(occurrenceStatusLabel(occurrence.status))
+            Text(formatCareHistoryTime(occurrence.scheduledAtUtc, timezone), style = MaterialTheme.typography.bodyLarge)
             Text(occurrence.routineTitle, style = MaterialTheme.typography.titleMedium)
             Text(occurrence.instructions, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(
-                "家属录入的提醒内容",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             if (occurrence.status == "NEEDS_FAMILY_REVIEW") {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -1762,6 +1742,23 @@ private fun OccurrenceCard(
                     ) { Text("核验未完成") }
                 }
             }
+        }
+    }
+}
+
+@Composable
+internal fun CareEventCard(event: CareEventView, timezone: String?) {
+    OutlinedCard(Modifier.fillMaxWidth().testTag("care-event-card")) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusLabel(careEventSeverityLabel(event.severity))
+            Text(event.title, style = MaterialTheme.typography.titleMedium)
+            Text(formatCareHistoryTime(event.occurredAt, timezone), style = MaterialTheme.typography.bodyLarge)
+            Text(event.summary, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "${careEventSourceLabel(event.sourceType)} · ${careEventTypeLabel(event.type)}",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -2561,15 +2558,6 @@ private fun verificationLabel(value: String) = when (value) {
     else -> value
 }
 
-private fun occurrenceStatusLabel(value: String) = when (value) {
-    "DUE" -> "待提醒"
-    "AWAITING_CONFIRMATION" -> "等待本人确认"
-    "NEEDS_FAMILY_REVIEW" -> "需要家属核验"
-    "CONFIRMED" -> "已确认"
-    "EXPIRED" -> "未完成/已关闭"
-    else -> value
-}
-
 private fun taskStatusLabel(value: String) = when (value) {
     "OPEN" -> "待认领"
     "CLAIMED" -> "处理中"
@@ -2583,14 +2571,6 @@ private fun priorityLabel(value: String) = when (value) {
     "HIGH" -> "高优先级"
     "NORMAL" -> "普通"
     "LOW" -> "低优先级"
-    else -> value
-}
-
-private fun severityLabel(value: String) = when (value) {
-    "ATTENTION" -> "需关注"
-    "WARNING" -> "警告"
-    "CRITICAL" -> "紧急"
-    "INFO" -> "信息"
     else -> value
 }
 

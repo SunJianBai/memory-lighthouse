@@ -9,6 +9,7 @@ const fixture = vi.hoisted(() => ({
   request: vi.fn(),
   recipientId: "elder",
   epoch: 1,
+  timezone: "Asia/Shanghai",
 }));
 vi.mock("../../auth/auth-context", () => ({
   useAuth: () => ({ user: { id: "user" } }),
@@ -19,7 +20,7 @@ vi.mock("../../workspace/workspace-context", () => ({
     recipientId: fixture.recipientId,
     workspaceScopeKey: `home:${fixture.recipientId}`,
     workspaceScopeEpoch: fixture.epoch,
-    recipient: { timezone: "Asia/Shanghai" },
+    recipient: { timezone: fixture.timezone },
   }),
 }));
 vi.mock("../../api/api-client", async (original) => ({
@@ -35,6 +36,7 @@ describe("independent routine and task loading", () => {
     fixture.request.mockReset();
     fixture.recipientId = "elder";
     fixture.epoch = 1;
+    fixture.timezone = "Asia/Shanghai";
     localStorage.clear();
     container = document.createElement("div");
     document.body.append(container);
@@ -101,6 +103,101 @@ describe("independent routine and task loading", () => {
       assertion();
     });
   }
+  it("renders history labels and switches recipient timezone without stale records", async () => {
+    fixture.request.mockImplementation(async (path: string) => {
+      if (path.endsWith("/family-task-board"))
+        return {
+          householdId: "home",
+          recipientId: fixture.recipientId,
+          tasks: [],
+        };
+      if (path.includes("/occurrences?"))
+        return [
+          {
+            id: "closed",
+            routineTitle: `已关闭-${fixture.recipientId}`,
+            status: "EXPIRED",
+            instructions: "保留家属原文",
+            scheduledAtUtc: "2026-12-31T16:30:00Z",
+          },
+        ];
+      if (path.endsWith("/events"))
+        return [
+          {
+            id: "event",
+            title: "一条记录",
+            summary: "保留动态原文",
+            sourceType: "ROUTINE_SCHEDULER",
+            type: "ROUTINE_CONFIRMATION_MISSING",
+            severity: "ATTENTION",
+            occurredAt: "2026-12-31T16:30:00Z",
+          },
+        ];
+      return [];
+    });
+    await act(async () => root.render(<RoutinesApiPage />));
+    expect(container.textContent).toContain("长者时区：Asia/Shanghai");
+    expect(container.textContent).toContain("2027-01-01 00:30");
+    expect(container.textContent).toContain("日程提醒 · 待核验提醒");
+    expect(container.textContent).toContain("需关注");
+    expect(container.textContent).not.toMatch(
+      /EXPIRED|ROUTINE_SCHEDULER|ATTENTION/,
+    );
+    expect(
+      Array.from(container.querySelectorAll(".status-pill.success")),
+    ).toHaveLength(0);
+    expect(container.querySelector("time")?.getAttribute("datetime")).toBe(
+      "2026-12-31T16:30:00.000Z",
+    );
+    fixture.recipientId = "other";
+    fixture.timezone = "America/Los_Angeles";
+    fixture.epoch++;
+    await act(async () => root.render(<RoutinesApiPage />));
+    expect(container.textContent).toContain("长者时区：America/Los_Angeles");
+    expect(container.textContent).toContain("2026-12-31 08:30");
+    expect(container.textContent).not.toContain("已关闭-elder");
+    expect(container.textContent).not.toContain("2027-01-01 00:30");
+  });
+  it("keeps verification actions only on records awaiting family review", async () => {
+    fixture.request.mockImplementation(
+      async (path: string, options?: { method?: string }) => {
+        if (options?.method === "POST")
+          return { id: "review", status: "CONFIRMED" };
+        if (path.endsWith("/family-task-board"))
+          return { householdId: "home", recipientId: "elder", tasks: [] };
+        if (path.includes("/occurrences?"))
+          return [
+            {
+              id: "review",
+              status: "NEEDS_FAMILY_REVIEW",
+              version: 2,
+              routineTitle: "待核验",
+              scheduledAtUtc: "2026-09-20T04:00:00Z",
+            },
+            {
+              id: "unknown",
+              status: "FUTURE_STATE",
+              routineTitle: "未知",
+              scheduledAtUtc: "invalid",
+            },
+          ];
+        return [];
+      },
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    expect(container.textContent).toContain("待家属核验");
+    expect(container.textContent).toContain("状态未知");
+    expect(container.textContent).toContain("时间未知");
+    expect(container.textContent).not.toContain("FUTURE_STATE");
+    await click("核验已完成");
+    expect(fixture.request).toHaveBeenCalledWith(
+      "/households/home/occurrences/review/family-verify",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.objectContaining({ version: 2, verified: true }),
+      }),
+    );
+  });
   it("edits the complete rule with version and displays the returned once summary", async () => {
     let stored = original;
     fixture.request.mockImplementation(
