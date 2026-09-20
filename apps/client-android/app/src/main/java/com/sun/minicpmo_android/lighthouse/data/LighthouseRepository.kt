@@ -385,6 +385,26 @@ class LighthouseRepository(
             userRequest("GET", FamilyApiContract.careEventsPath(householdId, recipientId)),
         ).mapObjects(FamilyJsonMapper::parseCareEvent)
 
+    suspend fun listOccurrenceHistory(
+        householdId: String,
+        recipientId: String,
+        filter: CareHistoryFilter = CareHistoryFilter(),
+        cursor: String? = null,
+    ): CareHistoryPage<OccurrenceView> = CareHistoryContract.parse(
+        requireNotNull(userRequest("GET", CareHistoryContract.path(householdId, recipientId, CareHistoryKind.OCCURRENCES, filter, cursor))),
+        householdId, recipientId, FamilyJsonMapper::parseOccurrence,
+    )
+
+    suspend fun listCareEventHistory(
+        householdId: String,
+        recipientId: String,
+        filter: CareHistoryFilter = CareHistoryFilter(),
+        cursor: String? = null,
+    ): CareHistoryPage<CareEventView> = CareHistoryContract.parse(
+        requireNotNull(userRequest("GET", CareHistoryContract.path(householdId, recipientId, CareHistoryKind.EVENTS, filter, cursor))),
+        householdId, recipientId, FamilyJsonMapper::parseCareEvent,
+    )
+
     suspend fun listFamilyTasks(householdId: String, recipientId: String): List<FamilyTaskView> =
         FamilyJsonMapper.parseFamilyTaskBoard(
             requireNotNull(userRequest("GET", "households/$householdId/care-recipients/$recipientId/family-task-board")),

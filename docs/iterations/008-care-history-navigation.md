@@ -89,3 +89,9 @@ Server 与 Web 初步实现，Android 尚未改动；本轮不关闭。
 后续修正：同工作区的 401/403/404 通过页面联动清空两个历史区及同 VIEW_EVENTS 的任务数据，同时取消旧查询归属；两面板立即遮蔽旧正文，保留日期条件，用户“重新查询”后再检查权限。新增实际 React 日程页回归：另一面板正在翻页时收到撤权，两个正文均消失，随后迟到响应不能重新显示。修正后 Web **45 files / 295 tests** 全部通过，生产构建通过；尚待补充审查，不把发现数改写为原审查零问题。
 
 汇总：原检查点 Standards 1（P3），Spec 1（P1，已修正待复核）；Android 与真实环境验收仍未关闭。
+
+## Android 契约增量
+
+2026-09-21：新增 `CareHistoryFilter`／泛型页对象、查询路径与边界验证、页响应范围核对以及 Repository 两个分页方法。原数组读接口暂时保留供未迁移页面使用。事件解析必须先检查返回行 householdId／recipientId，再交给原 `FamilyJsonMapper`，不将缺失 cursor 等协议错误当作已到末页。
+
+`:app:testDebugUnitTest -PisolatedTestApp=true` 通过；读取 Gradle XML 为 **50 suites / 260 tests，0 failure/error/skipped**，其中新增 5 项契约测试。未运行本轮 connected 测试、未修改原安装包数据、未使用生产账号。**ViewModel／Compose 页面仍是旧读取路径，用户目前还不能在 App 使用本轮历史查询。** 后续迁移必须覆盖初载、手动刷新、核验回刷及切换／退出生命周期，并接入同工作区失权清理。
