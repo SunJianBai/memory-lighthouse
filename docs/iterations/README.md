@@ -12,7 +12,8 @@
 | 004 | 陪伴启动检查 | 三端实现与双轴审查完成，本地提交 81531c5、64be4c4；模拟器回归批次异常见验收记录 | [需求与验收](004-companion-readiness.md) · [调研](004-companion-readiness-research.md) |
 | 005 | 设备激活结果与恢复 | 三端验证及双轴审查完成，提交 4452c25、ddb471e；陪伴页 375px 追加验证通过，其余限制见记录 | [需求与验收](005-activation-recovery.md) · [调研](005-activation-recovery-research.md) |
 | 006 | 家庭待办主动释放 | 三端验收及双轴审查完成，提交 b632ffb、a0d2809、f77e94b；OWNER 回收未纳入 | [需求与验收](006-task-handoff.md) · [候选调研](006-task-handoff-research.md) |
-| 007 | 照护记录可读性与时区一致性 | 两端展示及服务端兼容验证、实际 Web／模拟器与双轴审查完成；功能提交 ba7d5bf | [需求与验收](007-care-history-readability.md) · [候选调研](007-care-history-readability-research.md) |
+| 007 | 照护记录可读性与时区一致性 | 两端展示及服务端兼容验证、实际 Web／模拟器与双轴审查完成；提交 ba7d5bf、3772907 | [需求与验收](007-care-history-readability.md) · [候选调研](007-care-history-readability-research.md) |
+| 008 | 照护记录筛选与历史查询 | 官方调研及源码可行性核对完成；尚未制定最终规格或实施 | [候选调研](008-care-history-navigation-research.md) |
 
 ## 后续候选
 
