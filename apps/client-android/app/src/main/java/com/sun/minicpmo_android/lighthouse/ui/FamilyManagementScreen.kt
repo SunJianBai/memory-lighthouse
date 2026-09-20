@@ -99,6 +99,8 @@ import com.sun.minicpmo_android.lighthouse.model.MemoryView
 import com.sun.minicpmo_android.lighthouse.model.OccurrenceView
 import com.sun.minicpmo_android.lighthouse.model.RoutineInput
 import com.sun.minicpmo_android.lighthouse.model.RoutineView
+import com.sun.minicpmo_android.lighthouse.model.RoutineRepeat
+import com.sun.minicpmo_android.lighthouse.model.RoutineScheduleRules
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -175,6 +177,7 @@ internal fun FamilyManagementContent(
     var memoryDelete by remember { mutableStateOf<MemoryView?>(null) }
     var routineEditor by remember { mutableStateOf<RoutineView?>(null) }
     var routineEditorVisible by remember { mutableStateOf(false) }
+    var routineSaveSubmitted by remember { mutableStateOf(false) }
     var routineDelete by remember { mutableStateOf<RoutineView?>(null) }
     var taskDecision by remember { mutableStateOf<TaskDecision?>(null) }
     var occurrenceDecision by remember { mutableStateOf<OccurrenceDecision?>(null) }
@@ -190,6 +193,7 @@ internal fun FamilyManagementContent(
         memoryDelete = null
         routineEditor = null
         routineEditorVisible = false
+        routineSaveSubmitted = false
         routineDelete = null
         taskDecision = null
         occurrenceDecision = null
@@ -401,16 +405,23 @@ internal fun FamilyManagementContent(
         )
     }
     val selectedRecipient = state.selectedRecipient
+    LaunchedEffect(state.routineSaveRevision) {
+        if (routineSaveSubmitted) {
+            routineEditorVisible = false
+            routineSaveSubmitted = false
+        }
+    }
     if (routineEditorVisible && selectedRecipient != null) {
         RoutineEditorDialog(
             routine = routineEditor,
             defaultTimezone = selectedRecipient.timezone,
             busy = state.busy,
-            onDismiss = { routineEditorVisible = false },
+            error = state.error.takeIf { routineSaveSubmitted },
+            onDismiss = { routineEditorVisible = false; routineSaveSubmitted = false },
             onSave = { input ->
+                routineSaveSubmitted = true
                 routineEditor?.let { actions.updateRoutine(it, input) }
                     ?: actions.createRoutine(input)
-                routineEditorVisible = false
             },
         )
     }
@@ -1543,7 +1554,7 @@ private fun RoutineCard(
     onDelete: (RoutineView) -> Unit,
 ) {
     val schedule = routine.schedules.firstOrNull()
-    OutlinedCard(Modifier.fillMaxWidth()) {
+    OutlinedCard(Modifier.fillMaxWidth().testTag("routine-card")) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1567,7 +1578,7 @@ private fun RoutineCard(
             )
             schedule?.let {
                 Text(
-                    "${weekdayMaskLabel(it.weekdayMask)} · ${it.timezone} · 提前 ${it.familyNoticeMinutes} 分钟通知家属",
+                    RoutineScheduleRules.summary(it),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1670,7 +1681,7 @@ internal fun FamilyTaskCard(
 
 @Composable
 internal fun FamilyTaskFilters(tasks: List<FamilyTaskView>, selected: FamilyTaskFilter, loading: Boolean, onSelect: (FamilyTaskFilter) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(Modifier.testTag("family-task-filters"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         FamilyTaskFilter.entries.chunked(2).forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 row.forEach { filter ->
@@ -2107,10 +2118,11 @@ private fun MemoryEditorDialog(
 }
 
 @Composable
-private fun RoutineEditorDialog(
+internal fun RoutineEditorDialog(
     routine: RoutineView?,
     defaultTimezone: String,
     busy: Boolean,
+    error: String? = null,
     onDismiss: () -> Unit,
     onSave: (RoutineInput) -> Unit,
 ) {
@@ -2126,8 +2138,9 @@ private fun RoutineEditorDialog(
         mutableStateOf(formatMinutes(schedule?.localTimeMinutes ?: 510))
     }
     var weekdayMask by remember(routine?.id) { mutableIntStateOf(schedule?.weekdayMask ?: 127) }
+    var repeat by remember(routine?.id) { mutableStateOf(RoutineRepeat.from(schedule)) }
     var startDate by remember(routine?.id) {
-        mutableStateOf(schedule?.startDate ?: LocalDate.now().toString())
+        mutableStateOf(schedule?.startDate ?: RoutineScheduleRules.today(timezone))
     }
     var endDate by remember(routine?.id) { mutableStateOf(schedule?.endDate.orEmpty()) }
     var graceMinutes by remember(routine?.id) {
@@ -2139,26 +2152,28 @@ private fun RoutineEditorDialog(
     val parsedTime = parseTime(timeText)
     val grace = graceMinutes.toIntOrNull()
     val notice = noticeMinutes.toIntOrNull()
-    val datesValid = runCatching { LocalDate.parse(startDate) }.isSuccess &&
-        (endDate.isBlank() || runCatching { LocalDate.parse(endDate) }.isSuccess)
+    val effectiveMask = if (repeat == RoutineRepeat.ONCE) 127 else weekdayMask
+    val effectiveEnd = if (repeat == RoutineRepeat.ONCE) startDate else endDate.trim().takeIf(String::isNotBlank)
+    val scheduleError = RoutineScheduleRules.error(timezone, parsedTime, effectiveMask, startDate, effectiveEnd, grace, notice)
     val valid = title.isNotBlank() && instructions.isNotBlank() && question.isNotBlank() &&
-        timezone.isNotBlank() && parsedTime != null && weekdayMask != 0 && datesValid &&
-        grace != null && grace in 0..1440 && notice != null && notice in 0..10080
+        scheduleError == null
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!busy) onDismiss() },
         icon = { Icon(Icons.Rounded.CalendarMonth, contentDescription = null) },
-        title = { Text(if (routine == null) "新增确定性日程" else "编辑日程") },
+        title = { Text(if (routine == null) "新增日程" else "编辑日程") },
         text = {
             Column(
                 Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                if (routine != null) Text("修改整条日程规则；已确认及已产生的家庭待办会保留。")
                 Text("日程类型", style = MaterialTheme.typography.labelLarge)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(ROUTINE_TYPES) { item ->
                         FilterChip(
                             selected = type == item.first,
+                            enabled = !busy,
                             onClick = { type = item.first },
                             label = { Text(item.second) },
                             modifier = Modifier.height(48.dp),
@@ -2167,6 +2182,7 @@ private fun RoutineEditorDialog(
                 }
                 OutlinedTextField(
                     value = title,
+                    enabled = !busy,
                     onValueChange = { title = it.take(200) },
                     label = { Text("标题") },
                     singleLine = true,
@@ -2174,6 +2190,7 @@ private fun RoutineEditorDialog(
                 )
                 OutlinedTextField(
                     value = instructions,
+                    enabled = !busy,
                     onValueChange = { instructions = it.take(4_000) },
                     label = { Text("家属录入的提醒内容") },
                     minLines = 3,
@@ -2181,6 +2198,7 @@ private fun RoutineEditorDialog(
                 )
                 OutlinedTextField(
                     value = question,
+                    enabled = !busy,
                     onValueChange = { question = it.take(1_000) },
                     label = { Text("确认问题") },
                     supportingText = { Text("例如：您已经按家属安排完成了吗？") },
@@ -2188,20 +2206,35 @@ private fun RoutineEditorDialog(
                 )
                 OutlinedTextField(
                     value = timeText,
+                    enabled = !busy,
                     onValueChange = { timeText = it.take(5) },
                     label = { Text("提醒时间") },
                     supportingText = { Text(if (parsedTime != null) "24 小时制 HH:mm" else "请输入有效时间，例如 08:30") },
                     isError = parsedTime == null,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Text("重复日期", style = MaterialTheme.typography.labelLarge)
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(WEEKDAYS) { day ->
+                Text("重复周期", style = MaterialTheme.typography.labelLarge)
+                RoutineRepeat.entries.chunked(2).forEach { choices ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        choices.forEach { choice -> FilterChip(
+                            selected = repeat == choice, enabled = !busy,
+                            onClick = {
+                                if (repeat == RoutineRepeat.ONCE && choice != RoutineRepeat.ONCE) endDate = ""
+                                repeat = choice
+                                if (choice != RoutineRepeat.CUSTOM) weekdayMask = choice.mask
+                            }, label = { Text(choice.label) }, modifier = Modifier.heightIn(min = 48.dp),
+                        ) }
+                    }
+                }
+                if (repeat == RoutineRepeat.CUSTOM) RoutineScheduleRules.weekdays.chunked(3).forEach { days ->
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    days.forEach { day ->
                         val selected = weekdayMask and day.first != 0
                         FilterChip(
                             selected = selected,
+                            enabled = !busy,
                             onClick = {
                                 weekdayMask = if (selected) {
                                     weekdayMask and day.first.inv()
@@ -2210,30 +2243,16 @@ private fun RoutineEditorDialog(
                                 }
                             },
                             label = { Text(day.second) },
-                            modifier = Modifier.height(48.dp),
+                            modifier = Modifier.heightIn(min = 48.dp),
                         )
                     }
+                  }
                 }
-                OutlinedTextField(
-                    value = startDate,
-                    onValueChange = { startDate = it.take(10) },
-                    label = { Text("开始日期") },
-                    supportingText = { Text("YYYY-MM-DD") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = endDate,
-                    onValueChange = { endDate = it.take(10) },
-                    label = { Text("结束日期（可选）") },
-                    supportingText = { Text("留空表示长期有效") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                RoutineDateField(startDate, { startDate = it }, if (repeat == RoutineRepeat.ONCE) "提醒日期" else "开始日期", busy, timezone)
+                if (repeat != RoutineRepeat.ONCE) RoutineDateField(endDate, { endDate = it }, "结束日期（可选）", busy, timezone)
                 OutlinedTextField(
                     value = timezone,
+                    enabled = !busy,
                     onValueChange = { timezone = it.take(64) },
                     label = { Text("时区") },
                     singleLine = true,
@@ -2241,8 +2260,9 @@ private fun RoutineEditorDialog(
                 )
                 OutlinedTextField(
                     value = graceMinutes,
+                    enabled = !busy,
                     onValueChange = { graceMinutes = it.filter(Char::isDigit).take(4) },
-                    label = { Text("确认宽限分钟") },
+                    label = { Text("确认等待（分钟）") },
                     supportingText = { Text("0–1440 分钟") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
@@ -2250,13 +2270,16 @@ private fun RoutineEditorDialog(
                 )
                 OutlinedTextField(
                     value = noticeMinutes,
+                    enabled = !busy,
                     onValueChange = { noticeMinutes = it.filter(Char::isDigit).take(5) },
-                    label = { Text("提前通知家属分钟") },
-                    supportingText = { Text("0–10080 分钟") },
+                    label = { Text("确认超时后的待办延迟（分钟）") },
+                    supportingText = { Text("提醒后先等待确认，再等待设定时长生成家属待办。") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Text(scheduleError ?: RoutineScheduleRules.summary(timezone, requireNotNull(parsedTime), effectiveMask, startDate, effectiveEnd), color = if (scheduleError == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         },
         confirmButton = {
@@ -2271,9 +2294,9 @@ private fun RoutineEditorDialog(
                             confirmationQuestion = question,
                             timezone = timezone,
                             localTimeMinutes = requireNotNull(parsedTime),
-                            weekdayMask = weekdayMask,
+                            weekdayMask = effectiveMask,
                             startDate = startDate,
-                            endDate = endDate.trim().takeIf(String::isNotBlank),
+                            endDate = effectiveEnd,
                             graceMinutes = requireNotNull(grace),
                             familyNoticeMinutes = requireNotNull(notice),
                         ),
@@ -2282,7 +2305,21 @@ private fun RoutineEditorDialog(
                 enabled = !busy && valid,
             ) { Text(if (busy) "正在保存" else "保存日程") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun RoutineDateField(value: String, onValueChange: (String) -> Unit, label: String, busy: Boolean, timezone: String) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    OutlinedTextField(
+        value = value, onValueChange = { onValueChange(it.take(10)) }, enabled = !busy,
+        label = { Text(label) }, supportingText = { Text(if (label.contains("可选")) "留空表示持续重复" else "YYYY-MM-DD") },
+        trailingIcon = { IconButton(enabled = !busy, onClick = {
+            val initial = runCatching { LocalDate.parse(value) }.getOrElse { runCatching { LocalDate.parse(RoutineScheduleRules.today(timezone)) }.getOrElse { LocalDate.now() } }
+            android.app.DatePickerDialog(context, { _, year, month, day -> onValueChange(LocalDate.of(year, month + 1, day).toString()) }, initial.year, initial.monthValue - 1, initial.dayOfMonth).show()
+        }) { Icon(Icons.Rounded.CalendarMonth, contentDescription = "选择$label") } },
+        singleLine = true, modifier = Modifier.fillMaxWidth(),
     )
 }
 
@@ -2473,17 +2510,6 @@ private val HOUSEHOLD_ROLE_OPTIONS = listOf(
     "VIEWER" to "只读成员",
 )
 
-/** Bit 0 is Sunday and bit 6 is Saturday, matching the server contract. */
-private val WEEKDAYS = listOf(
-    1 to "日",
-    2 to "一",
-    4 to "二",
-    8 to "三",
-    16 to "四",
-    32 to "五",
-    64 to "六",
-)
-
 private fun memoryKindLabel(value: String) = MEMORY_KINDS.toMap()[value] ?: value
 
 private fun routineTypeLabel(value: String) = ROUTINE_TYPES.toMap()[value] ?: value
@@ -2550,10 +2576,6 @@ private fun statusLabel(value: String) = when (value) {
     "DELETED" -> "已删除"
     else -> value
 }
-
-private fun weekdayMaskLabel(mask: Int): String =
-    if (mask == 127) "每天" else WEEKDAYS.filter { mask and it.first != 0 }
-        .joinToString("、") { "周${it.second}" }
 
 private fun formatMinutes(minutes: Int): String =
     "%02d:%02d".format(minutes / 60, minutes % 60)

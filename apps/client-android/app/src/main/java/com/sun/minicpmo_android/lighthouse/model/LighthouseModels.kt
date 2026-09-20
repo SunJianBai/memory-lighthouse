@@ -502,6 +502,7 @@ data class LighthouseUiState(
     val memories: List<MemoryView> = emptyList(),
     val memoryLoadError: String? = null,
     val routines: List<RoutineView> = emptyList(),
+    val routineSaveRevision: Long = 0,
     val routineLoadError: String? = null,
     val occurrences: List<OccurrenceView> = emptyList(),
     val occurrenceLoadError: String? = null,

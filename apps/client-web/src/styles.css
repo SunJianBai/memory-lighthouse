@@ -2230,6 +2230,17 @@ input[type="checkbox"] {
 .resource-toolbar p { margin: 3px 0 0; color: var(--color-muted-foreground); }
 .resource-toolbar > div:last-child { display: flex; flex-wrap: wrap; gap: 9px; }
 .resource-form { display: grid; gap: 12px; }
+.routine-editor fieldset { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; gap: 14px; }
+.routine-editor fieldset > label { display: grid; gap: 7px; }
+.routine-weekdays { display: flex; flex-wrap: wrap; gap: 8px; }
+.routine-weekdays button { min-width: 52px; min-height: 44px; }
+.routine-weekdays button[aria-pressed="true"] { background: var(--color-secondary); color: var(--color-accent-strong); border-color: var(--color-accent-strong); }
+.routine-editor summary { cursor: pointer; padding: 12px 0; }
+.routine-schedule-preview { padding: 12px 16px; border: 1px solid var(--color-border); border-radius: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.routine-card-actions { display: grid; justify-items: start; gap: 10px; }
+.routine-card-actions button { min-height: 44px; }
+.api-routine-list .routine-rule-summary { font-size: 0.9rem; line-height: 1.6; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .routine-card-actions { grid-column: 2; display: flex; flex-wrap: wrap; align-items: center; } }
 .resource-skeleton { display: grid; gap: 12px; padding: 8px 0; }
 .resource-skeleton span { height: 110px; border-radius: var(--radius-md); background: linear-gradient(90deg, #e9edef 20%, #f8fafb 50%, #e9edef 80%); background-size: 220% 100%; animation: skeleton-slide 1.4s linear infinite; }
 @keyframes skeleton-slide { to { background-position: -220% 0; } }

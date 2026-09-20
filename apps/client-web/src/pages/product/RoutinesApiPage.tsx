@@ -1,19 +1,11 @@
 import {
   CalendarClock,
   CheckCircle2,
-  ChevronDown,
   ClipboardCheck,
   Plus,
   RefreshCw,
 } from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type FormEvent,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiClient, readableError } from "../../api/api-client";
 import { IdempotentCommandRegistry } from "../../api/idempotent-command";
 import { useAuth } from "../../auth/auth-context";
@@ -36,19 +28,17 @@ import {
   type ScopedMutationOwner,
   type ScopedPageState,
 } from "./family-page-state";
-import { dateInTimeZone } from "./routine-date";
+import {
+  scheduleSummary,
+  scheduleTime as showTime,
+  type RoutineFormInput,
+} from "./routine-schedule";
+import { RoutineEditor } from "../../components/RoutineEditor";
 import {
   parseFamilyTaskBoard,
   type FamilyTaskBoardItem,
 } from "../../api/family-task-board";
 import { FamilyTaskPanel } from "../../components/FamilyTaskPanel";
-
-const toMinutes = (value: string) => {
-  const [hours, minutes] = value.split(":").map(Number);
-  return hours * 60 + minutes;
-};
-const showTime = (minutes: number) =>
-  `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 
 type RoutinePageData = {
   routines: RoutineView[];
@@ -83,11 +73,9 @@ export const RoutinesApiPage = () => {
   );
   const [formOpen, setFormOpen] = useState(false);
   const [formOwner, setFormOwner] = useState<ScopedMutationOwner | null>(null);
-  const [type, setType] = useState("OTHER");
-  const [title, setTitle] = useState("");
-  const [instructions, setInstructions] = useState("");
-  const [question, setQuestion] = useState("");
-  const [time, setTime] = useState("08:30");
+  const [editingRoutine, setEditingRoutine] = useState<RoutineView | null>(
+    null,
+  );
   const currentScopeKey = useRef(workspace.workspaceScopeKey);
   currentScopeKey.current = workspace.workspaceScopeKey;
   const scopeIdentity = {
@@ -255,11 +243,7 @@ export const RoutinesApiPage = () => {
     setErrorState(createScopedPageState(workspace.workspaceScopeKey, ""));
     setFormOpen(false);
     setFormOwner(null);
-    setType("OTHER");
-    setTitle("");
-    setInstructions("");
-    setQuestion("");
-    setTime("08:30");
+    setEditingRoutine(null);
   }, [workspace.workspaceScopeKey, workspace.workspaceScopeEpoch]);
 
   useEffect(() => {
@@ -267,8 +251,8 @@ export const RoutinesApiPage = () => {
     return () => loadRequests.current.invalidate();
   }, [load]);
 
-  const create = async (event: FormEvent) => {
-    event.preventDefault();
+  const saveRoutine = async (input: RoutineFormInput) => {
+    if (busyId) return;
     if (!formIsCurrent) {
       setErrorState(
         createScopedPageState(
@@ -281,27 +265,18 @@ export const RoutinesApiPage = () => {
       return;
     }
     const owner = formOwner;
-    const recipientTimezone = workspace.recipient?.timezone || "Asia/Shanghai";
-    setBusyState(createScopedPageState(owner.scopeKey, "create"));
+    setBusyState(createScopedPageState(owner.scopeKey, "save-routine"));
     setErrorState(createScopedPageState(owner.scopeKey, ""));
     try {
       const created = await apiClient.request<RoutineView>(
-        `/households/${owner.householdId}/care-recipients/${owner.recipientId}/routines`,
+        editingRoutine
+          ? `/households/${owner.householdId}/routines/${editingRoutine.id}`
+          : `/households/${owner.householdId}/care-recipients/${owner.recipientId}/routines`,
         {
-          method: "POST",
+          method: editingRoutine ? "PATCH" : "POST",
           body: {
-            type,
-            title: title.trim(),
-            instructions: instructions.trim(),
-            confirmationQuestion: question.trim(),
-            schedule: {
-              timezone: recipientTimezone,
-              localTimeMinutes: toMinutes(time),
-              weekdayMask: 127,
-              startDate: dateInTimeZone(new Date(), recipientTimezone),
-              graceMinutes: 5,
-              familyNoticeMinutes: 15,
-            },
+            ...input,
+            ...(editingRoutine ? { version: editingRoutine.version } : {}),
           },
         },
       );
@@ -316,14 +291,17 @@ export const RoutinesApiPage = () => {
             : EMPTY_ROUTINE_PAGE_DATA;
         return createScopedPageState(owner.scopeKey, {
           ...currentValue,
-          routines: [...currentValue.routines, created],
+          routines: editingRoutine
+            ? currentValue.routines.map((item) =>
+                item.id === created.id ? created : item,
+              )
+            : [...currentValue.routines, created],
         });
       });
-      setTitle("");
-      setInstructions("");
-      setQuestion("");
       setFormOpen(false);
       setFormOwner(null);
+      setEditingRoutine(null);
+      await load();
     } catch (createError) {
       if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
         setErrorState(
@@ -333,7 +311,8 @@ export const RoutinesApiPage = () => {
     } finally {
       if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
         setBusyState((current) =>
-          current.scopeKey === owner.scopeKey && current.value === "create"
+          current.scopeKey === owner.scopeKey &&
+          current.value === "save-routine"
             ? createScopedPageState(owner.scopeKey, "")
             : current,
         );
@@ -486,6 +465,8 @@ export const RoutinesApiPage = () => {
       return;
     }
     if (!workspace.householdId || !workspace.recipientId) return;
+    setEditingRoutine(null);
+    setErrorState(createScopedPageState(workspace.workspaceScopeKey, ""));
     setFormOwner(
       createScopedMutationOwner(
         scopeIdentity,
@@ -499,6 +480,21 @@ export const RoutinesApiPage = () => {
   const closeForm = () => {
     setFormOpen(false);
     setFormOwner(null);
+    setEditingRoutine(null);
+  };
+
+  const editRoutine = (routine: RoutineView) => {
+    if (busyId || !workspace.householdId || !workspace.recipientId) return;
+    setFormOwner(
+      createScopedMutationOwner(
+        scopeIdentity,
+        workspace.householdId,
+        workspace.recipientId,
+      ),
+    );
+    setEditingRoutine(routine);
+    setErrorState(createScopedPageState(workspace.workspaceScopeKey, ""));
+    setFormOpen(true);
   };
 
   if (!workspace.recipientId) {
@@ -522,7 +518,7 @@ export const RoutinesApiPage = () => {
           <button
             className="secondary-button"
             type="button"
-            disabled={loading}
+            disabled={loading || Boolean(busyId)}
             onClick={() => void load()}
           >
             <RefreshCw aria-hidden="true" size={18} /> 刷新
@@ -531,6 +527,7 @@ export const RoutinesApiPage = () => {
             className="primary-button"
             type="button"
             onClick={toggleForm}
+            disabled={Boolean(busyId)}
             aria-expanded={formOpen && formIsCurrent}
           >
             <Plus aria-hidden="true" size={18} /> 新建日程
@@ -539,93 +536,18 @@ export const RoutinesApiPage = () => {
       </section>
 
       {formOpen && formIsCurrent && (
-        <form
-          className="panel-card resource-form"
-          onSubmit={(event) => void create(event)}
-        >
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">每天重复</p>
-              <h2>新建日程</h2>
-            </div>
-          </div>
-          <div className="form-grid two-columns">
-            <label>
-              日程类型
-              <span className="select-wrap">
-                <select
-                  value={type}
-                  onChange={(event) => setType(event.target.value)}
-                >
-                  <option value="OTHER">日常事项</option>
-                  <option value="MEDICATION">用药提醒</option>
-                  <option value="MEAL">用餐提醒</option>
-                  <option value="HYDRATION">饮水提醒</option>
-                  <option value="ACTIVITY">活动安排</option>
-                  <option value="APPOINTMENT">预约事项</option>
-                </select>
-                <ChevronDown aria-hidden="true" size={17} />
-              </span>
-            </label>
-            <label>
-              提醒时间
-              <input
-                type="time"
-                required
-                value={time}
-                onChange={(event) => setTime(event.target.value)}
-              />
-            </label>
-          </div>
-          <label>
-            标题
-            <input
-              required
-              maxLength={200}
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-            />
-          </label>
-          <label>
-            家属录入的提醒内容
-            <textarea
-              required
-              rows={3}
-              maxLength={4_000}
-              value={instructions}
-              onChange={(event) => setInstructions(event.target.value)}
-            />
-          </label>
-          <label>
-            确认问题
-            <input
-              required
-              maxLength={1_000}
-              value={question}
-              onChange={(event) => setQuestion(event.target.value)}
-              placeholder="例如：您已经按家属安排完成了吗？"
-            />
-          </label>
-          <div className="form-actions">
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={closeForm}
-            >
-              取消
-            </button>
-            <button
-              className="primary-button"
-              type="submit"
-              disabled={busyId === "create"}
-            >
-              {busyId === "create" ? "正在保存…" : "保存日程"}
-            </button>
-          </div>
-        </form>
+        <RoutineEditor
+          key={`${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}:${editingRoutine?.id ?? "new"}`}
+          routine={editingRoutine}
+          timezone={workspace.recipient?.timezone ?? "Asia/Shanghai"}
+          busy={Boolean(busyId)}
+          error={error}
+          onSave={(input) => void saveRoutine(input)}
+          onCancel={closeForm}
+        />
       )}
 
-      {error && (
+      {error && !(formOpen && formIsCurrent) && (
         <div className="inline-alert danger" role="alert">
           <span>{error}</span>
           <button type="button" onClick={() => void load()}>
@@ -667,13 +589,29 @@ export const RoutinesApiPage = () => {
                   <div>
                     <strong>{routine.title}</strong>
                     <p>{routine.instructions}</p>
+                    <p className="routine-rule-summary">
+                      {scheduleSummary(routine.schedules[0])}
+                    </p>
                     <small>
                       {routine.contentProvenance === "FAMILY_ENTERED_VERBATIM"
                         ? "家属录入"
                         : routine.contentProvenance}
                     </small>
                   </div>
-                  <span className="status-pill success">{routine.status}</span>
+                  <div className="routine-card-actions">
+                    <span className="status-pill success">
+                      {routine.status === "ACTIVE" ? "已启用" : "已停用"}
+                    </span>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={Boolean(busyId)}
+                      aria-label={`编辑日程：${routine.title}`}
+                      onClick={() => editRoutine(routine)}
+                    >
+                      编辑
+                    </button>
+                  </div>
                 </article>
               ))}
             </div>

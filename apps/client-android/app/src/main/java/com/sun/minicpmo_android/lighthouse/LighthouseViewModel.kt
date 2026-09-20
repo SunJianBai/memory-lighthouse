@@ -513,6 +513,7 @@ class LighthouseViewModel internal constructor(
             _uiState.value = _uiState.value.copy(
                 routines = (_uiState.value.routines + created).distinctBy { it.id },
                 message = "日程已创建",
+                routineSaveRevision = _uiState.value.routineSaveRevision + 1,
             )
         },
     )
@@ -530,6 +531,7 @@ class LighthouseViewModel internal constructor(
             _uiState.value = _uiState.value.copy(
                 routines = _uiState.value.routines.replaceById(updated.id, updated) { it.id },
                 message = "日程已更新",
+                routineSaveRevision = _uiState.value.routineSaveRevision + 1,
             )
         },
     )
@@ -1374,12 +1376,8 @@ class LighthouseViewModel internal constructor(
         require(input.title.trim().isNotEmpty()) { "请填写日程标题" }
         require(input.instructions.trim().isNotEmpty()) { "请填写提醒内容" }
         require(input.confirmationQuestion.trim().isNotEmpty()) { "请填写确认问题" }
-        require(input.localTimeMinutes in 0..1439) { "提醒时间无效" }
-        require(input.weekdayMask in 1..127) { "请至少选择一天" }
-        require(input.graceMinutes in 0..1440) { "确认宽限时间无效" }
-        require(input.familyNoticeMinutes in 0..10080) { "家属通知时间无效" }
-        LocalDate.parse(input.startDate)
-        input.endDate?.takeIf(String::isNotBlank)?.let(LocalDate::parse)
+        val scheduleError = com.sun.minicpmo_android.lighthouse.model.RoutineScheduleRules.error(input)
+        require(scheduleError == null) { scheduleError.orEmpty() }
     }
 
     private suspend fun restoreDeviceData() {

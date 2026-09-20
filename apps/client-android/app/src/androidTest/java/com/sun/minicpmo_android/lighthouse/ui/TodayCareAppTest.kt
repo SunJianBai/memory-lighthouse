@@ -81,7 +81,15 @@ class TodayCareAppTest {
         compose.onNode(hasText("完成", substring = false) and hasAnyAncestor(openCard)).performScrollTo().performClick()
         compose.onNodeWithText("处理备注（可选）").performTextInput("模拟器验证：已联系确认")
         compose.onNodeWithText("确认已处理").performClick()
-        compose.waitUntil(15_000) { compose.onAllNodesWithText("已结束 2").fetchSemanticsNodes().isNotEmpty() }
+        // The completed card is removed from the lazy list; bring the filter row back
+        // into composition before waiting for its updated count.
+        compose.onNodeWithTag("care-list").performScrollToNode(hasTestTag("family-task-filters"))
+        try {
+            compose.waitUntil(15_000) { compose.onAllNodesWithText("已结束 2").fetchSemanticsNodes().isNotEmpty() }
+        } catch (failure: Throwable) {
+            File(directory, "family-task-failure.png").outputStream().use { compose.onRoot().captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it) }
+            throw AssertionError(compose.onRoot().printToString(), failure)
+        }
         compose.onNodeWithText("已结束 2").performClick()
         compose.onNodeWithTag("care-list").performScrollToNode(hasText("处理备注：模拟器验证：已联系确认"))
         compose.onNodeWithText("处理备注：模拟器验证：已联系确认").assertIsDisplayed()

@@ -61,7 +61,10 @@ import {
   replayCareCommand,
   saveCareCommand,
 } from './domain/care-command-idempotency';
-import { localMinuteToUtc, parseIsoDate } from './domain/schedule-time';
+import {
+  sameRoutineSchedule,
+  validateRoutineSchedule,
+} from './domain/routine-schedule';
 import type { CareWorkflowClock } from './ports/care-workflow-clock.port';
 import type { CareWorkflowContentCipher } from './ports/content-cipher.port';
 
@@ -356,9 +359,16 @@ export class CareWorkflowApplicationService {
           encryptionKeyId: protectedContent.encryptionKeyId,
         };
       }
-      const schedule = command.schedule
+      const requestedSchedule = command.schedule
         ? this.validateSchedule(command.schedule)
         : null;
+      const currentSchedule = current.schedules[0];
+      const schedule =
+        requestedSchedule &&
+        (!currentSchedule ||
+          !sameRoutineSchedule(currentSchedule, requestedSchedule))
+          ? requestedSchedule
+          : null;
       if (schedule) {
         await transaction.routineSchedule.updateMany({
           where: { routineId, active: true },
@@ -1393,53 +1403,7 @@ export class CareWorkflowApplicationService {
   }
 
   private validateSchedule(input: RoutineScheduleInput) {
-    if (!input.timezone.trim()) {
-      throw new InvalidScheduleException('timezone 不能为空');
-    }
-    if (
-      !Number.isInteger(input.weekdayMask) ||
-      input.weekdayMask < 1 ||
-      input.weekdayMask > 0b1111111
-    ) {
-      throw new InvalidScheduleException('weekdayMask 必须选择至少一天');
-    }
-    if (
-      !Number.isInteger(input.graceMinutes) ||
-      input.graceMinutes < 0 ||
-      input.graceMinutes > 1440
-    ) {
-      throw new InvalidScheduleException('graceMinutes 必须在 0 到 1440 之间');
-    }
-    if (
-      !Number.isInteger(input.familyNoticeMinutes) ||
-      input.familyNoticeMinutes < 0 ||
-      input.familyNoticeMinutes > 10080
-    ) {
-      throw new InvalidScheduleException(
-        'familyNoticeMinutes 必须在 0 到 10080 之间',
-      );
-    }
-    // This validates both the minute and IANA timezone. A null result can be a
-    // legitimate DST gap and therefore does not invalidate the recurring rule.
-    localMinuteToUtc(
-      { year: 2026, month: 1, day: 15 },
-      input.localTimeMinutes,
-      input.timezone,
-    );
-    const startDate = parseIsoDate(input.startDate);
-    const endDate = input.endDate ? parseIsoDate(input.endDate) : null;
-    if (endDate && endDate < startDate) {
-      throw new InvalidScheduleException('endDate 不能早于 startDate');
-    }
-    return {
-      timezone: input.timezone,
-      localTimeMinutes: input.localTimeMinutes,
-      weekdayMask: input.weekdayMask,
-      startDate,
-      endDate,
-      graceMinutes: input.graceMinutes,
-      familyNoticeMinutes: input.familyNoticeMinutes,
-    };
+    return validateRoutineSchedule(input);
   }
 
   private requireRoutineType(value: string): RoutineType {
