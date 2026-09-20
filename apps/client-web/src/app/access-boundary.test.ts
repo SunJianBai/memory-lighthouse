@@ -26,11 +26,11 @@ describe("family session route boundary", () => {
       /\/auth\/device-mode-lock[\s\S]*authenticated:\s*false[\s\S]*markAnonymous\(\)/,
     );
     expect(companionPageSource).toMatch(
-      /if \(!deviceSession\.hasCredential\(\)\) return;[\s\S]*await lockToDeviceMode\(\);[\s\S]*await loadContext\(\)/,
+      /const loadContext = useCallback\(async \(\) => \{[\s\S]*await lockToDeviceMode\(\);[\s\S]*await deviceSession\.context\(\)/,
     );
     const transition = companionPageSource.slice(
       companionPageSource.indexOf('setNotice("家属已确认'),
-      companionPageSource.indexOf('setNotice("设备激活完成'),
+      companionPageSource.indexOf("} catch (statusError)"),
     );
     const lockIndex = transition.indexOf("await lockToDeviceMode()");
     const exchangeIndex = transition.indexOf("await deviceSession.exchange");

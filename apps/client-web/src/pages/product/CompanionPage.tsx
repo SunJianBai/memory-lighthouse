@@ -79,6 +79,7 @@ import {
 } from "../../realtime/remote-answer-handoff";
 import { presentDeviceCall } from "../../realtime/device-call-presentation";
 import { useAppState } from "../../state/app-state";
+import { LatestScopedRequest } from "../../workspace/workspace-scope";
 import {
   formatCompanionContextSummary,
   resolveCompanionSessionConfiguration,
@@ -98,14 +99,19 @@ const ACTIVATION_RECOVERY_REQUIRED_KEY =
   "memory-lighthouse.activation-recovery-required.v1";
 const readPendingActivationChallenge = (): string => {
   try {
-    return globalThis.sessionStorage?.getItem(PENDING_ACTIVATION_CHALLENGE_KEY) ?? "";
+    return (
+      globalThis.sessionStorage?.getItem(PENDING_ACTIVATION_CHALLENGE_KEY) ?? ""
+    );
   } catch {
     return "";
   }
 };
 const readActivationRecoveryRequired = (): boolean => {
   try {
-    return globalThis.sessionStorage?.getItem(ACTIVATION_RECOVERY_REQUIRED_KEY) === "true";
+    return (
+      globalThis.sessionStorage?.getItem(ACTIVATION_RECOVERY_REQUIRED_KEY) ===
+      "true"
+    );
   } catch {
     return false;
   }
@@ -113,7 +119,10 @@ const readActivationRecoveryRequired = (): boolean => {
 const persistActivationRecoveryRequired = (required: boolean): void => {
   try {
     if (required) {
-      globalThis.sessionStorage?.setItem(ACTIVATION_RECOVERY_REQUIRED_KEY, "true");
+      globalThis.sessionStorage?.setItem(
+        ACTIVATION_RECOVERY_REQUIRED_KEY,
+        "true",
+      );
     } else {
       globalThis.sessionStorage?.removeItem(ACTIVATION_RECOVERY_REQUIRED_KEY);
     }
@@ -125,7 +134,10 @@ const persistActivationRecoveryRequired = (required: boolean): void => {
 const persistPendingActivationChallenge = (challengeId: string): void => {
   try {
     if (challengeId) {
-      globalThis.sessionStorage?.setItem(PENDING_ACTIVATION_CHALLENGE_KEY, challengeId);
+      globalThis.sessionStorage?.setItem(
+        PENDING_ACTIVATION_CHALLENGE_KEY,
+        challengeId,
+      );
     } else {
       globalThis.sessionStorage?.removeItem(PENDING_ACTIVATION_CHALLENGE_KEY);
     }
@@ -243,18 +255,28 @@ const runtimeStateFromContext = (
 export const CompanionPage = () => {
   const { user, lockToDeviceMode } = useAuth();
   const { state: demoState } = useAppState();
+  // Preferences/storage events are not a new device lifecycle. Read the latest
+  // defaults on explicit context loads without replaying the session lock.
+  const demoStateRef = useRef(demoState);
+  demoStateRef.current = demoState;
   const [initializing, setInitializing] = useState(true);
   const [activated, setActivated] = useState(false);
   const [context, setContext] = useState<DeviceContextView | null>(null);
   const [runtimeState, setRuntimeState] = useState<AppState | null>(null);
   const [online, setOnline] = useState(false);
   const [error, setError] = useState("");
+  const [activationError, setActivationError] = useState("");
+  const [contextError, setContextError] = useState("");
+  const [contextLoading, setContextLoading] = useState(false);
+  const contextRequests = useRef(new LatestScopedRequest());
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [publicId, setPublicId] = useState("");
   const [dynamicCode, setDynamicCode] = useState("");
   const [qrPayload, setQrPayload] = useState("");
-  const [challengeId, setChallengeId] = useState(readPendingActivationChallenge);
+  const [challengeId, setChallengeId] = useState(
+    readPendingActivationChallenge,
+  );
   const [challengeStatus, setChallengeStatus] = useState("");
   const [scanning, setScanning] = useState(false);
   const scannerVideo = useRef<HTMLVideoElement | null>(null);
@@ -303,17 +325,14 @@ export const CompanionPage = () => {
         setServerMediaStopped(false);
         return;
       }
-      stopLocalCompanionRuntime(
-        () => {
-          setServerMediaStopped(true);
-          setNotice(
-            heartbeat.reason
-              ? `陪伴媒体已由服务端停止：${heartbeat.reason}`
-              : "陪伴媒体授权或会话已失效，摄像头、麦克风和模型连接已停止。",
-          );
-        },
-        "server_media_stop",
-      );
+      stopLocalCompanionRuntime(() => {
+        setServerMediaStopped(true);
+        setNotice(
+          heartbeat.reason
+            ? `陪伴媒体已由服务端停止：${heartbeat.reason}`
+            : "陪伴媒体授权或会话已失效，摄像头、麦克风和模型连接已停止。",
+        );
+      }, "server_media_stop");
     },
     [stopLocalCompanionRuntime],
   );
@@ -328,14 +347,11 @@ export const CompanionPage = () => {
         deviceSession.heartbeat(reportedSessionId),
         reportedSessionId,
         (heartbeatError) => {
-          stopLocalCompanionRuntime(
-            () => {
-              setOnline(false);
-              setServerMediaStopped(true);
-              setError(readableError(heartbeatError));
-            },
-            "device_heartbeat_failed",
-          );
+          stopLocalCompanionRuntime(() => {
+            setOnline(false);
+            setServerMediaStopped(true);
+            setError(readableError(heartbeatError));
+          }, "device_heartbeat_failed");
         },
         isHeartbeatOwner,
       );
@@ -388,39 +404,68 @@ export const CompanionPage = () => {
   const failClosedCompanionWrite = useCallback(
     (writeError: unknown) => {
       const message = readableError(writeError);
-      stopLocalCompanionRuntime(
-        () => {
-          setServerMediaStopped(true);
-          setError(message);
-        },
-        "companion_write_rejected",
-      );
+      stopLocalCompanionRuntime(() => {
+        setServerMediaStopped(true);
+        setError(message);
+      }, "companion_write_rejected");
     },
     [stopLocalCompanionRuntime],
   );
 
-  const loadContext = useCallback(async () => {
-    const next = await deviceSession.context();
-    setContext(next);
-    setRuntimeState(
-      runtimeStateFromContext(demoState, next, next.careSnapshot),
-    );
+  // Persisted identity is the activation boundary; context and heartbeat are
+  // separate availability checks and must never send this device back to claim.
+  const completeActivation = useCallback(() => {
     setActivated(true);
-    await sendHeartbeat();
-  }, [demoState, sendHeartbeat]);
+    setActivationError("");
+    persistPendingActivationChallenge("");
+    activationRecoveryRequired.current = false;
+    persistActivationRecoveryRequired(false);
+    activationRetryBudget.current.reset();
+    setChallengeId("");
+    setChallengeStatus("");
+    setNotice("");
+  }, []);
+
+  const loadContext = useCallback(async () => {
+    const request = contextRequests.current.begin("device-context");
+    const isCurrent = () => contextRequests.current.isCurrent(request);
+    setContextLoading(true);
+    setContextError("");
+    try {
+      await lockToDeviceMode();
+      if (!isCurrent()) return;
+      const next = await deviceSession.context();
+      if (!isCurrent()) return;
+      setContext(next);
+      setRuntimeState(
+        runtimeStateFromContext(demoStateRef.current, next, next.careSnapshot),
+      );
+      try {
+        await sendHeartbeat();
+      } catch (heartbeatError) {
+        if (isCurrent()) {
+          setOnline(false);
+          setError(`在线状态同步失败：${readableError(heartbeatError)}`);
+        }
+      }
+    } catch (loadError) {
+      if (isCurrent()) setContextError(readableError(loadError));
+    } finally {
+      if (isCurrent()) setContextLoading(false);
+    }
+  }, [lockToDeviceMode, sendHeartbeat]);
 
   useEffect(() => {
     let cancelled = false;
     void deviceSession
       .initialize()
       .then(async () => {
-        if (!deviceSession.hasCredential()) return;
-        try {
-          await lockToDeviceMode();
-          await loadContext();
-        } catch (loadError) {
-          if (!cancelled) setError(readableError(loadError));
-        }
+        if (cancelled || !deviceSession.hasCredential()) return;
+        completeActivation();
+        await loadContext();
+      })
+      .catch((loadError) => {
+        if (!cancelled) setError(readableError(loadError));
       })
       .finally(() => {
         if (!cancelled) setInitializing(false);
@@ -428,22 +473,21 @@ export const CompanionPage = () => {
     return () => {
       cancelled = true;
     };
-  }, [loadContext, lockToDeviceMode]);
+  }, [completeActivation, loadContext]);
 
   useEffect(() => {
-    if (!activated) return;
+    if (!activated || !context) return;
     const timer = window.setInterval(() => {
-      void sendHeartbeat()
-        .catch(() => setOnline(false));
+      void sendHeartbeat().catch(() => setOnline(false));
     }, 5_000);
     return () => {
       heartbeatPolling.current.invalidate();
       window.clearInterval(timer);
     };
-  }, [activated, sendHeartbeat]);
+  }, [activated, context, sendHeartbeat]);
 
   useEffect(() => {
-    if (!activated) return;
+    if (!activated || !context) return;
     const adapter = new BrowserRemoteSignalAdapter();
     const unsubscribe = adapter.subscribe(({ session }) => {
       if (session.bindingId === deviceSession.bindingId) {
@@ -454,10 +498,10 @@ export const CompanionPage = () => {
       unsubscribe();
       adapter.close();
     };
-  }, [activated, commitRemoteSession]);
+  }, [activated, context, commitRemoteSession]);
 
   useEffect(() => {
-    if (!activated) return;
+    if (!activated || !context) return;
     let cancelled = false;
     const discover = async () => {
       try {
@@ -480,7 +524,7 @@ export const CompanionPage = () => {
       remoteDiscoveryPolling.current.invalidate();
       window.clearInterval(timer);
     };
-  }, [activated, commitRemoteSession]);
+  }, [activated, context, commitRemoteSession]);
 
   const endCompanionServerSessionById = useCallback(
     (sessionId: string, reason: string): Promise<void> => {
@@ -518,6 +562,8 @@ export const CompanionPage = () => {
     companionStartLifecycle.current.mount();
     remoteCommands.current.mount();
     return () => {
+      activationPollingEpoch.current += 1;
+      contextRequests.current.invalidate();
       companionStartLifecycle.current.unmount();
       heartbeatPolling.current.invalidate();
       remoteDiscoveryPolling.current.invalidate();
@@ -683,15 +729,15 @@ export const CompanionPage = () => {
 
   const claim = async (input: ActivationClaim) => {
     if (activationRecoveryRequired.current) {
-      setError("正在恢复设备，请稍候。");
+      setActivationError("正在恢复设备，请刷新后继续。");
       return;
     }
     setBusy(true);
-    setError("");
+    setActivationError("");
     setNotice("");
     if (!activationExchange.current.reset()) {
       setBusy(false);
-      setError("正在完成设备激活，请稍候。");
+      setActivationError("正在完成设备激活，请稍候。");
       return;
     }
     activationPollingEpoch.current += 1;
@@ -707,7 +753,7 @@ export const CompanionPage = () => {
       stopScanner();
     } catch (claimError) {
       if (activationPollingEpoch.current === claimEpoch) {
-        setError(readableError(claimError));
+        setActivationError(readableError(claimError));
       }
     } finally {
       if (activationPollingEpoch.current === claimEpoch) setBusy(false);
@@ -728,12 +774,12 @@ export const CompanionPage = () => {
     try {
       void claim(parseQrActivation(qrPayload));
     } catch (parseError) {
-      setError(readableError(parseError));
+      setActivationError(readableError(parseError));
     }
   };
 
   useEffect(() => {
-    if (!challengeId || activated) return;
+    if (initializing || !challengeId || activated) return;
     const epoch = activationPollingEpoch.current;
     let checking = false;
     let retryAfter = 0;
@@ -744,14 +790,9 @@ export const CompanionPage = () => {
       checking = true;
       try {
         if (deviceSession.hasCredential()) {
-          await lockToDeviceMode();
-          await loadContext();
-          if (activationPollingEpoch.current !== epoch) return;
+          completeActivation();
           stopped = true;
-          persistPendingActivationChallenge("");
-          activationRecoveryRequired.current = false;
-          persistActivationRecoveryRequired(false);
-          setChallengeId("");
+          await loadContext();
           return;
         }
         const status = await deviceSession.status(challengeId);
@@ -766,7 +807,8 @@ export const CompanionPage = () => {
           activationRetryBudget.current.reset();
           setChallengeId("");
           setNotice("");
-          setError(activationTerminalMessage(status.status));
+          setChallengeStatus("");
+          setActivationError(activationTerminalMessage(status.status));
           return;
         }
         if (
@@ -776,6 +818,7 @@ export const CompanionPage = () => {
           await activationExchange.current.run(async () => {
             setNotice("家属已确认，正在完成激活…");
             await lockToDeviceMode();
+            if (isStale()) return;
             if (!deviceSession.hasCredential()) {
               if (status.status === "CONSUMED" && !status.recoveryToken) {
                 throw new Error("设备恢复失败，请稍后重试");
@@ -786,15 +829,10 @@ export const CompanionPage = () => {
                 status.recoveryToken ?? undefined,
               );
             }
-            await loadContext();
-            if (activationPollingEpoch.current !== epoch) return;
+            if (isStale()) return;
+            completeActivation();
             stopped = true;
-            persistPendingActivationChallenge("");
-            activationRecoveryRequired.current = false;
-            persistActivationRecoveryRequired(false);
-            activationRetryBudget.current.reset();
-            setChallengeId("");
-            setNotice("设备激活完成，已开始发送在线心跳。 ");
+            await loadContext();
           });
         }
       } catch (statusError) {
@@ -804,7 +842,7 @@ export const CompanionPage = () => {
           activationRecoveryRequired.current = true;
           persistActivationRecoveryRequired(true);
           setNotice("设备恢复尚未完成，请刷新后继续。 ");
-          setError(readableError(statusError));
+          setActivationError(readableError(statusError));
           return;
         }
         if (!activationRetryBudget.current.shouldRetry(statusError)) {
@@ -814,16 +852,18 @@ export const CompanionPage = () => {
           persistActivationRecoveryRequired(false);
           activationExchange.current.reset();
           setChallengeId("");
+          setChallengeStatus("");
           setNotice("");
-          setError(
+          setActivationError(
             isActivationRecoveryConflict(statusError)
               ? "设备恢复失败，请重新扫描二维码或输入新的动态激活码"
               : readableError(statusError),
           );
           return;
         }
-        retryAfter = Date.now() + activationPollingRetryDelayMillis(statusError);
-        setError(readableError(statusError));
+        retryAfter =
+          Date.now() + activationPollingRetryDelayMillis(statusError);
+        setActivationError(readableError(statusError));
       } finally {
         checking = false;
       }
@@ -834,7 +874,14 @@ export const CompanionPage = () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [activated, challengeId, loadContext, lockToDeviceMode]);
+  }, [
+    activated,
+    challengeId,
+    completeActivation,
+    initializing,
+    loadContext,
+    lockToDeviceMode,
+  ]);
 
   const stopScanner = () => {
     scannerStream.current?.getTracks().forEach((track) => track.stop());
@@ -847,12 +894,12 @@ export const CompanionPage = () => {
       window as typeof window & { BarcodeDetector?: BarcodeDetectorConstructor }
     ).BarcodeDetector;
     if (!Detector) {
-      setError(
+      setActivationError(
         "当前浏览器不支持二维码识别，请粘贴二维码内容，或使用动态码激活",
       );
       return;
     }
-    setError("");
+    setActivationError("");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" },
@@ -880,7 +927,7 @@ export const CompanionPage = () => {
       void scan();
     } catch (scanError) {
       stopScanner();
-      setError(readableError(scanError));
+      setActivationError(readableError(scanError));
     }
   };
 
@@ -890,8 +937,7 @@ export const CompanionPage = () => {
     if (!command) return;
     const target = incoming;
     const ownsTarget = () =>
-      command.isCurrent() &&
-      remoteSessionOwner.current.isVisible(target.id);
+      command.isCurrent() && remoteSessionOwner.current.isVisible(target.id);
     setBusy(true);
     setError("");
     let onsiteAccepted = false;
@@ -975,16 +1021,14 @@ export const CompanionPage = () => {
     const sessionId = incoming.id;
     const timer = window.setInterval(
       () =>
-        void deviceSession
-          .renewRemoteLease(sessionId)
-          .catch(() => {
-            if (
-              remoteMedia.current.currentSessionId() === sessionId &&
-              remoteSessionOwner.current.isVisible(sessionId)
-            ) {
-              setCallDetail("媒体租约续期失败，请结束通话后重试");
-            }
-          }),
+        void deviceSession.renewRemoteLease(sessionId).catch(() => {
+          if (
+            remoteMedia.current.currentSessionId() === sessionId &&
+            remoteSessionOwner.current.isVisible(sessionId)
+          ) {
+            setCallDetail("媒体租约续期失败，请结束通话后重试");
+          }
+        }),
       20_000,
     );
     return () => window.clearInterval(timer);
@@ -996,8 +1040,7 @@ export const CompanionPage = () => {
     if (!command) return;
     const target = incoming;
     const ownsTarget = () =>
-      command.isCurrent() &&
-      remoteSessionOwner.current.isVisible(target.id);
+      command.isCurrent() && remoteSessionOwner.current.isVisible(target.id);
     setBusy(true);
     try {
       remoteDiscoveryPolling.current.invalidate();
@@ -1024,8 +1067,7 @@ export const CompanionPage = () => {
     if (!command) return;
     const target = incoming;
     const ownsTarget = () =>
-      command.isCurrent() &&
-      remoteSessionOwner.current.isVisible(target.id);
+      command.isCurrent() && remoteSessionOwner.current.isVisible(target.id);
     setBusy(true);
     try {
       remoteDiscoveryPolling.current.invalidate();
@@ -1074,8 +1116,12 @@ export const CompanionPage = () => {
           <span className="status-pill success">
             <Wifi aria-hidden="true" size={16} /> 设备已激活
           </span>
-          <strong>{context?.recipient.preferredName}的陪伴设备</strong>
-          <p>绑定编号末 6 位：{context?.bindingId.slice(-6)}</p>
+          <strong>
+            {context
+              ? `${context.recipient.preferredName}的陪伴设备`
+              : "设备信息暂未同步"}
+          </strong>
+          {context && <p>绑定编号末 6 位：{context.bindingId.slice(-6)}</p>}
           <p>
             {effectiveConfiguration ||
               formatCompanionContextSummary(
@@ -1088,7 +1134,35 @@ export const CompanionPage = () => {
           <PhoneCall aria-hidden="true" size={18} /> 等待家人来电
         </div>
       </div>
-      {context && <CompanionReadinessPanel key={`${context.deviceId}:${context.bindingId}`} deviceId={context.deviceId} bindingId={context.bindingId} />}
+      {!context && (
+        <div className="stack-form compact">
+          <p role="status">
+            {contextLoading
+              ? "正在同步设备信息…"
+              : "设备身份已保存，请重试同步，无需重新激活。"}
+          </p>
+          {contextError && (
+            <div className="form-message error" role="alert">
+              {contextError}
+            </div>
+          )}
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={contextLoading}
+            onClick={() => void loadContext()}
+          >
+            重试同步设备信息
+          </button>
+        </div>
+      )}
+      {context && (
+        <CompanionReadinessPanel
+          key={`${context.deviceId}:${context.bindingId}`}
+          deviceId={context.deviceId}
+          bindingId={context.bindingId}
+        />
+      )}
       {error && (
         <div className="inline-alert danger" role="alert">
           <span>{error}</span>
@@ -1135,14 +1209,24 @@ export const CompanionPage = () => {
         </button>
         <div className="workspace-switcher horizontal" aria-label="切换工作区">
           <button type="button" onClick={() => navigate("workspace-overview")}>
-            <ArrowLeft aria-hidden="true" size={18} /> {activated ? "退出设备模式并重新登录" : "家属工作区"}
+            <ArrowLeft aria-hidden="true" size={18} />{" "}
+            {activated ? "退出设备模式并重新登录" : "家属工作区"}
           </button>
           <button className="is-active" type="button" aria-current="page">
             <MonitorSmartphone aria-hidden="true" size={18} /> 陪伴设备模式
           </button>
         </div>
         <div className="companion-account">
-          <a className="companion-help-link" href={hrefFor("guide")} target="_blank" rel="noopener noreferrer" aria-label="使用指南（在新标签页打开，不中断陪伴）"><BookOpenText aria-hidden="true" size={18} />使用指南</a>
+          <a
+            className="companion-help-link"
+            href={hrefFor("guide")}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="使用指南（在新标签页打开，不中断陪伴）"
+          >
+            <BookOpenText aria-hidden="true" size={18} />
+            使用指南
+          </a>
           <span>
             {online ? (
               <Wifi aria-hidden="true" size={18} />
@@ -1151,7 +1235,9 @@ export const CompanionPage = () => {
             )}
             {online ? "在线" : "离线"}
           </span>
-          <strong>{activated ? "设备身份" : user?.displayName || "等待激活"}</strong>
+          <strong>
+            {activated ? "设备身份" : user?.displayName || "等待激活"}
+          </strong>
         </div>
       </header>
 
@@ -1261,8 +1347,16 @@ export const CompanionPage = () => {
             <div className="inline-alert info" role="status">
               <CheckCircle2 aria-hidden="true" size={20} />
               <span>
-                激活状态：{challengeStatus}。{notice}
+                {notice ||
+                  (challengeStatus === "CLAIMED"
+                    ? "等待家属核对并批准。"
+                    : "正在同步激活进度…")}
               </span>
+            </div>
+          )}
+          {activationError && (
+            <div className="inline-alert danger" role="alert">
+              <span>{activationError}</span>
             </div>
           )}
           {error && (
@@ -1280,118 +1374,125 @@ export const CompanionPage = () => {
             <section className="companion-runtime-shell">
               <div className="inline-alert danger" role="alert">
                 <ShieldCheck aria-hidden="true" size={20} />
-                <span>{notice || "陪伴媒体已停止，请检查授权后刷新设备上下文。"}</span>
+                <span>
+                  {notice || "陪伴媒体已停止，请检查授权后刷新设备上下文。"}
+                </span>
               </div>
             </section>
           )}
           {incoming && (
-        <section
-          className={`incoming-call-screen${
-            incoming.status === "RINGING" ? " is-overlay" : ""
-          }`}
-        >
-          <div className="incoming-pulse">
-            <PhoneCall aria-hidden="true" size={42} />
-          </div>
-          <p className="eyebrow">家庭成员来电</p>
-          <h1>家属来电</h1>
-          <p>
-            {context?.recipient.preferredName}，接听后将开启摄像头和麦克风。本次通话不会录制。
-          </p>
-          <div
-            className={`device-call-media ${
-              callPresentation?.state === "connected"
-                ? "is-connected"
-                : callPresentation?.state === "media-failed"
-                  ? "is-error"
-                  : "is-pending"
-            }`}
-          >
-            <video
-              ref={localVideo}
-              muted
-              autoPlay
-              playsInline
-              aria-label="本机摄像头预览"
-            />
-            <audio ref={remoteAudio} autoPlay aria-label="家属实时音频" />
-            {callPresentation?.state === "connected" ? (
-              <>
-                <span>
-                  <Camera aria-hidden="true" size={18} /> 本机画面正在发送
-                </span>
-                <span>
-                  <Mic aria-hidden="true" size={18} /> 双向音频已开启
-                </span>
-              </>
-            ) : (
-              <span className="span-full">
-                <ShieldCheck aria-hidden="true" size={18} />{" "}
-                {callPresentation?.message}
-              </span>
-            )}
-          </div>
-          {callDetail && (
-            <div
-              className={`form-message ${callPresentation?.callDetailTone ?? "success"}`}
-              role={callPresentation?.callDetailTone === "error" ? "alert" : "status"}
+            <section
+              className={`incoming-call-screen${
+                incoming.status === "RINGING" ? " is-overlay" : ""
+              }`}
             >
-              {callDetail}
-            </div>
-          )}
-          {error && (
-            <div className="form-message error" role="alert">
-              {error}
-            </div>
-          )}
-          <div className="incoming-actions">
-            {callPresentation?.state !== "connected" ? (
-              <>
-                <button
-                  className="decline-call-button"
-                  type="button"
-                  disabled={busy}
-                  onClick={() =>
-                    void (incoming.status === "RINGING"
-                      ? declineCall()
-                      : endCall())
+              <div className="incoming-pulse">
+                <PhoneCall aria-hidden="true" size={42} />
+              </div>
+              <p className="eyebrow">家庭成员来电</p>
+              <h1>家属来电</h1>
+              <p>
+                {context?.recipient.preferredName}
+                ，接听后将开启摄像头和麦克风。本次通话不会录制。
+              </p>
+              <div
+                className={`device-call-media ${
+                  callPresentation?.state === "connected"
+                    ? "is-connected"
+                    : callPresentation?.state === "media-failed"
+                      ? "is-error"
+                      : "is-pending"
+                }`}
+              >
+                <video
+                  ref={localVideo}
+                  muted
+                  autoPlay
+                  playsInline
+                  aria-label="本机摄像头预览"
+                />
+                <audio ref={remoteAudio} autoPlay aria-label="家属实时音频" />
+                {callPresentation?.state === "connected" ? (
+                  <>
+                    <span>
+                      <Camera aria-hidden="true" size={18} /> 本机画面正在发送
+                    </span>
+                    <span>
+                      <Mic aria-hidden="true" size={18} /> 双向音频已开启
+                    </span>
+                  </>
+                ) : (
+                  <span className="span-full">
+                    <ShieldCheck aria-hidden="true" size={18} />{" "}
+                    {callPresentation?.message}
+                  </span>
+                )}
+              </div>
+              {callDetail && (
+                <div
+                  className={`form-message ${callPresentation?.callDetailTone ?? "success"}`}
+                  role={
+                    callPresentation?.callDetailTone === "error"
+                      ? "alert"
+                      : "status"
                   }
                 >
-                  {incoming.status === "RINGING" ? (
-                    <PhoneOff aria-hidden="true" size={25} />
-                  ) : (
-                    <CircleStop aria-hidden="true" size={25} />
-                  )}{" "}
-                  {incoming.status === "RINGING" ? "拒绝" : "结束通话"}
-                </button>
-                {callPresentation?.canJoin && (
+                  {callDetail}
+                </div>
+              )}
+              {error && (
+                <div className="form-message error" role="alert">
+                  {error}
+                </div>
+              )}
+              <div className="incoming-actions">
+                {callPresentation?.state !== "connected" ? (
+                  <>
+                    <button
+                      className="decline-call-button"
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        void (incoming.status === "RINGING"
+                          ? declineCall()
+                          : endCall())
+                      }
+                    >
+                      {incoming.status === "RINGING" ? (
+                        <PhoneOff aria-hidden="true" size={25} />
+                      ) : (
+                        <CircleStop aria-hidden="true" size={25} />
+                      )}{" "}
+                      {incoming.status === "RINGING" ? "拒绝" : "结束通话"}
+                    </button>
+                    {callPresentation?.canJoin && (
+                      <button
+                        className="accept-call-button"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void acceptCall()}
+                      >
+                        <PhoneCall aria-hidden="true" size={25} />{" "}
+                        {busy
+                          ? "正在连接…"
+                          : incoming.status === "RINGING"
+                            ? "接听"
+                            : "加入通话"}
+                      </button>
+                    )}
+                  </>
+                ) : (
                   <button
-                    className="accept-call-button"
+                    className="decline-call-button"
                     type="button"
                     disabled={busy}
-                    onClick={() => void acceptCall()}
+                    onClick={() => void endCall()}
                   >
-                    <PhoneCall aria-hidden="true" size={25} />{" "}
-                    {busy
-                      ? "正在连接…"
-                      : incoming.status === "RINGING"
-                        ? "接听"
-                        : "加入通话"}
+                    <CircleStop aria-hidden="true" size={25} /> 结束通话
                   </button>
                 )}
-              </>
-            ) : (
-              <button
-                className="decline-call-button"
-                type="button"
-                disabled={busy}
-                onClick={() => void endCall()}
-              >
-                <CircleStop aria-hidden="true" size={25} /> 结束通话
-              </button>
-            )}
-          </div>
-        </section>
+              </div>
+            </section>
           )}
         </>
       )}

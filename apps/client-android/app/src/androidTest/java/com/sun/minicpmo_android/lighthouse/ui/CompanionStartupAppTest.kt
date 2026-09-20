@@ -60,6 +60,9 @@ class CompanionStartupAppTest {
             val exchanged = repository.exchangeApprovedActivation(pending)
             assertTrue(exchanged is ActivationExchangeOutcome.Activated)
             ownedBindingId = requireNotNull(vault.deviceCredential()).bindingId
+            // Model an interruption after credential commit but before pending cleanup.
+            // Inject only this test's own handle, before the real Activity/ViewModel starts.
+            vault.savePendingDeviceActivation(pending)
         }
 
         override fun after() {
@@ -73,6 +76,30 @@ class CompanionStartupAppTest {
         }
     }
     @get:Rule val rules: TestRule = RuleChain.outerRule(setup).around(compose)
+
+    @Test fun persistedCredentialWinsOverLeftoverActivationAfterActivityRecreation() {
+        compose.waitUntil(20_000) {
+            vault.pendingDeviceActivation() == null &&
+                compose.onAllNodesWithText("测试长者甲，今天也陪着您").fetchSemanticsNodes().isNotEmpty()
+        }
+        val binding = requireNotNull(vault.deviceCredential()).bindingId
+        // Activity recreation retains its ViewModel; it is not a process restart.
+        compose.activityRule.scenario.recreate()
+        compose.waitUntil(20_000) {
+            vault.pendingDeviceActivation() == null &&
+                compose.onAllNodesWithText("测试长者甲，今天也陪着您").fetchSemanticsNodes().isNotEmpty()
+        }
+        assertEquals(binding, vault.deviceCredential()?.bindingId)
+        assertNull(vault.userSession())
+        compose.onNodeWithText("激活陪伴设备").assertDoesNotExist()
+        compose.onNodeWithText("8 位动态激活码").assertDoesNotExist()
+        val directory = InstrumentationRegistry.getArguments().getString("additionalTestOutputDir")?.let(::File)
+            ?: InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir("qa")!!
+        directory.mkdirs()
+        File(directory, "activation-recovered-app.png").outputStream().use {
+            InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot().compress(Bitmap.CompressFormat.PNG, 100, it)
+        }
+    }
 
     @Test fun activatedDeviceChecksAgainstServerAndInvalidatesOnBackground() {
         val directory = InstrumentationRegistry.getArguments().getString("additionalTestOutputDir")?.let(::File)
