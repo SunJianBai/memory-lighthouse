@@ -188,14 +188,18 @@ POST   /v1/households/:householdId/occurrences/:occurrenceId/family-verify
 
 GET    /v1/households/:householdId/care-recipients/:recipientId/events
 GET    /v1/households/:householdId/family-tasks
+GET    /v1/households/:householdId/care-recipients/:recipientId/family-task-board
 POST   /v1/households/:householdId/family-tasks/:taskId/claim
+POST   /v1/households/:householdId/family-tasks/:taskId/release
 POST   /v1/households/:householdId/family-tasks/:taskId/resolve
 POST   /v1/households/:householdId/family-tasks/:taskId/dismiss
 ```
 
 客户端不能发送 `status=COMPLETED` 通用更新；必须调用明确的确认 Interface，由服务器验证当前状态并在事务中完成闭环。
 
-Occurrence 确认/家属复核、Family Task 的 claim/resolve/dismiss 及设备“联系家人”命令都要求 `Idempotency-Key`。若请求体也含 `idempotencyKey`，必须与请求头逐字一致；客户端对网络超时、断连及用户再次重试必须复用原键。服务端持久化“命令类型 + 主体 + 目标 + 完整规范化 payload”的 SHA-256 和首次响应；同键且完整命令一致时原样重放首次响应，`source`、`utteranceId`、`note`、`resolutionCode`、`version` 等任何业务字段变化均返回 `IDEMPOTENCY_CONFLICT`。
+Occurrence 确认/家属复核、Family Task 的 claim/release/resolve/dismiss 及设备“联系家人”命令都要求 `Idempotency-Key`。若请求体也含 `idempotencyKey`，必须与请求头逐字一致；客户端对网络超时、断连及用户再次重试必须复用原键。服务端持久化“命令类型 + 主体 + 目标 + 完整规范化 payload”的 SHA-256 和首次响应；同键且完整命令一致时原样重放首次响应，`source`、`utteranceId`、`note`、`resolutionCode`、`version` 等任何业务字段变化均返回 `IDEMPOTENCY_CONFLICT`。
+
+`release` 请求体为 `{ "version": <当前版本> }`。服务端复查当前成员与对象的 `VIEW_EVENTS` 权限，只允许 CLAIMED 任务当前负责人交回；更新为 OPEN、负责人置空、版本加一，不修改截止时间或记为完成。事务内记录 RELEASE 动作及 Outbox；其他成员（含 OWNER）不可代为交回，已结束任务不可重开。任务看板返回 `canRelease`，新客户端遇到旧接口缺少此字段时不显示按钮。详见 [006 验收](../iterations/006-task-handoff.md)。
 
 ## 8. Companion 和模型 Interface
 

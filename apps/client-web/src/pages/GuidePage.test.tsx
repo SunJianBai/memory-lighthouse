@@ -55,6 +55,8 @@ describe("public illustrated guide", () => {
     expect(html).toContain("现场接听");
     expect(html).toContain("不保证关闭页面后仍能提醒");
     expect(html).toContain("不是静默监控");
+    expect(html).toContain("交回待认领");
+    expect(html).toContain("事项仍未完成");
     expect(html).toContain("以下操作以 Web 端为例");
     expect(html).toContain("“陪伴麦克风”和“全模态模型处理”");
   });
