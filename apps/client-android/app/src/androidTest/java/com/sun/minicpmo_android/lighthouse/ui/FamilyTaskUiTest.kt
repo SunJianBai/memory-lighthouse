@@ -13,6 +13,12 @@ import org.junit.Test
 class FamilyTaskUiTest {
     @get:Rule val compose = createComposeRule()
     private fun task() = FamilyTaskView("task", "elder", "internal-event", "other", "CLAIMED", "NORMAL", null, null, null, null, 1, "需要联系长者", "核对是否需要帮助", "测试家属", false, false, false)
+    @Test fun endedTaskShowsVerificationResultWithoutANote() {
+        compose.setContent { MaterialTheme {
+            FamilyTaskCard(task().copy(status = "DISMISSED", resolutionCode = "FAMILY_VERIFIED_NOT_COMPLETE"), false, "Asia/Shanghai", {}, { _, _ -> })
+        } }
+        compose.onNodeWithText("处理结果：家属核验为未完成").assertIsDisplayed()
+    }
     @Test fun otherAssigneeHasNoFinishOrClaimButton() {
         compose.setContent { MaterialTheme { FamilyTaskCard(task(), false, "Asia/Shanghai", {}, { _, _ -> }) } }
         compose.onNodeWithText("负责人：测试家属").assertIsDisplayed()

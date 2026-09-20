@@ -106,6 +106,9 @@ function makeHarness() {
   };
   const identity = {
     reauthenticateUser: jest.fn(async () => undefined),
+    readActiveDisplayNames: jest.fn(
+      async () => new Map([['user-active', '测试家属']]),
+    ),
   };
   const service = new HouseholdApplicationService(
     prisma as never,
@@ -179,6 +182,58 @@ function memberRecord() {
 }
 
 describe('HouseholdApplicationService invariants', () => {
+  it('authorizes task labels before reading members or identities', async () => {
+    const h = makeHarness();
+    h.policy.requireRecipientAction.mockRejectedValue(
+      new HouseholdAccessDeniedException(),
+    );
+    await expect(
+      h.service.readTaskAssigneeNames(
+        h.transaction as never,
+        principal,
+        'home',
+        'elder',
+        ['member'],
+      ),
+    ).rejects.toThrow(HouseholdAccessDeniedException);
+    expect(h.transaction.householdMember.findMany).not.toHaveBeenCalled();
+    expect(h.identity.readActiveDisplayNames).not.toHaveBeenCalled();
+  });
+  it('keeps assignee membership and identity lookups in the authorized snapshot', async () => {
+    const h = makeHarness();
+    h.transaction.householdMember.findMany.mockResolvedValue([
+      { id: 'member', userId: 'user-active' },
+      { id: 'inactive-user-member', userId: 'user-disabled' },
+    ]);
+    expect(
+      await h.service.readTaskAssigneeNames(
+        h.transaction as never,
+        principal,
+        'home',
+        'elder',
+        ['member', 'member', 'inactive-user-member'],
+      ),
+    ).toEqual(new Map([['member', '测试家属']]));
+    expect(h.policy.requireRecipientAction).toHaveBeenCalledWith(
+      h.transaction,
+      principal.userId,
+      'home',
+      'elder',
+      'VIEW_EVENTS',
+    );
+    expect(h.transaction.householdMember.findMany).toHaveBeenCalledWith({
+      where: {
+        householdId: 'home',
+        id: { in: ['member', 'inactive-user-member'] },
+        status: 'ACTIVE',
+      },
+      select: { id: true, userId: true },
+    });
+    expect(h.identity.readActiveDisplayNames).toHaveBeenCalledWith(
+      h.transaction,
+      ['user-active', 'user-disabled'],
+    );
+  });
   it('rejects a role update before opening a transaction when password reauthentication fails', async () => {
     const harness = makeHarness();
     harness.identity.reauthenticateUser.mockRejectedValue(

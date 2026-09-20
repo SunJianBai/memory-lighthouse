@@ -3,6 +3,7 @@ import {
   filterFamilyTasks,
   parseFamilyTaskBoard,
   taskPriorityLabel,
+  taskStatusLabel,
   type FamilyTaskBoardItem,
 } from "./family-task-board";
 
@@ -45,6 +46,10 @@ describe("family task board contract", () => {
       "紧急",
     ]);
     expect(taskPriorityLabel("UNKNOWN")).toBe("优先级待核对");
+    for (const unknown of ["__proto__", "constructor", "toString"]) {
+      expect(taskPriorityLabel(unknown)).toBe("优先级待核对");
+      expect(taskStatusLabel(unknown)).toBe("状态待核对");
+    }
   });
   it("accepts a real empty board and does not infer totals from status labels", () => {
     expect(parseFamilyTaskBoard(board([]), "home", "elder")).toEqual([]);

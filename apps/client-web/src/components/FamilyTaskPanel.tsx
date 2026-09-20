@@ -5,6 +5,7 @@ import {
   taskFilters,
   taskStatusLabel,
   taskPriorityLabel,
+  taskResolutionLabel,
   type FamilyTaskBoardItem,
   type TaskFilter,
 } from "../api/family-task-board";
@@ -114,6 +115,9 @@ export function FamilyTaskPanel({
                   </p>
                 )}
                 {task.resolvedAt && <p>结束：{format(task.resolvedAt)}</p>}
+                {["RESOLVED", "DISMISSED"].includes(task.status) && (
+                  <p>处理结果：{taskResolutionLabel(task.resolutionCode)}</p>
+                )}
                 {task.resolutionNote && <p>处理备注：{task.resolutionNote}</p>}
                 {!task.canFinish && task.status === "CLAIMED" && (
                   <p>由负责人处理</p>

@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import type { PrismaService } from '../../infrastructure/database/prisma.service';
 import type { HouseholdAccessPolicy } from '../household/domain/household-access.policy';
+import type { HouseholdApplicationService } from '../household/household.application.service';
 import type { UserPrincipal } from '../identity/identity.types';
 import { FamilyTaskBoardService } from './family-task-board.service';
 
@@ -36,13 +37,6 @@ function task(status = 'OPEN', assigneeMemberId: string | null = null) {
 function harness() {
   const tx = {
     familyTask: { findMany: jest.fn().mockResolvedValue([task()]) },
-    householdMember: {
-      findMany: jest
-        .fn()
-        .mockResolvedValue([
-          { id: 'other', user: { displayName: '测试家属' } },
-        ]),
-    },
   };
   const prisma = {
     $transaction: jest.fn((read: (db: typeof tx) => unknown) => read(tx)),
@@ -54,12 +48,18 @@ function harness() {
     encrypt: jest.fn(),
     decrypt: jest.fn().mockReturnValue('["需要联系家属","请核对长者的请求"]'),
   };
+  const households = {
+    readTaskAssigneeNames: jest
+      .fn()
+      .mockResolvedValue(new Map([['other', '测试家属']])),
+  };
   const service = new FamilyTaskBoardService(
     prisma as unknown as PrismaService,
     policy as unknown as HouseholdAccessPolicy,
+    households as unknown as HouseholdApplicationService,
     cipher,
   );
-  return { tx, prisma, policy, cipher, service };
+  return { tx, prisma, policy, households, cipher, service };
 }
 describe('FamilyTaskBoardService', () => {
   it('authorizes before reading tasks, names or decrypting content', async () => {
@@ -69,7 +69,7 @@ describe('FamilyTaskBoardService', () => {
       ForbiddenException,
     );
     expect(h.tx.familyTask.findMany).not.toHaveBeenCalled();
-    expect(h.tx.householdMember.findMany).not.toHaveBeenCalled();
+    expect(h.households.readTaskAssigneeNames).not.toHaveBeenCalled();
     expect(h.cipher.decrypt).not.toHaveBeenCalled();
   });
   it('reads only the selected household and recipient in one repeatable snapshot', async () => {
@@ -128,18 +128,16 @@ describe('FamilyTaskBoardService', () => {
       task('CLAIMED', 'left'),
       task('CLAIMED', 'left'),
     ]);
-    h.tx.householdMember.findMany.mockResolvedValue([]);
+    h.households.readTaskAssigneeNames.mockResolvedValue(new Map());
     const { tasks } = await h.service.read(principal, 'home', 'elder');
-    expect(h.tx.householdMember.findMany).toHaveBeenCalledTimes(1);
-    expect(h.tx.householdMember.findMany).toHaveBeenCalledWith({
-      where: {
-        householdId: 'home',
-        id: { in: ['left'] },
-        status: 'ACTIVE',
-        user: { status: 'ACTIVE', deletedAt: null },
-      },
-      select: { id: true, user: { select: { displayName: true } } },
-    });
+    expect(h.households.readTaskAssigneeNames).toHaveBeenCalledTimes(1);
+    expect(h.households.readTaskAssigneeNames).toHaveBeenCalledWith(
+      h.tx,
+      principal,
+      'home',
+      'elder',
+      ['left'],
+    );
     expect(tasks[0]).toMatchObject({
       assigneeDisplayName: '原家庭成员',
       canFinish: false,

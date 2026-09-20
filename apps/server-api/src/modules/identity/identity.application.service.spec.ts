@@ -52,7 +52,11 @@ function makeHarness() {
       create: jest.fn(),
       updateMany: jest.fn(),
     },
-    user: { findUnique: jest.fn(), updateMany: jest.fn() },
+    user: {
+      findUnique: jest.fn(),
+      updateMany: jest.fn(),
+      findMany: jest.fn<() => Promise<{ id: string; displayName: string }[]>>(),
+    },
     userSession: {
       findUnique: jest.fn(),
       findMany: jest.fn(),
@@ -128,6 +132,22 @@ function activePreviousSession(overrides: Record<string, unknown> = {}) {
 }
 
 describe('IdentityApplicationService security paths', () => {
+  it('exposes only active display names in the supplied transaction snapshot', async () => {
+    const h = makeHarness();
+    h.prisma.user.findMany.mockResolvedValue([
+      { id: 'user', displayName: '家属' },
+    ]);
+    expect(
+      await h.service.readActiveDisplayNames(h.prisma as never, [
+        'user',
+        'user',
+      ]),
+    ).toEqual(new Map([['user', '家属']]));
+    expect(h.prisma.user.findMany).toHaveBeenCalledWith({
+      where: { id: { in: ['user'] }, status: 'ACTIVE', deletedAt: null },
+      select: { id: true, displayName: true },
+    });
+  });
   it('does not resolve user and admin access tokens across audiences', async () => {
     const harness = makeHarness();
     const userToken = harness.accessTokens.issueUser(

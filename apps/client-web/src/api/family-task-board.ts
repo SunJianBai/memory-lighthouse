@@ -31,17 +31,31 @@ export function filterFamilyTasks(
   });
 }
 
+const statusLabels = new Map([
+  ["OPEN", "待认领"],
+  ["CLAIMED", "处理中"],
+  ["RESOLVED", "已完成"],
+  ["DISMISSED", "不再处理"],
+]);
+const resolutionLabels = new Map([
+  ["FAMILY_CONFIRMED", "家属已确认处理"],
+  ["NOT_ACTIONABLE", "无需继续处理"],
+  ["FAMILY_VERIFIED_COMPLETE", "家属核验为完成"],
+  ["FAMILY_VERIFIED_NOT_COMPLETE", "家属核验为未完成"],
+]);
+const priorityLabels = new Map([
+  ["LOW", "低优先级"],
+  ["NORMAL", "普通"],
+  ["HIGH", "高优先级"],
+  ["URGENT", "紧急"],
+]);
 export const taskStatusLabel = (status: string) =>
-  ({
-    OPEN: "待认领",
-    CLAIMED: "处理中",
-    RESOLVED: "已完成",
-    DISMISSED: "不再处理",
-  })[status] ?? "状态待核对";
+  statusLabels.get(status) ?? "状态待核对";
+export const taskResolutionLabel = (code: string | null) =>
+  !code ? "未记录具体结果" : (resolutionLabels.get(code) ?? "已记录处理结果");
+
 export const taskPriorityLabel = (priority: string) =>
-  ({ LOW: "低优先级", NORMAL: "普通", HIGH: "高优先级", URGENT: "紧急" })[
-    priority
-  ] ?? "优先级待核对";
+  priorityLabels.get(priority) ?? "优先级待核对";
 
 /** Validate before rendering. A malformed or foreign response is not an empty board. */
 export function parseFamilyTaskBoard(

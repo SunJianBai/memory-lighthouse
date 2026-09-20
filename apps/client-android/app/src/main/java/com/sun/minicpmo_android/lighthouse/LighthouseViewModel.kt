@@ -594,7 +594,6 @@ class LighthouseViewModel internal constructor(
         scope = FamilyOperationScope.RECIPIENT,
         lane = "task:${task.id}",
         reconcile = FamilyOperationReconcile.RECIPIENT,
-        reconcilePublishedSuccess = false,
         request = {
             require(task.recipientId == recipientId) { "待办不属于当前陪伴对象" }
             val capturedHouseholdId = checkNotNull(householdId)
@@ -615,7 +614,6 @@ class LighthouseViewModel internal constructor(
         scope = FamilyOperationScope.RECIPIENT,
         lane = "task:${task.id}",
         reconcile = FamilyOperationReconcile.RECIPIENT,
-        reconcilePublishedSuccess = false,
         request = {
             require(task.recipientId == recipientId) { "待办不属于当前陪伴对象" }
             repository.finishFamilyTask(
@@ -1331,6 +1329,7 @@ class LighthouseViewModel internal constructor(
         ) return
         _uiState.value = _uiState.value.copy(
             memories = resources.memories.getOrDefault(emptyList()),
+            memoryLoadError = if (resources.memories.isFailure) "请核对记忆权限或使用顶部刷新重试。" else null,
             routines = resources.routines.getOrDefault(emptyList()),
             routineLoadError = if (resources.routines.isFailure) "请核对日程权限或使用顶部刷新重试。" else null,
             occurrences = resources.occurrences.getOrDefault(emptyList()),
@@ -1340,6 +1339,7 @@ class LighthouseViewModel internal constructor(
             familyTasks = resources.familyTasks.getOrDefault(emptyList()),
             familyTaskError = if (resources.familyTasks.isFailure) "家庭待办未能加载，请核对权限或刷新重试。" else null,
             consents = resources.consents.getOrDefault(emptyList()),
+            consentLoadError = if (resources.consents.isFailure) "请核对授权管理权限或使用顶部刷新重试。" else null,
         )
         val failed = listOf(
             "记忆" to resources.memories, "日程" to resources.routines,
@@ -1994,6 +1994,7 @@ private data class HouseholdDetails(
 
 private fun LighthouseUiState.withoutRecipientResources() = copy(
     memories = emptyList(),
+    memoryLoadError = null,
     routines = emptyList(),
     routineLoadError = null,
     occurrences = emptyList(),
@@ -2003,6 +2004,7 @@ private fun LighthouseUiState.withoutRecipientResources() = copy(
     familyTasks = emptyList(),
     familyTaskError = null,
     consents = emptyList(),
+    consentLoadError = null,
     careAuthorities = emptyList(),
     authoritiesLoadedRecipientId = null,
 )

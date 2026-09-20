@@ -287,6 +287,42 @@ export class HouseholdApplicationService {
     return members.map((member) => this.toMemberView(member));
   }
 
+  /** Recipient-authorized labels only, in the same snapshot as the task board. */
+  async readTaskAssigneeNames(
+    transaction: TransactionClient,
+    principal: AuthPrincipal,
+    householdId: string,
+    recipientId: string,
+    memberIds: string[],
+  ): Promise<Map<string, string>> {
+    await this.policy.requireRecipientAction(
+      transaction,
+      principal.userId,
+      householdId,
+      recipientId,
+      'VIEW_EVENTS',
+    );
+    if (memberIds.length === 0) return new Map();
+    const members = await transaction.householdMember.findMany({
+      where: {
+        householdId,
+        id: { in: [...new Set(memberIds)] },
+        status: ACTIVE_MEMBER_STATUS,
+      },
+      select: { id: true, userId: true },
+    });
+    const userNames = await this.identity.readActiveDisplayNames(
+      transaction,
+      members.map((member) => member.userId),
+    );
+    return new Map(
+      members.flatMap((member) => {
+        const name = userNames.get(member.userId);
+        return name === undefined ? [] : [[member.id, name] as const];
+      }),
+    );
+  }
+
   async updateMember(
     principal: AuthPrincipal,
     householdId: string,

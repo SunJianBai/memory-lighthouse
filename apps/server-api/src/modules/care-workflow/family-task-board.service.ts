@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../infrastructure/database/prisma.service';
 import { HouseholdAccessPolicy } from '../household/domain/household-access.policy';
+import { HouseholdApplicationService } from '../household/household.application.service';
 import type { UserPrincipal } from '../identity/identity.types';
 import { CARE_WORKFLOW_CONTENT_CIPHER } from './care-workflow.constants';
 import type { CareWorkflowContentCipher } from './ports/content-cipher.port';
@@ -11,6 +12,7 @@ export class FamilyTaskBoardService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly policy: HouseholdAccessPolicy,
+    private readonly households: HouseholdApplicationService,
     @Inject(CARE_WORKFLOW_CONTENT_CIPHER)
     private readonly cipher: CareWorkflowContentCipher,
   ) {}
@@ -48,20 +50,15 @@ export class FamilyTaskBoardService {
             ),
           ),
         ];
-        const members = assigneeIds.length
-          ? await tx.householdMember.findMany({
-              where: {
-                householdId,
-                id: { in: assigneeIds },
-                status: 'ACTIVE',
-                user: { status: 'ACTIVE', deletedAt: null },
-              },
-              select: { id: true, user: { select: { displayName: true } } },
-            })
-          : [];
-        const names = new Map(
-          members.map((member) => [member.id, member.user.displayName]),
-        );
+        const names = assigneeIds.length
+          ? await this.households.readTaskAssigneeNames(
+              tx,
+              principal,
+              householdId,
+              recipientId,
+              assigneeIds,
+            )
+          : new Map<string, string>();
         return {
           householdId,
           recipientId,

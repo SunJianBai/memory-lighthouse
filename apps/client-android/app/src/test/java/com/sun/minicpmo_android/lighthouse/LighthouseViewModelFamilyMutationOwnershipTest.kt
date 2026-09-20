@@ -55,6 +55,79 @@ class LighthouseViewModelFamilyMutationOwnershipTest {
     private val mainDispatcher = StandardTestDispatcher()
 
     @Test
+    fun failedMemoryAndConsentReadsRemainUnknownUntilSuccessfulRefresh() = runTest(mainDispatcher) {
+        var fail = true
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+            coEvery { repository.listMemories(any(), any()) } coAnswers {
+                if (fail) throw IOException("memory unavailable") else emptyList()
+            }
+            coEvery { repository.listConsents(any(), any()) } coAnswers {
+                if (fail) throw IOException("consent unavailable") else emptyList()
+            }
+        })
+        try {
+            fixture.signIn(this)
+            assertTrue(fixture.viewModel.uiState.value.memoryLoadError != null)
+            assertTrue(fixture.viewModel.uiState.value.consentLoadError != null)
+            fail = false
+            fixture.viewModel.refresh()
+            advanceUntilIdle()
+            assertNull(fixture.viewModel.uiState.value.memoryLoadError)
+            assertNull(fixture.viewModel.uiState.value.consentLoadError)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun slowRefreshCannotUndoTaskClaim() = assertTaskMutationSupersedesSlowRefresh(finish = false)
+
+    @Test
+    fun slowRefreshCannotUndoTaskCompletion() = assertTaskMutationSupersedesSlowRefresh(finish = true)
+
+    private fun assertTaskMutationSupersedesSlowRefresh(finish: Boolean) = runTest(mainDispatcher) {
+        val original = FamilyTaskView(
+            "task-1", RECIPIENT_A, "event-1", null, "OPEN", "NORMAL",
+            null, null, null, null, 0,
+        )
+        val updated = original.copy(status = if (finish) "RESOLVED" else "CLAIMED", version = 1)
+        var storedTasks = listOf(original)
+        val command = CompletableDeferred<FamilyTaskView>()
+        val slowMemories = CompletableDeferred<List<MemoryView>>()
+        var blockNextMemoryRead = false
+        var taskReads = 0
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+            coEvery { repository.listMemories(any(), any()) } coAnswers {
+                if (blockNextMemoryRead) {
+                    blockNextMemoryRead = false
+                    slowMemories.await()
+                } else emptyList()
+            }
+            coEvery { repository.listFamilyTasks(any(), any()) } coAnswers {
+                taskReads++
+                storedTasks
+            }
+            coEvery { repository.claimFamilyTask(any(), any()) } coAnswers { command.await() }
+            coEvery { repository.finishFamilyTask(any(), any(), any(), any()) } coAnswers { command.await() }
+        })
+        try {
+            fixture.signIn(this)
+            if (finish) fixture.viewModel.finishFamilyTask(original, true, null)
+            else fixture.viewModel.claimFamilyTask(original)
+            runCurrent()
+            blockNextMemoryRead = true
+            fixture.viewModel.refresh()
+            runCurrent()
+            assertEquals("refresh captured the old task snapshot", 2, taskReads)
+            storedTasks = listOf(updated)
+            command.complete(updated)
+            runCurrent()
+            assertEquals(listOf(updated), fixture.viewModel.uiState.value.familyTasks)
+            slowMemories.complete(emptyList())
+            advanceUntilIdle()
+            assertEquals("late refresh must not undo the successful command", listOf(updated), fixture.viewModel.uiState.value.familyTasks)
+        } finally { fixture.close() }
+    }
+
+    @Test
     fun routineDenialDoesNotHideAuthorizedFamilyTasks() = runTest(mainDispatcher) {
         val task = mockk<FamilyTaskView>(relaxed = true)
         val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->

@@ -146,6 +146,23 @@ export class IdentityApplicationService {
     private readonly accessTokens: AccessTokenService,
   ) {}
 
+  /** Internal projection for authorized module queries; uses the caller's snapshot. */
+  async readActiveDisplayNames(
+    transaction: Prisma.TransactionClient,
+    userIds: string[],
+  ): Promise<Map<string, string>> {
+    if (userIds.length === 0) return new Map();
+    const users = await transaction.user.findMany({
+      where: {
+        id: { in: [...new Set(userIds)] },
+        status: 'ACTIVE',
+        deletedAt: null,
+      },
+      select: { id: true, displayName: true },
+    });
+    return new Map(users.map((user) => [user.id, user.displayName]));
+  }
+
   async registerUser(
     command: RegisterUserCommand,
   ): Promise<SessionTokenResult> {

@@ -62,12 +62,12 @@
 
 | 检查 | 命令/证据 | 结果 |
 | --- | --- | --- |
-| Server 回归 | `npm run test --workspace @memory-lighthouse/server-api` | 82 组、461 项通过 |
+| Server 回归 | `npm run test --workspace @memory-lighthouse/server-api` | 82 组、464 项通过 |
 | Server 静态检查与构建 | 同工作区 `lint`、`build` | 通过 |
 | 真实 MySQL HTTP | 在 server-api 执行 `./scripts/today-care-local.ps1 -Mode Check` | 4 组、16 项通过，包含新看板 5 项和旧今日照护、授权及核验流程 |
-| Web 回归与构建 | `npm run test --workspace @memory-lighthouse/client-web`、同工作区 `build` | 37 组、195 项通过；构建通过，保留现有实时媒体大分包提示 |
-| Android 单测 | `:app:testDebugUnitTest -PisolatedTestApp=true` | 45 组、233 项，无失败或跳过 |
-| Android 真机型模拟器 | `:app:connectedDebugAndroidTest -PisolatedTestApp=true`，传入下述真实 API 夹具参数 | 12 项通过，0 跳过；最后一轮在全部 Android 修改后执行 |
+| Web 回归与构建 | `npm run test --workspace @memory-lighthouse/client-web`、同工作区 `build` | 37 组、204 项通过；构建通过，保留现有实时媒体大分包提示 |
+| Android 单测 | `:app:testDebugUnitTest -PisolatedTestApp=true` | 45 组、236 项，无失败或跳过 |
+| Android 真机型模拟器 | `:app:connectedDebugAndroidTest -PisolatedTestApp=true`，传入下述真实 API 夹具参数 | 15 项通过，0 跳过；最后一轮在全部 Android 修改后执行 |
 
 ### 实际效果
 
@@ -102,4 +102,24 @@ adb -s emulator-5554 reverse tcp:13100 tcp:13100
 
 预览进程在 Windows 中断后不能据此声称已清理；隔离库可能有历史测试数据，未对其执行批量删除。jsdom 仅用于 Web 开发测试；安装时报告的依赖审计问题没有在本轮擅自升级处理。
 
-当前状态：实现和本地验收完成，等待本地提交后的双轴审查。审查固定点由用户确认采用 `d71cd16`，不推送或部署。
+## 6. 双轴审查与收尾
+
+用户确认固定点 `d71cd16`；功能提交 `81416b2`。审查使用 `git diff d71cd16...HEAD`，修正后分别定点复审；没有操作生产或推送。
+
+### Standards
+
+- P2 模块边界：看板直接读取家庭成员及账号姓名。已改为 Household 的授权批量姓名查询，再经 Identity 读取活跃、未删除账号姓名；沿用内部事务协作参数，返回标签 Map 而非 Prisma 模型。授权、成员与账号查询共用调用方 RepeatableRead 快照。新增单测验证授权先行、过滤与事务传递，真实 MySQL 接口回归通过。
+- P2 状态误导：Android 独立加载时，授权或记忆读取失败会被当作空列表。已增加独立持久错误，错误时不展示授权决定或动作，缺项显示“授权状态待刷新”；成功刷新、切换对象均重置。真实 ViewModel 测试及模拟器 UI 断言先失败后通过。
+- P3 判断性代码异味：看板与旧工作流的部分解密、序列化逻辑重复。本轮保留，避免把功能收尾扩大为加密格式重构；后续合并时必须保留格式校验、对象范围检查及旧接口兼容性。这不是已证实的运行故障。
+
+本轴 3 项：2 项 P2 已修复并通过定点复审，1 项 P3 明确延后。
+
+### Spec
+
+- P2 同范围旧刷新覆盖：认领、完成曾关闭成功后的重同步。操作请求等待期间刷新，待办先读到旧值、其他模块较慢，操作成功后旧刷新会把状态恢复为 OPEN。新增真实 ViewModel 的两项 Deferred 测试均复现；恢复现有成功重同步使旧读取 generation 失效，两项测试及旧归属回归通过。
+- P2 缺少具体处理结果：Web/Android 已结束卡片补充中文结果，区分“家属核验为完成”“家属核验为未完成”“无需继续处理”等；无备注也显示结果。历史空码与未知码不推断为完成。Web 挂载、Android 模拟器断言先失败后通过；实际页面及截图已核对。
+- 定点复审新增 P2：Web 普通对象索引遇到 `__proto__`、`constructor`、`toString` 会返回非文本，导致页面崩溃或空白。三项挂载测试复现，改用 Map.get；同文件状态与优先级映射同步采用 Map。全部测试通过，复审实际 helper 与 React 渲染确认关闭。
+
+本轴累计 3 项，均已修复并通过定点复审，无遗留需求缺口。
+
+当前状态：本轮三端实现、回归与双轴审查完成，验收表为修正后的结果。下一轮调研另存 003 文档，不将候选需求描述为已实现。

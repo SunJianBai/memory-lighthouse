@@ -91,6 +91,7 @@ import com.sun.minicpmo_android.lighthouse.model.ConsentCatalog
 import com.sun.minicpmo_android.lighthouse.model.ConsentScopeDefinition
 import com.sun.minicpmo_android.lighthouse.model.FamilyTaskView
 import com.sun.minicpmo_android.lighthouse.model.FamilyTaskFilter
+import com.sun.minicpmo_android.lighthouse.model.taskResolutionLabel
 import com.sun.minicpmo_android.lighthouse.model.LighthouseUiState
 import com.sun.minicpmo_android.lighthouse.model.HouseholdMemberView
 import com.sun.minicpmo_android.lighthouse.model.MemoryInput
@@ -1252,7 +1253,7 @@ private fun CareAuthorityView.permissionSummary(): String {
 }
 
 @Composable
-private fun MemoriesSection(
+internal fun MemoriesSection(
     state: LighthouseUiState,
     onAdd: () -> Unit,
     onEdit: (MemoryView) -> Unit,
@@ -1276,7 +1277,11 @@ private fun MemoriesSection(
                 onAction = onAdd,
             )
         }
-        if (state.memories.isEmpty()) {
+        if (state.memoryLoadError != null) {
+            item { InlineEmpty("记忆未能加载", state.memoryLoadError) }
+        } else if (state.busy && state.memories.isEmpty()) {
+            item { InlineEmpty("正在加载记忆", "请稍候。") }
+        } else if (state.memories.isEmpty()) {
             item {
                 InlineEmpty("还没有记忆", "点击新增开始记录。")
             }
@@ -1443,12 +1448,20 @@ private fun CareSection(
 }
 
 @Composable
-private fun PrivacySection(
+internal fun PrivacySection(
     state: LighthouseUiState,
     onDecide: (ConsentScopeDefinition, Boolean) -> Unit,
 ) {
     if (state.selectedRecipient == null) {
         ResourceEmpty(Icons.Rounded.PrivacyTip, "尚未选择陪伴对象", "请先选择要管理的长者。")
+        return
+    }
+    if (state.consentLoadError != null) {
+        ResourceEmpty(Icons.Rounded.PrivacyTip, "暂时无法读取授权状态", state.consentLoadError)
+        return
+    }
+    if (state.busy && state.consents.isEmpty()) {
+        ResourceEmpty(Icons.Rounded.PrivacyTip, "正在读取授权状态", "请稍候。")
         return
     }
     LazyColumn(
@@ -1490,20 +1503,22 @@ private fun PrivacySection(
                     Text(definition.detail, style = MaterialTheme.typography.bodyMedium)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         StatusLabel(
-                            if (granted) "已授权" else if (consent?.decision == "REVOKED") "已撤回" else "未授权",
+                            if (consent == null) "授权状态待刷新" else if (granted) "已授权" else if (consent.decision == "REVOKED") "已撤回" else "未授权",
                         )
                         Spacer(Modifier.weight(1f))
                         if (granted) {
                             OutlinedButton(
                                 onClick = { onDecide(definition, false) },
+                                enabled = !state.busy,
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.error,
                                 ),
                                 modifier = Modifier.heightIn(min = 48.dp),
                             ) { Text("撤回") }
-                        } else {
+                        } else if (consent != null) {
                             Button(
                                 onClick = { onDecide(definition, true) },
+                                enabled = !state.busy,
                                 modifier = Modifier.heightIn(min = 48.dp),
                             ) { Text("查看并授权") }
                         }
@@ -1638,6 +1653,7 @@ internal fun FamilyTaskCard(
             } else if (task.status == "CLAIMED") {
                 Text("由负责人处理", color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else if (task.status in setOf("RESOLVED", "DISMISSED")) {
+                Text("处理结果：${taskResolutionLabel(task.resolutionCode)}", style = MaterialTheme.typography.bodyMedium)
                 task.resolvedAt?.let {
                     Text("结束：${DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneId.of(timezone)).format(Instant.parse(it))}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

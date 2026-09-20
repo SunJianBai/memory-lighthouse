@@ -40,6 +40,43 @@ const render = (tasks = [task], error = "", loading = false) =>
     />,
   );
 describe("family task presentation", () => {
+  it.each([
+    ["FAMILY_CONFIRMED", "家属已确认处理"],
+    ["NOT_ACTIONABLE", "无需继续处理"],
+    ["FAMILY_VERIFIED_COMPLETE", "家属核验为完成"],
+    ["FAMILY_VERIFIED_NOT_COMPLETE", "家属核验为未完成"],
+    ["FUTURE_CODE", "已记录处理结果"],
+    ["__proto__", "已记录处理结果"],
+    ["constructor", "已记录处理结果"],
+    ["toString", "已记录处理结果"],
+    [null, "未记录具体结果"],
+  ])("shows ended result %s even without a note", async (code, label) => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const host = document.createElement("div");
+    const root = createRoot(host);
+    try {
+      await act(async () => {
+        root.render(
+          <FamilyTaskPanel
+            tasks={[{ ...task, status: "DISMISSED", resolutionCode: code }]}
+            loading={false}
+            error=""
+            busyId=""
+            timezone="Asia/Shanghai"
+            onAction={() => {}}
+          />,
+        );
+      });
+      await act(async () => {
+        Array.from(host.querySelectorAll("button"))
+          .find((button) => button.textContent?.startsWith("已结束"))!
+          .click();
+      });
+      expect(host.textContent).toContain(`处理结果：${label}`);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
   it("requires an inline confirmation and allows cancelling without sending a command", async () => {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
     const host = document.createElement("div");
