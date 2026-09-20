@@ -10,6 +10,7 @@
 | 002 | 家庭待办协作 | 三端验收及双轴审查完成，本地提交 81416b2、b4b8390 | [需求与验收](002-task-collaboration.md) · [调研](002-task-collaboration-research.md) |
 | 003 | 提醒周期与日期范围 | 三端验收及双轴审查完成，本地提交 e45d1ca、3e8da32 | [需求与验收](003-routine-schedules.md) · [调研](003-routine-schedules-research.md) |
 | 004 | 陪伴启动检查 | 三端实现与双轴审查完成，本地提交 81531c5、64be4c4；模拟器回归批次异常见验收记录 | [需求与验收](004-companion-readiness.md) · [调研](004-companion-readiness-research.md) |
+| 005 | 设备激活结果与恢复 | 官方调研及现码核对完成；下一步建立确定性复现，再确定需求与实现范围 | [调研](005-activation-recovery-research.md) |
 
 ## 后续候选
 
