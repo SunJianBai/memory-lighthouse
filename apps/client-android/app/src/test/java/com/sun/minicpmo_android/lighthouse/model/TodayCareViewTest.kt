@@ -24,4 +24,20 @@ class TodayCareViewTest {
         assertThrows(Exception::class.java) { TodayCareView.fromJson(payload().put("generatedAt", "invalid")) }
         assertThrows(Exception::class.java) { TodayCareView.fromJson(payload().apply { getJSONObject("counts").put("total", -1) }) }
     }
+    @Test fun rejectsUnknownStatusInsteadOfCallingItPending() {
+        assertThrows(IllegalArgumentException::class.java) {
+            TodayCareView.fromJson(payload().apply { getJSONArray("items").getJSONObject(0).put("status", "NEW_STATE") })
+        }
+    }
+    @Test fun rejectsOversizedListAndBlankItemTitle() {
+        assertThrows(IllegalArgumentException::class.java) {
+            TodayCareView.fromJson(payload().apply {
+                val items = getJSONArray("items")
+                repeat(5) { items.put(items.getJSONObject(0)) }
+            })
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            TodayCareView.fromJson(payload().apply { getJSONArray("items").getJSONObject(0).put("title", " ") })
+        }
+    }
 }

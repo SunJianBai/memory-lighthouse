@@ -752,6 +752,8 @@ h3 {
 .companion-account .companion-help-link { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 8px; color: var(--color-accent-strong); text-decoration: none; }
 @media (max-width: 960px) {
   .guide-step-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .guide-activation-flow { grid-template-columns: 1fr; gap: 32px; }
+  .guide-activation-flow li + li::before { content: "↓"; top: -29px; left: calc(50% - 8px); }
   .guide-role-block, .guide-role-block.reverse { grid-template-columns: 1fr; gap: 24px; }
   .guide-role-block.reverse .guide-role-copy { order: initial; }
   .guide-role-figure { width: 100%; max-width: 600px; }
@@ -764,13 +766,11 @@ h3 {
   .guide-anchor-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .guide-anchor-nav a { padding-inline: 10px; font-size: .94rem; }
   .guide-section { padding-top: 36px; }
-  .guide-step-grid, .guide-capability-grid, .guide-activation-flow { grid-template-columns: 1fr; }
+  .guide-step-grid, .guide-capability-grid { grid-template-columns: 1fr; }
   .guide-step-grid li { padding: 18px; }
   .guide-step-grid h3 { margin-top: 12px; }
   .guide-step-grid p { margin-bottom: 4px; }
   .guide-activation-figure { padding: 18px; }
-  .guide-activation-flow { gap: 32px; }
-  .guide-activation-flow li + li::before { content: "↓"; top: -29px; left: calc(50% - 8px); }
   .family-figure { grid-template-columns: 24px minmax(0, 1fr); padding: 10px; gap: 8px; min-height: 300px; }
   .figure-sidebar { padding-inline: 6px; }
   .figure-scope { gap: 4px; }

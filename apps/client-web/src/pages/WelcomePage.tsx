@@ -121,8 +121,8 @@ export const WelcomePage = () => {
               <BellRing aria-hidden="true" size={36} />
             </div>
             <span>陪伴设备</span>
-            <strong>设备尚未激活</strong>
-            <p>登录家属工作区进行配置，或激活此设备</p>
+            <strong>陪伴设备配置</strong>
+            <p>家属端管理设备，陪伴端开始会话</p>
           </div>
           <div className="floating-note note-top">
             <span className="status-dot green" />

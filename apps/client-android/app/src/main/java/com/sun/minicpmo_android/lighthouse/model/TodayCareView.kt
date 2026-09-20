@@ -43,7 +43,14 @@ data class TodayCareView(
                 LocalDate.parse(snapshot.localDate)
                 ZoneId.of(snapshot.timezone)
                 Instant.parse(snapshot.generatedAt)
-                snapshot.items.forEach { Instant.parse(it.scheduledAt) }
+                require(snapshot.items.size <= 5) { "照护列表无效，请刷新重试" }
+                snapshot.items.forEach {
+                    Instant.parse(it.scheduledAt)
+                    require(it.id.isNotBlank() && it.title.isNotBlank()) { "照护事项无效，请刷新重试" }
+                    require(it.status in setOf("NEEDS_FAMILY_REVIEW", "DUE", "AWAITING_CONFIRMATION")) {
+                        "照护状态无效，请刷新重试"
+                    }
+                }
                 require(listOf(snapshot.total, snapshot.confirmed, snapshot.needsReview, snapshot.pending, snapshot.expired, snapshot.openTaskCount).all { it >= 0 }) {
                     "照护统计无效，请刷新重试"
                 }
