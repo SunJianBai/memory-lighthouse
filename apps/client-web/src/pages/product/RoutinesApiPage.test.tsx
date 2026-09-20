@@ -275,6 +275,131 @@ describe("independent routine and task loading", () => {
     expect(container.textContent).toContain("每周散步");
     expect(container.textContent).not.toContain("暂无日程");
   });
+  it.each([401, 403, 404])(
+    "clears shared history immediately on task-board %s without dropping slow routines",
+    async (status) => {
+      let denyTasks!: (error: unknown) => void;
+      let completeRoutines!: (value: unknown) => void;
+      let completeMore!: (value: unknown) => void;
+      const pendingTasks = new Promise((_, reject) => {
+        denyTasks = reject;
+      });
+      const pendingRoutines = new Promise((resolve) => {
+        completeRoutines = resolve;
+      });
+      const pendingMore = new Promise((resolve) => {
+        completeMore = resolve;
+      });
+      fixture.request.mockImplementation(async (path: string) => {
+        if (path.endsWith("/routines")) return pendingRoutines;
+        if (path.endsWith("/family-task-board")) return pendingTasks;
+        if (path.includes("/occurrences/history?"))
+          return history([
+            {
+              id: "protected-occurrence",
+              status: "EXPIRED",
+              routineTitle: "待办失权前的提醒正文",
+              scheduledAtUtc: "2026-09-20T00:00:00Z",
+            },
+          ]);
+        if (path.includes("/events/history?")) {
+          if (path.includes("cursor=")) return pendingMore;
+          return {
+            ...history([
+              {
+                id: "protected-event",
+                title: "待办失权前的动态正文",
+                occurredAt: "2026-09-20T00:00:00Z",
+              },
+            ]),
+            nextCursor: "next",
+          };
+        }
+        return [];
+      });
+      await act(async () => root.render(<RoutinesApiPage />));
+      expect(container.textContent).toContain("待办失权前的提醒正文");
+      expect(container.textContent).toContain("待办失权前的动态正文");
+      await click("加载更多");
+      await act(async () =>
+        denyTasks(new ApiError(status, { message: "待办查看权限已失效" })),
+      );
+      // Do not wait for the independently authorized routine request to settle.
+      expect(container.textContent).not.toContain("待办失权前的提醒正文");
+      expect(container.textContent).not.toContain("待办失权前的动态正文");
+      expect(container.textContent).toContain("待办查看权限已失效");
+      await act(async () =>
+        completeMore(
+          history([
+            {
+              id: "late-protected-event",
+              title: "撤权后迟到正文",
+              occurredAt: "2026-09-19T00:00:00Z",
+            },
+          ]),
+        ),
+      );
+      expect(container.textContent).not.toContain("撤权后迟到正文");
+      await act(async () => completeRoutines([original]));
+      expect(container.textContent).toContain("每周散步");
+      expect(container.textContent).not.toContain("待办失权前的动态正文");
+    },
+  );
+  it.each([new NetworkError(), new ApiError(500, {})])(
+    "keeps authorized history for an ordinary task-board failure: %s",
+    async (failure) => {
+      fixture.request.mockImplementation(async (path: string) => {
+        if (path.endsWith("/family-task-board")) throw failure;
+        if (path.includes("/events/history?"))
+          return history([
+            {
+              id: "authorized-event",
+              title: "仍有权限的动态",
+              occurredAt: "2026-09-20T00:00:00Z",
+            },
+          ]);
+        if (path.includes("/history?")) return history([]);
+        return [];
+      });
+      await act(async () => root.render(<RoutinesApiPage />));
+      expect(container.textContent).toContain("仍有权限的动态");
+      expect(container.textContent).toContain(failure.message);
+    },
+  );
+  it("ignores a task-board denial from a replaced workspace epoch", async () => {
+    let rejectOld!: (error: unknown) => void;
+    const oldTasks = new Promise((_, reject) => {
+      rejectOld = reject;
+    });
+    let taskLoads = 0;
+    let title = "初始动态";
+    fixture.request.mockImplementation(async (path: string) => {
+      if (path.endsWith("/family-task-board"))
+        return ++taskLoads === 1
+          ? oldTasks
+          : { householdId: "home", recipientId: "elder", tasks: [] };
+      if (path.includes("/events/history?"))
+        return history([
+          {
+            id: "authorized-event",
+            title,
+            occurredAt: "2026-09-20T00:00:00Z",
+          },
+        ]);
+      if (path.includes("/history?")) return history([]);
+      return [];
+    });
+    await act(async () => root.render(<RoutinesApiPage />));
+    title = "刷新后的动态";
+    fixture.epoch++;
+    await act(async () => root.render(<RoutinesApiPage />));
+    expect(container.textContent).toContain("刷新后的动态");
+    await act(async () =>
+      rejectOld(new ApiError(403, { message: "过期请求权限错误" })),
+    );
+    expect(container.textContent).toContain("刷新后的动态");
+    expect(container.textContent).not.toContain("过期请求权限错误");
+  });
   it("removes both protected panels and invalidates a sibling pending page on access denial", async () => {
     let complete!: (value: unknown) => void;
     const pending = new Promise((resolve) => {

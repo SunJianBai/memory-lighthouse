@@ -180,3 +180,16 @@ Android 契约本地提交 `b106ee2`；最后再次执行全量 260 项通过（
 - 重跑要求：该完整流程会修改合成提醒，必须新建 Preview 夹具；设置 `CARE_HISTORY_PREVIEW=true`，从启动输出读取新账号，以 `careApiBase`／`careUsername`／`careHistoryPreview=true` instrumentation 参数运行。不能对生产地址、原 App 或复用的真实家庭执行。
 
 第 008 轮验收证据现已覆盖真实 SQL、Web 页面及 Android MainActivity；不扩大到横屏／平板、最大系统字体或真实媒体链路。待最终固定范围双轴审查后关闭本轮。
+
+## 最终整轮审查与补丁
+
+最终审查固定 `d4116ee...a7e0507`，不是第 007 轮的 `8de3879`。两名独立 agent 在续跑确认旧代理不再运行后重新审查：
+
+- **Standards**：Hard 0／Judgement 2，最坏 P3；保留服务端两类页装配重复、Android 两处 kind→session 映射这两条低优先级维护建议。仅静态审查，没有新增硬性违例。
+- **Spec**：缺失／部分 0，范围蔓延 0，错误实现 1，最坏 P1。Web 待办列表和两个历史区域同属 VIEW_EVENTS，但 `family-task-board` 的 401／403／404 只形成任务错误，不触发历史区共享撤权；而且等待独立日程请求结束才处理错误。真实 React 页内存复现：历史先成功，待办403后旧正文仍在，晚到的追加页仍能显示。独立 Web 31／Server 56 项通过并未覆盖该入口。该发现不同于此前已修正的“history拒绝→兄弟区清理”，不抹去两次独立发现。
+
+补丁：提取同一作用域的 `denyHistoryAccess`，由两个历史区域和待办拒绝共用。待办 Promise 的 catch 在收到拒绝时立即检查本次 load、scope／epoch、访问代次后清空同权限结果，不等待慢日程；保留独立日程响应。非权限错误不调用共享拒绝，已替换 load 的错误忽略。
+
+测试：先新增401／403／404三项真实页面＋Deferred回归，均以旧正文仍存在失败；修复后通过。另覆盖普通网络／500不清有权限历史，旧workspace epoch的迟到403不清当前历史。后一用例初稿试图点击加载时已禁用的刷新按钮，不构成有效场景；改为真实作用域epoch替换，保留迟到拒绝断言。最终 Web **45 files／302 tests 全部通过**，TypeScript／Vite生产构建通过，原LiveKit分包警告保留。
+
+这一补丁的迟到竞态证据来自真实 React 组件和受控传输，不宣称在物理浏览器人为制造过相同网络时序；先前 a7e0507 的实际SQL／Web／模拟器操作证据仍分别保留。Android最终再次执行全量单测及assembleDebug，复读XML **51 suites／283 tests，0 failure/error/skipped**。待补丁复核后关闭本轮。

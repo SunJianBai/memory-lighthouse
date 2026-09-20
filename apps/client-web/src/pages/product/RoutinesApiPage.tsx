@@ -1,6 +1,6 @@
 import { CalendarClock, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiClient, readableError } from "../../api/api-client";
+import { ApiError, apiClient, readableError } from "../../api/api-client";
 import { IdempotentCommandRegistry } from "../../api/idempotent-command";
 import { useAuth } from "../../auth/auth-context";
 import type {
@@ -107,6 +107,33 @@ export const RoutinesApiPage = () => {
     [user?.id],
   );
 
+  const denyHistoryAccess = useCallback(
+    (owner: { key: string; epoch: number }, message: string) => {
+      if (
+        owner.key !== currentScopeIdentity.current.key ||
+        owner.epoch !== currentScopeIdentity.current.epoch
+      )
+        return;
+      // VIEW_EVENTS is independent of routine management: invalidate only protected reads.
+      setHistoryAccessState(
+        createScopedPageState(owner.key, {
+          sequence: ++accessSequence.current,
+          message,
+        }),
+      );
+      setPageState((current) =>
+        current.scopeKey !== owner.key
+          ? current
+          : createScopedPageState(owner.key, {
+              ...current.value,
+              tasks: [],
+              errors: { ...current.value.errors, tasks: message },
+            }),
+      );
+    },
+    [],
+  );
+
   const load = useCallback(
     async (refreshHistory = true) => {
       if (!workspace.householdId || !workspace.recipientId) {
@@ -151,7 +178,20 @@ export const RoutinesApiPage = () => {
             )
             .then((board) =>
               parseFamilyTaskBoard(board, owner.householdId, owner.recipientId),
-            ),
+            )
+            .catch((failure: unknown) => {
+              if (
+                requestIsCurrent() &&
+                ownerAccessSequence === accessSequence.current &&
+                failure instanceof ApiError &&
+                [401, 403, 404].includes(failure.status)
+              )
+                denyHistoryAccess(
+                  { key: owner.scopeKey, epoch: ownerEpoch },
+                  readableError(failure),
+                );
+              throw failure;
+            }),
         ]);
         if (!requestIsCurrent()) return;
         const guardedTasks =
@@ -219,6 +259,7 @@ export const RoutinesApiPage = () => {
       workspace.recipientId,
       workspace.workspaceScopeKey,
       workspace.workspaceScopeEpoch,
+      denyHistoryAccess,
     ],
   );
 
@@ -635,29 +676,9 @@ export const RoutinesApiPage = () => {
             onVerify={(item, verified) => void verifyOccurrence(item, verified)}
             accessError={historyAccessError}
             onRetryAccess={() => void load()}
-            onAccessDenied={(message) => {
-              if (
-                scopeIdentity.key !== currentScopeIdentity.current.key ||
-                scopeIdentity.epoch !== currentScopeIdentity.current.epoch
-              )
-                return;
-              // VIEW_EVENTS is independent of routine management: invalidate only protected reads.
-              setHistoryAccessState(
-                createScopedPageState(scopeIdentity.key, {
-                  sequence: ++accessSequence.current,
-                  message,
-                }),
-              );
-              setPageState((current) =>
-                current.scopeKey !== scopeIdentity.key
-                  ? current
-                  : createScopedPageState(scopeIdentity.key, {
-                      ...current.value,
-                      tasks: [],
-                      errors: { ...current.value.errors, tasks: message },
-                    }),
-              );
-            }}
+            onAccessDenied={(message) =>
+              denyHistoryAccess(scopeIdentity, message)
+            }
           />
         ))}
       </div>
