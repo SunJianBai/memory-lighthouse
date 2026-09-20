@@ -256,6 +256,25 @@ describe("independent routine and task loading", () => {
       }),
     );
   });
+  it("keeps separately authorized routines when a faster history request is denied", async () => {
+    let complete!: (value: unknown) => void;
+    const pending = new Promise((resolve) => {
+      complete = resolve;
+    });
+    fixture.request.mockImplementation(async (path: string) => {
+      if (path.endsWith("/routines")) return pending;
+      if (path.endsWith("/family-task-board"))
+        return { householdId: "home", recipientId: "elder", tasks: [] };
+      if (path.includes("/history?"))
+        throw new ApiError(403, { message: "无动态查看权限" });
+      return [];
+    });
+    await act(async () => root.render(<RoutinesApiPage />));
+    await act(async () => complete([original]));
+    expect(container.textContent).toContain("无动态查看权限");
+    expect(container.textContent).toContain("每周散步");
+    expect(container.textContent).not.toContain("暂无日程");
+  });
   it("removes both protected panels and invalidates a sibling pending page on access denial", async () => {
     let complete!: (value: unknown) => void;
     const pending = new Promise((resolve) => {

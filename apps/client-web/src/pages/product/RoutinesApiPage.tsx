@@ -133,6 +133,7 @@ export const RoutinesApiPage = () => {
       );
       const request = loadRequests.current.begin(owner.scopeKey);
       const ownerEpoch = workspace.workspaceScopeEpoch;
+      const ownerAccessSequence = accessSequence.current;
       const requestIsCurrent = () =>
         loadRequests.current.isCurrent(request) &&
         currentScopeKey.current === owner.scopeKey &&
@@ -153,9 +154,16 @@ export const RoutinesApiPage = () => {
             ),
         ]);
         if (!requestIsCurrent()) return;
+        const guardedTasks =
+          ownerAccessSequence === accessSequence.current
+            ? nextTasks
+            : {
+                status: "rejected" as const,
+                reason: new Error("照护权限已变更，请刷新重试"),
+              };
         const results = {
           routines: nextRoutines,
-          tasks: nextTasks,
+          tasks: guardedTasks,
         };
         const errors = Object.fromEntries(
           Object.entries(results).flatMap(([key, result]) =>
@@ -183,7 +191,8 @@ export const RoutinesApiPage = () => {
           createScopedPageState(owner.scopeKey, {
             routines:
               nextRoutines.status === "fulfilled" ? nextRoutines.value : [],
-            tasks: nextTasks.status === "fulfilled" ? nextTasks.value : [],
+            tasks:
+              guardedTasks.status === "fulfilled" ? guardedTasks.value : [],
             errors,
           }),
         );
@@ -632,9 +641,7 @@ export const RoutinesApiPage = () => {
                 scopeIdentity.epoch !== currentScopeIdentity.current.epoch
               )
                 return;
-              // Tasks and both history panels share VIEW_EVENTS. Invalidate pending reads too.
-              loadRequests.current.invalidate();
-              setLoadingScopeKey("");
+              // VIEW_EVENTS is independent of routine management: invalidate only protected reads.
               setHistoryAccessState(
                 createScopedPageState(scopeIdentity.key, {
                   sequence: ++accessSequence.current,
