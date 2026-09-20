@@ -64,6 +64,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -84,6 +85,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sun.minicpmo_android.lighthouse.model.CareRecipientInput
+import com.sun.minicpmo_android.lighthouse.data.CareHistoryKind
+import com.sun.minicpmo_android.lighthouse.model.CareHistoryFilter
 import com.sun.minicpmo_android.lighthouse.model.CareEventView
 import com.sun.minicpmo_android.lighthouse.model.CareAuthorityInput
 import com.sun.minicpmo_android.lighthouse.model.CareAuthorityView
@@ -128,6 +131,8 @@ internal class FamilyUiActions(
     val updateRoutine: (RoutineView, RoutineInput) -> Unit,
     val deleteRoutine: (RoutineView) -> Unit,
     val verifyOccurrence: (OccurrenceView, Boolean, String?) -> Unit,
+    val queryCareHistory: (CareHistoryKind, CareHistoryFilter?) -> Unit,
+    val loadMoreCareHistory: (CareHistoryKind) -> Unit,
     val claimFamilyTask: (FamilyTaskView) -> Unit,
     val releaseFamilyTask: (FamilyTaskView) -> Unit,
     val finishFamilyTask: (FamilyTaskView, Boolean, String?) -> Unit,
@@ -262,6 +267,8 @@ internal fun FamilyManagementContent(
                 )
                 FamilySection.CARE -> CareSection(
                     state = state,
+                    onQueryHistory = actions.queryCareHistory,
+                    onMoreHistory = actions.loadMoreCareHistory,
                     onAddRoutine = {
                         routineEditor = null
                         routineEditorVisible = true
@@ -1359,8 +1366,10 @@ internal fun MemoriesSection(
 }
 
 @Composable
-private fun CareSection(
+internal fun CareSection(
     state: LighthouseUiState,
+    onQueryHistory: (CareHistoryKind, CareHistoryFilter?) -> Unit,
+    onMoreHistory: (CareHistoryKind) -> Unit,
     onAddRoutine: () -> Unit,
     onEditRoutine: (RoutineView) -> Unit,
     onDeleteRoutine: (RoutineView) -> Unit,
@@ -1371,6 +1380,7 @@ private fun CareSection(
 ) {
     var taskFilter by remember(state.selectedHouseholdId, state.selectedRecipientId, state.user?.id) { mutableStateOf(FamilyTaskFilter.UNFINISHED) }
     val visibleTasks = taskFilter.select(state.familyTasks)
+    val historyScope = "${state.user?.id}/${state.selectedHouseholdId}/${state.selectedRecipientId}/${state.selectedRecipient?.timezone}/${state.careHistoryScopeRevision}"
     if (state.selectedRecipient == null) {
         ResourceEmpty(Icons.Rounded.CalendarMonth, "尚未选择陪伴对象", "请先选择要管理的长者。")
         return
@@ -1420,36 +1430,26 @@ private fun CareSection(
                 )
             }
         }
-        item {
+        item(key = "occurrence-history-controls") {
             SectionHeading("提醒记录", Icons.AutoMirrored.Rounded.EventNote)
-            Text(careHistoryTimezoneLabel(state.selectedRecipient?.timezone), style = MaterialTheme.typography.bodyLarge)
+            key(historyScope) { CareHistoryControls(CareHistoryKind.OCCURRENCES, state.occurrenceHistory,
+                state.selectedRecipient?.timezone.orEmpty(), historyScope, state.busy) { onQueryHistory(CareHistoryKind.OCCURRENCES, it) } }
         }
-        if (state.occurrenceLoadError != null) {
-            item { InlineEmpty("提醒记录未能加载", state.occurrenceLoadError) }
-        } else if (state.busy && state.occurrences.isEmpty()) {
-            item { InlineEmpty("正在加载提醒记录", "请稍候。") }
-        } else if (state.occurrences.isEmpty()) {
-            item { InlineEmpty("暂无提醒记录", "新提醒将在这里显示。") }
-        } else {
-            items(state.occurrences, key = { "occurrence-${it.id}" }) { occurrence ->
-                OccurrenceCard(occurrence, state.selectedRecipient?.timezone, onVerifyOccurrence)
-            }
+        items(state.occurrences, key = { "occurrence-${it.id}" }) { occurrence ->
+            OccurrenceCard(occurrence, state.occurrenceHistory.page?.timezone ?: state.selectedRecipient?.timezone, onVerifyOccurrence)
         }
-        item {
+        item(key = "occurrence-history-footer") { CareHistoryFooter(state.occurrenceHistory, state.busy,
+            onRetry = { onQueryHistory(CareHistoryKind.OCCURRENCES, null) }, onMore = { onMoreHistory(CareHistoryKind.OCCURRENCES) }) }
+        item(key = "event-history-controls") {
             SectionHeading("最近动态", Icons.Rounded.TaskAlt)
-            Text(careHistoryTimezoneLabel(state.selectedRecipient?.timezone), style = MaterialTheme.typography.bodyLarge)
+            key(historyScope) { CareHistoryControls(CareHistoryKind.EVENTS, state.eventHistory,
+                state.selectedRecipient?.timezone.orEmpty(), historyScope, state.busy) { onQueryHistory(CareHistoryKind.EVENTS, it) } }
         }
-        if (state.careEventLoadError != null) {
-            item { InlineEmpty("动态未能加载", state.careEventLoadError) }
-        } else if (state.busy && state.careEvents.isEmpty()) {
-            item { InlineEmpty("正在加载动态", "请稍候。") }
-        } else if (state.careEvents.isEmpty()) {
-            item { InlineEmpty("暂无动态", "新的照护记录将在这里显示。") }
-        } else {
-            items(state.careEvents, key = { "event-${it.id}" }) { event ->
-                CareEventCard(event, state.selectedRecipient?.timezone)
-            }
+        items(state.careEvents, key = { "event-${it.id}" }) { event ->
+            CareEventCard(event, state.eventHistory.page?.timezone ?: state.selectedRecipient?.timezone)
         }
+        item(key = "event-history-footer") { CareHistoryFooter(state.eventHistory, state.busy,
+            onRetry = { onQueryHistory(CareHistoryKind.EVENTS, null) }, onMore = { onMoreHistory(CareHistoryKind.EVENTS) }) }
     }
 }
 

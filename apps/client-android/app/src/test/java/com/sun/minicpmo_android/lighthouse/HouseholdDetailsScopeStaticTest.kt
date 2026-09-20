@@ -67,6 +67,10 @@ class HouseholdDetailsScopeStaticTest {
         assertTrue(actionFinally.contains("actionBusyTracker.end(busyLease)"))
         assertTrue(actionFinally.contains("publishActionBusy()"))
         assertFalse(showError.contains("busy = false"))
-        assertTrue(logout.contains("familyWorkspaceLoads.invalidate()"))
+        assertTrue(logout.contains("invalidateFamilyWorkspace()"))
+        val invalidation = viewModel.substringAfter("private fun invalidateFamilyWorkspace()")
+            .substringBefore("private fun closeCareHistory()")
+        assertTrue(invalidation.contains("familyWorkspaceLoads.invalidate()"))
+        assertTrue(invalidation.contains("closeCareHistory()"))
     }
 }

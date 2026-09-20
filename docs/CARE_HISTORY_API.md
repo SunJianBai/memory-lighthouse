@@ -1,6 +1,6 @@
 # 照护记录分页查询
 
-第 008 轮开发契约。Server／Web 已接入代码，Android 已新增 Repository 分页契约但尚未接入页面；隔离 MySQL／实际界面验收尚未完成。这不是已部署说明。完整规格和验收进度见[迭代文档](iterations/008-care-history-navigation.md)。
+第 008 轮开发契约。Server／Web／Android 已接入代码；隔离 MySQL 与真实 API 三端全链路验收尚未完成。这不是已部署说明。完整规格和验收进度见[迭代文档](iterations/008-care-history-navigation.md)。
 
 ## 路径与权限
 

@@ -13,6 +13,12 @@ import com.sun.minicpmo_android.lighthouse.model.ActivationPresentation
 import com.sun.minicpmo_android.lighthouse.model.CareAuthorityInput
 import com.sun.minicpmo_android.lighthouse.model.CareAuthorityView
 import com.sun.minicpmo_android.lighthouse.model.CareRecipientView
+import com.sun.minicpmo_android.lighthouse.model.CareHistoryPage
+import com.sun.minicpmo_android.lighthouse.model.CareEventView
+import com.sun.minicpmo_android.lighthouse.model.CareHistoryFilter
+import com.sun.minicpmo_android.lighthouse.model.OccurrenceView
+import com.sun.minicpmo_android.lighthouse.model.AppRole
+import com.sun.minicpmo_android.lighthouse.data.CareHistoryKind
 import com.sun.minicpmo_android.lighthouse.model.CompanionBindingView
 import com.sun.minicpmo_android.lighthouse.model.ConsentStateView
 import com.sun.minicpmo_android.lighthouse.model.HouseholdMemberView
@@ -26,6 +32,7 @@ import com.sun.minicpmo_android.lighthouse.model.UserView
 import com.sun.minicpmo_android.lighthouse.network.LighthouseApiException
 import com.sun.minicpmo_android.lighthouse.realtime.LiveCallState
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
@@ -53,6 +60,203 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class LighthouseViewModelFamilyMutationOwnershipTest {
     private val mainDispatcher = StandardTestDispatcher()
+
+    @Test
+    fun initialCareHistoryUsesPagedRepositoryInsteadOfLegacyArray() = runTest(mainDispatcher) {
+        val event = CareEventView("history-1", "ROUTINE_CONFIRMED", "INFO", "FAMILY", "历史动态", "原文", "2026-08-01T00:00:00Z")
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+            coEvery { repository.listCareEventHistory(any(), any(), any(), any()) } returns
+                CareHistoryPage(listOf(event), null, "Asia/Shanghai", null, null)
+        })
+        try {
+            fixture.signIn(this)
+            assertEquals(listOf(event), fixture.viewModel.uiState.value.careEvents)
+        } finally { fixture.close() }
+    }
+
+    private fun historyEvent(id: String) = CareEventView(id, "ROUTINE_CONFIRMED", "INFO", "FAMILY", id, "原文", "2026-08-01T00:00:00Z")
+    private fun eventPage(id: String, cursor: String? = null) = CareHistoryPage(listOf(historyEvent(id)), cursor, "Asia/Shanghai", null, null)
+
+    @Test
+    fun verificationAndRefreshKeepBothHistoryFiltersAndRemoveConfirmedFromReview() = runTest(mainDispatcher) {
+        val occurrence = OccurrenceView("o", HOUSEHOLD_ID, RECIPIENT_A, "rule", "饮水", "HYDRATION", "原文", "2026-08-01T00:00:00Z", "2026-08-01", "NEEDS_FAMILY_REVIEW", null, null, null, 1)
+        val reminderFilter = CareHistoryFilter("2026-08-01", "2026-08-31", "NEEDS_FAMILY_REVIEW")
+        val eventFilter = CareHistoryFilter("2026-07-01", "2026-07-31")
+        var verified = false
+        val reminderReads = mutableListOf<Pair<CareHistoryFilter, String?>>()
+        val eventReads = mutableListOf<Pair<CareHistoryFilter, String?>>()
+        lateinit var repo: LighthouseRepository
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+            repo = repository
+            coEvery { repository.listOccurrenceHistory(any(), any(), any(), any()) } coAnswers {
+                val filter = thirdArg<CareHistoryFilter>()
+                reminderReads += filter to arg<String?>(3)
+                CareHistoryPage(if (verified && filter.status == "NEEDS_FAMILY_REVIEW") emptyList() else listOf(occurrence), null, "Asia/Shanghai", null, null)
+            }
+            coEvery { repository.listCareEventHistory(any(), any(), any(), any()) } coAnswers {
+                eventReads += thirdArg<CareHistoryFilter>() to arg<String?>(3)
+                eventPage(if (verified) "verified-event" else "before")
+            }
+            coEvery { repository.familyVerifyOccurrence(HOUSEHOLD_ID, occurrence, true, any()) } coAnswers {
+                verified = true
+                occurrence.copy(status = "CONFIRMED", version = 2)
+            }
+        })
+        try {
+            fixture.signIn(this)
+            fixture.viewModel.queryCareHistory(CareHistoryKind.OCCURRENCES, reminderFilter)
+            fixture.viewModel.queryCareHistory(CareHistoryKind.EVENTS, eventFilter)
+            advanceUntilIdle()
+            fixture.viewModel.verifyOccurrence(occurrence, true, null)
+            advanceUntilIdle()
+            assertTrue(fixture.viewModel.uiState.value.occurrences.isEmpty())
+            assertEquals(listOf(historyEvent("verified-event")), fixture.viewModel.uiState.value.careEvents)
+            assertEquals(reminderFilter to null, reminderReads.last())
+            assertEquals(eventFilter to null, eventReads.last())
+            fixture.viewModel.refresh(); advanceUntilIdle()
+            assertEquals(reminderFilter, fixture.viewModel.uiState.value.occurrenceHistory.filter)
+            assertEquals(eventFilter, fixture.viewModel.uiState.value.eventHistory.filter)
+            coVerify(exactly = 0) { repo.listOccurrences(any(), any(), any(), any()) }
+            coVerify(exactly = 0) { repo.listCareEvents(any(), any()) }
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun historyDenialClearsBothPanelsAndTasksDespitePendingSiblingPage() = runTest(mainDispatcher) {
+        val late = CompletableDeferred<CareHistoryPage<CareEventView>>()
+        val task = mockk<FamilyTaskView>(relaxed = true)
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+            coEvery { repository.listFamilyTasks(any(), any()) } returns listOf(task)
+            coEvery { repository.listCareEventHistory(any(), any(), any(), any()) } coAnswers {
+                if (arg<String?>(3) != null) late.await() else eventPage("private", "next")
+            }
+            coEvery { repository.listOccurrenceHistory(any(), any(), any(), any()) } coAnswers {
+                if (thirdArg<CareHistoryFilter>().startDate != null) throw LighthouseApiException(403, "DENIED", "权限已撤回")
+                CareHistoryPage(emptyList(), null, "Asia/Shanghai", null, null)
+            }
+        })
+        try {
+            fixture.signIn(this)
+            assertEquals(listOf(task), fixture.viewModel.uiState.value.familyTasks)
+            fixture.viewModel.loadMoreCareHistory(CareHistoryKind.EVENTS); runCurrent()
+            fixture.viewModel.queryCareHistory(CareHistoryKind.OCCURRENCES, CareHistoryFilter("2026-08-01", "2026-08-31")); runCurrent()
+            val denied = fixture.viewModel.uiState.value
+            assertNull(denied.eventHistory.page)
+            assertNull(denied.occurrenceHistory.page)
+            assertTrue(denied.familyTasks.isEmpty())
+            assertEquals("权限已撤回", denied.familyTaskError)
+            late.complete(eventPage("late-private")); advanceUntilIdle()
+            assertNull(fixture.viewModel.uiState.value.eventHistory.page)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun fastHistoryDenialRejectsSlowTasksButKeepsIndependentlyAuthorizedRoutines() = runTest(mainDispatcher) {
+        val slowTasks = CompletableDeferred<List<FamilyTaskView>>()
+        val slowRoutines = CompletableDeferred<List<RoutineView>>()
+        val routine = mockk<RoutineView>(relaxed = true)
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+            coEvery { repository.listRoutines(any(), any()) } coAnswers { slowRoutines.await() }
+            coEvery { repository.listFamilyTasks(any(), any()) } coAnswers { slowTasks.await() }
+            coEvery { repository.listCareEventHistory(any(), any(), any(), any()) } throws LighthouseApiException(403, "DENIED", "不能查看记录")
+        })
+        try {
+            fixture.signIn(this)
+            slowRoutines.complete(listOf(routine))
+            slowTasks.complete(listOf(mockk(relaxed = true)))
+            advanceUntilIdle()
+            assertEquals(listOf(routine), fixture.viewModel.uiState.value.routines)
+            assertNull(fixture.viewModel.uiState.value.routineLoadError)
+            assertTrue(fixture.viewModel.uiState.value.familyTasks.isEmpty())
+            assertEquals("不能查看记录", fixture.viewModel.uiState.value.familyTaskError)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun recipientABAIgnoresLateHistorySuccessAndDenial() = runTest(mainDispatcher) {
+        for (fail in listOf(false, true)) {
+            val late = CompletableDeferred<CareHistoryPage<CareEventView>>()
+            var aReads = 0
+            val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+                coEvery { repository.listCareEventHistory(any(), any(), any(), any()) } coAnswers {
+                    if (secondArg<String>() == RECIPIENT_A && ++aReads == 1) late.await() else eventPage("current-${secondArg<String>()}")
+                }
+            })
+            try {
+                fixture.signIn(this)
+                fixture.viewModel.selectRecipient(RECIPIENT_B); advanceUntilIdle()
+                fixture.viewModel.selectRecipient(RECIPIENT_A); advanceUntilIdle()
+                if (fail) late.completeExceptionally(signedOutError()) else late.complete(eventPage("old-a"))
+                advanceUntilIdle()
+                assertEquals(listOf(historyEvent("current-$RECIPIENT_A")), fixture.viewModel.uiState.value.careEvents)
+                assertNull(fixture.viewModel.uiState.value.eventHistory.error)
+                assertTrue(fixture.viewModel.uiState.value.signedIn)
+            } finally { fixture.close() }
+        }
+    }
+
+    @Test
+    fun logoutAndReloginDiscardOldHistoryAuthenticationFailure() = runTest(mainDispatcher) {
+        val late = CompletableDeferred<CareHistoryPage<CareEventView>>()
+        var read = 0
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+            coEvery { repository.listCareEventHistory(any(), any(), any(), any()) } coAnswers {
+                if (++read == 2) late.await() else eventPage("current-$read")
+            }
+        })
+        try {
+            fixture.signIn(this)
+            fixture.viewModel.queryCareHistory(CareHistoryKind.EVENTS, CareHistoryFilter("2026-08-01", "2026-08-31")); runCurrent()
+            fixture.viewModel.logout(); advanceUntilIdle()
+            assertTrue(fixture.viewModel.uiState.value.careEvents.isEmpty())
+            fixture.viewModel.login("family", "password"); advanceUntilIdle()
+            late.completeExceptionally(signedOutError()); advanceUntilIdle()
+            assertTrue(fixture.viewModel.uiState.value.signedIn)
+            assertEquals(listOf(historyEvent("current-3")), fixture.viewModel.uiState.value.careEvents)
+            assertEquals(CareHistoryFilter(), fixture.viewModel.uiState.value.eventHistory.filter)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun roleChangeClosesHistoryAndReturningToFamilyReloadsIt() = runTest(mainDispatcher) {
+        val late = CompletableDeferred<CareHistoryPage<CareEventView>>()
+        var read = 0
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->
+            coEvery { repository.listCareEventHistory(any(), any(), any(), any()) } coAnswers {
+                if (++read == 2) late.await() else eventPage("current-$read")
+            }
+        })
+        try {
+            fixture.signIn(this)
+            fixture.viewModel.queryCareHistory(CareHistoryKind.EVENTS); runCurrent()
+            fixture.viewModel.switchRole(AppRole.COMPANION)
+            assertTrue(fixture.viewModel.uiState.value.careEvents.isEmpty())
+            fixture.viewModel.switchRole(AppRole.FAMILY); advanceUntilIdle()
+            late.complete(eventPage("old")); advanceUntilIdle()
+            assertEquals(listOf(historyEvent("current-3")), fixture.viewModel.uiState.value.careEvents)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun recipientTimezoneChangeResetsHistoryFilterAndOldRequests() = runTest(mainDispatcher) {
+        val data = defaultRepositoryState()
+        val late = CompletableDeferred<CareHistoryPage<CareEventView>>()
+        var read = 0
+        val fixture = fixture(CompletableDeferred(), repositoryState = data, configureRepository = { repository ->
+            coEvery { repository.listCareEventHistory(any(), any(), any(), any()) } coAnswers {
+                if (++read == 2) late.await() else eventPage("current-$read")
+            }
+        })
+        try {
+            fixture.signIn(this)
+            fixture.viewModel.queryCareHistory(CareHistoryKind.EVENTS, CareHistoryFilter("2026-08-01", "2026-08-31")); runCurrent()
+            data.recipientsByHousehold[HOUSEHOLD_ID] = listOf(recipient(RECIPIENT_A).copy(timezone = "America/Los_Angeles"))
+            fixture.viewModel.refresh(); advanceUntilIdle()
+            late.complete(eventPage("old-zone")); advanceUntilIdle()
+            assertEquals(CareHistoryFilter(), fixture.viewModel.uiState.value.eventHistory.filter)
+            assertEquals(listOf(historyEvent("current-3")), fixture.viewModel.uiState.value.careEvents)
+        } finally { fixture.close() }
+    }
 
     @Test
     fun failedMemoryAndConsentReadsRemainUnknownUntilSuccessfulRefresh() = runTest(mainDispatcher) {
@@ -525,9 +729,9 @@ class LighthouseViewModelFamilyMutationOwnershipTest {
         }
         coEvery { repository.listRoutines(any(), any()) } returns emptyList<RoutineView>()
         coEvery {
-            repository.listOccurrences(any(), any(), any(), any())
-        } returns emptyList()
-        coEvery { repository.listCareEvents(any(), any()) } returns emptyList()
+            repository.listOccurrenceHistory(any(), any(), any(), any())
+        } returns CareHistoryPage(emptyList(), null, "Asia/Shanghai", null, null)
+        coEvery { repository.listCareEventHistory(any(), any(), any(), any()) } returns CareHistoryPage(emptyList(), null, "Asia/Shanghai", null, null)
         coEvery { repository.listFamilyTasks(any(), any()) } returns emptyList()
         coEvery { repository.listConsents(any(), any()) } returns emptyList<ConsentStateView>()
         coEvery {

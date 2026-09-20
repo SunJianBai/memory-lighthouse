@@ -188,6 +188,8 @@ fun LighthouseRoute(
             updateRoutine = viewModel::updateRoutine,
             deleteRoutine = viewModel::deleteRoutine,
             verifyOccurrence = viewModel::verifyOccurrence,
+            queryCareHistory = viewModel::queryCareHistory,
+            loadMoreCareHistory = viewModel::loadMoreCareHistory,
             claimFamilyTask = viewModel::claimFamilyTask,
             releaseFamilyTask = viewModel::releaseFamilyTask,
             finishFamilyTask = viewModel::finishFamilyTask,

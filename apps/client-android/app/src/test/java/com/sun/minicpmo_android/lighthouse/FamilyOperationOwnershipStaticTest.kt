@@ -23,9 +23,7 @@ class FamilyOperationOwnershipStaticTest {
         val householdCapture = body.indexOf(
             "val capturedHouseholdId = checkNotNull(householdId)",
         )
-        val recipientCapture = body.indexOf(
-            "val capturedRecipientId = checkNotNull(recipientId)",
-        )
+        val recipientCapture = body.indexOf("require(occurrence.recipientId == recipientId)")
         val mutation = body.indexOf("repository.familyVerifyOccurrence(")
 
         assertTrue(
@@ -39,16 +37,9 @@ class FamilyOperationOwnershipStaticTest {
             "a late response must not read a recipient selected after the mutation started",
             body.contains("_uiState.value.selectedRecipientId"),
         )
-        assertTrue(
-            body.contains(
-                "repository.listFamilyTasks(capturedHouseholdId, capturedRecipientId)",
-            ),
-        )
-        assertTrue(
-            body.contains(
-                "repository.listCareEvents(capturedHouseholdId, capturedRecipientId)",
-            ),
-        )
+        assertTrue(body.contains("reconcile = FamilyOperationReconcile.RECIPIENT"))
+        assertFalse("reconciliation owns all history reads", body.contains("repository.listCareEvents("))
+        assertFalse("task reads must use the shared access-generation guard", body.contains("repository.listFamilyTasks("))
     }
 
     @Test

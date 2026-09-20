@@ -505,10 +505,9 @@ data class LighthouseUiState(
     val routines: List<RoutineView> = emptyList(),
     val routineSaveRevision: Long = 0,
     val routineLoadError: String? = null,
-    val occurrences: List<OccurrenceView> = emptyList(),
-    val occurrenceLoadError: String? = null,
-    val careEvents: List<CareEventView> = emptyList(),
-    val careEventLoadError: String? = null,
+    val occurrenceHistory: CareHistoryState<OccurrenceView> = CareHistoryState(),
+    val eventHistory: CareHistoryState<CareEventView> = CareHistoryState(),
+    val careHistoryScopeRevision: Long = 0,
     val familyTasks: List<FamilyTaskView> = emptyList(),
     val familyTaskError: String? = null,
     val consents: List<ConsentStateView> = emptyList(),
@@ -530,6 +529,11 @@ data class LighthouseUiState(
     val message: String? = null,
     val error: String? = null,
 ) {
+    val occurrences: List<OccurrenceView> get() = occurrenceHistory.page?.items.orEmpty()
+    val occurrenceLoadError: String? get() = occurrenceHistory.error
+    val careEvents: List<CareEventView> get() = eventHistory.page?.items.orEmpty()
+    val careEventLoadError: String? get() = eventHistory.error
+
     val selectedHousehold: HouseholdView?
         get() = households.firstOrNull { it.id == selectedHouseholdId }
 

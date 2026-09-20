@@ -59,6 +59,9 @@ describe("public illustrated guide", () => {
     expect(html).toContain("事项仍未完成");
     expect(html).toContain("提醒记录和最近动态按当前长者时区显示");
     expect(html).toContain("“已关闭”不代表已完成");
+    expect(html).toContain("展开“查询历史”");
+    expect(html).toContain("不是只保留 31 天");
+    expect(html).toContain("“已加载”不是记录总数");
     expect(html).toContain("以下操作以 Web 端为例");
     expect(html).toContain("“陪伴麦克风”和“全模态模型处理”");
   });

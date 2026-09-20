@@ -1,5 +1,7 @@
 package com.sun.minicpmo_android.lighthouse
 
+import com.sun.minicpmo_android.lighthouse.model.CareHistoryPage
+
 import android.net.Uri
 import androidx.lifecycle.viewModelScope
 import com.sun.minicpmo_android.lighthouse.call.CompanionMediaHandoffState
@@ -448,9 +450,9 @@ class LighthouseViewModelActivationPresentationOwnershipTest {
         coEvery { repository.listRoutines(HOUSEHOLD_ID, RECIPIENT_ID) } returns
             emptyList<RoutineView>()
         coEvery {
-            repository.listOccurrences(HOUSEHOLD_ID, RECIPIENT_ID, any(), any())
-        } returns emptyList()
-        coEvery { repository.listCareEvents(HOUSEHOLD_ID, RECIPIENT_ID) } returns emptyList()
+            repository.listOccurrenceHistory(HOUSEHOLD_ID, RECIPIENT_ID, any(), any())
+        } returns CareHistoryPage(emptyList(), null, "Asia/Shanghai", null, null)
+        coEvery { repository.listCareEventHistory(HOUSEHOLD_ID, RECIPIENT_ID, any(), any()) } returns CareHistoryPage(emptyList(), null, "Asia/Shanghai", null, null)
         coEvery { repository.listFamilyTasks(HOUSEHOLD_ID, RECIPIENT_ID) } returns emptyList()
         coEvery { repository.listConsents(HOUSEHOLD_ID, RECIPIENT_ID) } returns
             emptyList<ConsentStateView>()
