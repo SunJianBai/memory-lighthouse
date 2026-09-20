@@ -154,9 +154,61 @@ describe("companion activation result ownership", () => {
     await advance();
     expect(host.textContent).toContain("测试长者的陪伴设备");
     expect(host.textContent).not.toContain(conflictMessage);
+    expect(host.querySelector(".companion-account")?.textContent).toContain(
+      "离线",
+    );
     expect(host.querySelector('[role="alert"]')?.textContent).toContain(
       "心跳暂时不可用",
     );
+    await advance(6_000);
+    expect(host.querySelector(".companion-account")?.textContent).toContain(
+      "离线",
+    );
+    fixture.heartbeat.mockResolvedValue({
+      online: true,
+      mediaDirective: "CONTINUE",
+    });
+    await advance(5_000);
+    expect(host.querySelector(".companion-account")?.textContent).toContain(
+      "在线",
+    );
+    expect(host.textContent).not.toContain("心跳暂时不可用");
+  });
+
+  it("clears a transient activation query error when waiting for approval resumes", async () => {
+    fixture.status.mockRejectedValueOnce(
+      new ApiError(503, { message: "激活状态暂时不可用" }),
+    );
+    fixture.status.mockResolvedValue({ status: "CLAIMED" });
+    await render();
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain(
+      "激活状态暂时不可用",
+    );
+    await advance();
+    expect(host.textContent).toContain("等待家属核对并批准");
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(fixture.exchange).not.toHaveBeenCalled();
+  });
+
+  it("shows and independently recovers incoming-call query errors while waiting", async () => {
+    fixture.credential = true;
+    fixture.heartbeat.mockRejectedValue(new Error("心跳暂时不可用"));
+    fixture.currentRemote.mockRejectedValueOnce(new Error("来电暂时不可用"));
+    await render();
+    expect(host.textContent).toContain("来电状态同步失败：来电暂时不可用");
+    expect(host.textContent).toContain("心跳暂时不可用");
+    await advance();
+    expect(host.textContent).not.toContain("来电暂时不可用");
+    expect(host.textContent).toContain("心跳暂时不可用");
+    expect(host.querySelector(".companion-account")?.textContent).toContain(
+      "离线",
+    );
+    fixture.heartbeat.mockResolvedValue({
+      online: true,
+      mediaDirective: "CONTINUE",
+    });
+    await advance(5_000);
+    expect(host.querySelector('[role="alert"]')).toBeNull();
   });
 
   it.each([false, true])(

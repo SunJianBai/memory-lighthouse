@@ -266,6 +266,9 @@ export const CompanionPage = () => {
   const [online, setOnline] = useState(false);
   const [error, setError] = useState("");
   const [activationError, setActivationError] = useState("");
+  const [activationSyncError, setActivationSyncError] = useState("");
+  const [heartbeatError, setHeartbeatError] = useState("");
+  const [remoteSyncError, setRemoteSyncError] = useState("");
   const [contextError, setContextError] = useState("");
   const [contextLoading, setContextLoading] = useState(false);
   const contextRequests = useRef(new LatestScopedRequest());
@@ -321,6 +324,7 @@ export const CompanionPage = () => {
   const applyHeartbeat = useCallback(
     (heartbeat: Awaited<ReturnType<typeof deviceSession.heartbeat>>) => {
       setOnline(true);
+      setHeartbeatError("");
       if (!shouldStopForMediaDirective(heartbeat.mediaDirective)) {
         setServerMediaStopped(false);
         return;
@@ -417,6 +421,7 @@ export const CompanionPage = () => {
   const completeActivation = useCallback(() => {
     setActivated(true);
     setActivationError("");
+    setActivationSyncError("");
     persistPendingActivationChallenge("");
     activationRecoveryRequired.current = false;
     persistActivationRecoveryRequired(false);
@@ -445,7 +450,9 @@ export const CompanionPage = () => {
       } catch (heartbeatError) {
         if (isCurrent()) {
           setOnline(false);
-          setError(`在线状态同步失败：${readableError(heartbeatError)}`);
+          setHeartbeatError(
+            `在线状态同步失败：${readableError(heartbeatError)}`,
+          );
         }
       }
     } catch (loadError) {
@@ -478,7 +485,10 @@ export const CompanionPage = () => {
   useEffect(() => {
     if (!activated || !context) return;
     const timer = window.setInterval(() => {
-      void sendHeartbeat().catch(() => setOnline(false));
+      void sendHeartbeat().catch((syncError) => {
+        setOnline(false);
+        setHeartbeatError(`在线状态同步失败：${readableError(syncError)}`);
+      });
     }, 5_000);
     return () => {
       heartbeatPolling.current.invalidate();
@@ -508,13 +518,12 @@ export const CompanionPage = () => {
         await remoteDiscoveryPolling.current.run(async (isPollingOwner) => {
           const current = await deviceSession.currentRemote();
           if (cancelled || !isPollingOwner()) return;
-          setOnline(true);
+          setRemoteSyncError("");
           commitRemoteSession(current);
         });
       } catch (discoverError) {
         if (cancelled) return;
-        setOnline(false);
-        setCallDetail(`来电状态同步失败：${readableError(discoverError)}`);
+        setRemoteSyncError(`来电状态同步失败：${readableError(discoverError)}`);
       }
     };
     void discover();
@@ -734,6 +743,7 @@ export const CompanionPage = () => {
     }
     setBusy(true);
     setActivationError("");
+    setActivationSyncError("");
     setNotice("");
     if (!activationExchange.current.reset()) {
       setBusy(false);
@@ -797,6 +807,7 @@ export const CompanionPage = () => {
         }
         const status = await deviceSession.status(challengeId);
         if (isStale()) return;
+        setActivationSyncError("");
         setChallengeStatus(status.status);
         if (ACTIVATION_TERMINAL_STATUSES.has(status.status)) {
           stopped = true;
@@ -839,6 +850,7 @@ export const CompanionPage = () => {
         if (isStale()) return;
         if (shouldPreserveActivationChallenge(statusError)) {
           stopped = true;
+          setActivationSyncError("");
           activationRecoveryRequired.current = true;
           persistActivationRecoveryRequired(true);
           setNotice("设备恢复尚未完成，请刷新后继续。 ");
@@ -847,6 +859,7 @@ export const CompanionPage = () => {
         }
         if (!activationRetryBudget.current.shouldRetry(statusError)) {
           stopped = true;
+          setActivationSyncError("");
           persistPendingActivationChallenge("");
           activationRecoveryRequired.current = false;
           persistActivationRecoveryRequired(false);
@@ -863,7 +876,7 @@ export const CompanionPage = () => {
         }
         retryAfter =
           Date.now() + activationPollingRetryDelayMillis(statusError);
-        setActivationError(readableError(statusError));
+        setActivationSyncError(readableError(statusError));
       } finally {
         checking = false;
       }
@@ -1109,6 +1122,21 @@ export const CompanionPage = () => {
     }
   };
 
+  const synchronizationAlerts = (
+    <>
+      {heartbeatError && (
+        <div className="form-message error" role="alert">
+          {heartbeatError}
+        </div>
+      )}
+      {remoteSyncError && (
+        <div className="form-message error" role="alert">
+          {remoteSyncError}
+        </div>
+      )}
+    </>
+  );
+
   const companionRuntimePanel = (
     <section className="companion-runtime-shell">
       <div className="companion-runtime-status">
@@ -1168,6 +1196,7 @@ export const CompanionPage = () => {
           <span>{error}</span>
         </div>
       )}
+      {synchronizationAlerts}
       {runtimeState && (
         <CareExperience
           ref={careExperience}
@@ -1359,6 +1388,11 @@ export const CompanionPage = () => {
               <span>{activationError}</span>
             </div>
           )}
+          {activationSyncError && (
+            <div className="inline-alert danger" role="alert">
+              <span>{activationSyncError}</span>
+            </div>
+          )}
           {error && (
             <div className="inline-alert danger" role="alert">
               <span>{error}</span>
@@ -1378,6 +1412,7 @@ export const CompanionPage = () => {
                   {notice || "陪伴媒体已停止，请检查授权后刷新设备上下文。"}
                 </span>
               </div>
+              {synchronizationAlerts}
             </section>
           )}
           {incoming && (
@@ -1428,6 +1463,7 @@ export const CompanionPage = () => {
                   </span>
                 )}
               </div>
+              {synchronizationAlerts}
               {callDetail && (
                 <div
                   className={`form-message ${callPresentation?.callDetailTone ?? "success"}`}
