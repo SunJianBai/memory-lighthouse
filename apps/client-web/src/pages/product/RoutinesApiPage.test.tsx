@@ -158,6 +158,51 @@ describe("independent routine and task loading", () => {
     expect(container.textContent).not.toContain("已关闭-elder");
     expect(container.textContent).not.toContain("2027-01-01 00:30");
   });
+  it("rejects a late history response after switching recipient and timezone", async () => {
+    let complete!: (value: unknown) => void;
+    const oldHistory = new Promise((resolve) => {
+      complete = resolve;
+    });
+    fixture.request.mockImplementation(async (path: string) => {
+      if (path.includes("/elder/occurrences?")) return oldHistory;
+      if (path.includes("/other/occurrences?"))
+        return [
+          {
+            id: "new",
+            status: "CONFIRMED",
+            routineTitle: "新长者记录",
+            scheduledAtUtc: "2026-12-31T16:30:00Z",
+          },
+        ];
+      if (path.endsWith("/family-task-board"))
+        return {
+          householdId: "home",
+          recipientId: fixture.recipientId,
+          tasks: [],
+        };
+      return [];
+    });
+    await act(async () => root.render(<RoutinesApiPage />));
+    fixture.recipientId = "other";
+    fixture.timezone = "America/Los_Angeles";
+    fixture.epoch++;
+    await act(async () => root.render(<RoutinesApiPage />));
+    expect(container.textContent).toContain("新长者记录");
+    await act(async () =>
+      complete([
+        {
+          id: "old",
+          status: "DUE",
+          routineTitle: "旧长者迟到记录",
+          scheduledAtUtc: "2026-09-20T04:00:00Z",
+        },
+      ]),
+    );
+    expect(container.textContent).toContain("新长者记录");
+    expect(container.textContent).toContain("2026-12-31 08:30");
+    expect(container.textContent).not.toContain("旧长者迟到记录");
+    expect(container.textContent).not.toContain("Asia/Shanghai");
+  });
   it("keeps verification actions only on records awaiting family review", async () => {
     fixture.request.mockImplementation(
       async (path: string, options?: { method?: string }) => {
