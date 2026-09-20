@@ -243,6 +243,12 @@ export class ClaimFamilyTaskDto {
   version!: number;
 }
 
+export class ReleaseFamilyTaskDto {
+  @IsInt()
+  @Min(0)
+  version!: number;
+}
+
 export class FinishFamilyTaskDto {
   @IsInt()
   @Min(0)

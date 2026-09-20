@@ -154,6 +154,8 @@ export interface ClaimFamilyTaskCommand {
   idempotencyKey: string;
 }
 
+export type ReleaseFamilyTaskCommand = ClaimFamilyTaskCommand;
+
 export interface FinishFamilyTaskCommand {
   version: number;
   idempotencyKey: string;

@@ -123,6 +123,7 @@ export class FamilyTaskBoardService {
                 : null,
               assignedToMe,
               canClaim: task.status === 'OPEN' && !task.assigneeMemberId,
+              canRelease: task.status === 'CLAIMED' && assignedToMe,
               canFinish: unfinished && (!task.assigneeMemberId || assignedToMe),
             };
           }),

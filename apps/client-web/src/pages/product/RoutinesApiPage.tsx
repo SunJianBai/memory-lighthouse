@@ -333,7 +333,7 @@ export const RoutinesApiPage = () => {
 
   const taskAction = async (
     task: FamilyTaskView,
-    action: "claim" | "resolve" | "dismiss",
+    action: "claim" | "release" | "resolve" | "dismiss",
   ) => {
     if (!workspace.householdId || !workspace.recipientId) return;
     const owner = createScopedMutationOwner(
@@ -345,7 +345,7 @@ export const RoutinesApiPage = () => {
     setErrorState(createScopedPageState(owner.scopeKey, ""));
     try {
       const body =
-        action === "claim"
+        action === "claim" || action === "release"
           ? { version: task.version }
           : {
               version: task.version,

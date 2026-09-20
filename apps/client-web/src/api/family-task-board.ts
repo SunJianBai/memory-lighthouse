@@ -7,6 +7,7 @@ export type FamilyTaskBoardItem = FamilyTaskView & {
   assignedToMe: boolean;
   canClaim: boolean;
   canFinish: boolean;
+  canRelease?: boolean;
 };
 
 export const taskFilters = [
@@ -105,6 +106,8 @@ export function parseFamilyTaskBoard(
       throw invalid();
     for (const key of ["assignedToMe", "canClaim", "canFinish"])
       if (typeof item[key] !== "boolean") throw invalid();
+    if (item.canRelease !== undefined && typeof item.canRelease !== "boolean")
+      throw invalid();
     for (const key of [
       "assigneeMemberId",
       "assigneeDisplayName",
@@ -124,6 +127,9 @@ export function parseFamilyTaskBoard(
     }
     if (!Number.isInteger(item.version) || (item.version as number) < 0)
       throw invalid();
-    return item as FamilyTaskBoardItem;
+    return {
+      ...item,
+      canRelease: item.canRelease === true,
+    } as FamilyTaskBoardItem;
   });
 }

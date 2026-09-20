@@ -363,6 +363,7 @@ internal object FamilyJsonMapper {
         assignedToMe = json.optBoolean("assignedToMe", false),
         canClaim = json.optBoolean("canClaim", false),
         canFinish = json.optBoolean("canFinish", false),
+        canRelease = json.opt("canRelease") == true,
     )
 
     fun parseFamilyTaskBoard(json: JSONObject, householdId: String, recipientId: String): List<FamilyTaskView> {
@@ -374,6 +375,7 @@ internal object FamilyJsonMapper {
             require(item.getString("sourceTitle").isNotBlank())
             item.getString("sourceSummary")
             for (key in listOf("assignedToMe", "canClaim", "canFinish")) require(item.get(key) is Boolean)
+            if (item.has("canRelease")) require(item.get("canRelease") is Boolean)
             parseFamilyTask(item).also { task ->
                 require(task.id.isNotBlank() && task.version >= 0)
                 require(task.status in setOf("OPEN", "CLAIMED", "RESOLVED", "DISMISSED"))

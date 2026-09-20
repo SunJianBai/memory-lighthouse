@@ -78,17 +78,20 @@ class LighthouseViewModelFamilyMutationOwnershipTest {
     }
 
     @Test
-    fun slowRefreshCannotUndoTaskClaim() = assertTaskMutationSupersedesSlowRefresh(finish = false)
+    fun slowRefreshCannotUndoTaskClaim() = assertTaskMutationSupersedesSlowRefresh("claim")
 
     @Test
-    fun slowRefreshCannotUndoTaskCompletion() = assertTaskMutationSupersedesSlowRefresh(finish = true)
+    fun slowRefreshCannotUndoTaskCompletion() = assertTaskMutationSupersedesSlowRefresh("finish")
 
-    private fun assertTaskMutationSupersedesSlowRefresh(finish: Boolean) = runTest(mainDispatcher) {
+    @Test
+    fun slowRefreshCannotUndoTaskRelease() = assertTaskMutationSupersedesSlowRefresh("release")
+
+    private fun assertTaskMutationSupersedesSlowRefresh(action: String) = runTest(mainDispatcher) {
         val original = FamilyTaskView(
             "task-1", RECIPIENT_A, "event-1", null, "OPEN", "NORMAL",
             null, null, null, null, 0,
-        )
-        val updated = original.copy(status = if (finish) "RESOLVED" else "CLAIMED", version = 1)
+        ).let { if (action == "release") it.copy(status = "CLAIMED", assigneeMemberId = "me", assignedToMe = true, canRelease = true) else it }
+        val updated = original.copy(status = when (action) { "finish" -> "RESOLVED"; "release" -> "OPEN"; else -> "CLAIMED" }, version = 1, assigneeMemberId = null, canRelease = false)
         var storedTasks = listOf(original)
         val command = CompletableDeferred<FamilyTaskView>()
         val slowMemories = CompletableDeferred<List<MemoryView>>()
@@ -107,11 +110,15 @@ class LighthouseViewModelFamilyMutationOwnershipTest {
             }
             coEvery { repository.claimFamilyTask(any(), any()) } coAnswers { command.await() }
             coEvery { repository.finishFamilyTask(any(), any(), any(), any()) } coAnswers { command.await() }
+            coEvery { repository.releaseFamilyTask(any(), any()) } coAnswers { command.await() }
         })
         try {
             fixture.signIn(this)
-            if (finish) fixture.viewModel.finishFamilyTask(original, true, null)
-            else fixture.viewModel.claimFamilyTask(original)
+            when (action) {
+                "finish" -> fixture.viewModel.finishFamilyTask(original, true, null)
+                "release" -> fixture.viewModel.releaseFamilyTask(original)
+                else -> fixture.viewModel.claimFamilyTask(original)
+            }
             runCurrent()
             blockNextMemoryRead = true
             fixture.viewModel.refresh()

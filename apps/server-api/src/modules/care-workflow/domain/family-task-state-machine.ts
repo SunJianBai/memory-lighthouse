@@ -7,6 +7,12 @@ export function assertTaskCanClaim(status: string): void {
   }
 }
 
+export function assertTaskCanRelease(status: string): void {
+  if (status !== FAMILY_TASK_STATUS.claimed) {
+    throw new InvalidFamilyTaskTransitionException(status, 'RELEASE');
+  }
+}
+
 export function assertTaskCanFinish(status: string, action: string): void {
   if (
     status !== FAMILY_TASK_STATUS.open &&

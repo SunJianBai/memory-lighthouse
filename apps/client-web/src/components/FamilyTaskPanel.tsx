@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CheckCircle2 } from "lucide-react";
 import {
   filterFamilyTasks,
@@ -25,15 +25,17 @@ export function FamilyTaskPanel({
   timezone: string;
   onAction: (
     task: FamilyTaskBoardItem,
-    action: "claim" | "resolve" | "dismiss",
+    action: "claim" | "release" | "resolve" | "dismiss",
   ) => void;
 }) {
   const [filter, setFilter] = useState<TaskFilter>("unfinished");
-  const [dismissTarget, setDismissTarget] = useState<{
+  const [confirmation, setConfirmation] = useState<{
     id: string;
     version: number;
+    action: "release" | "dismiss";
   } | null>(null);
-  const dismissTrigger = useRef<HTMLButtonElement | null>(null);
+  const confirmationTrigger = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => setConfirmation(null), [tasks, loading, error]);
   const visible = filterFamilyTasks(tasks, filter);
   const format = (instant: string) =>
     new Date(instant).toLocaleString("zh-CN", {
@@ -59,7 +61,7 @@ export function FamilyTaskPanel({
             aria-pressed={filter === option.id}
             onClick={() => {
               setFilter(option.id);
-              setDismissTarget(null);
+              setConfirmation(null);
             }}
           >
             {option.label}
@@ -146,53 +148,88 @@ export function FamilyTaskPanel({
                       type="button"
                       disabled={Boolean(busyId)}
                       aria-expanded={
-                        dismissTarget?.id === task.id &&
-                        dismissTarget.version === task.version
+                        confirmation?.id === task.id &&
+                        confirmation.version === task.version &&
+                        confirmation.action === "dismiss"
                       }
                       onClick={(event) => {
-                        dismissTrigger.current = event.currentTarget;
-                        setDismissTarget({
+                        confirmationTrigger.current = event.currentTarget;
+                        setConfirmation({
                           id: task.id,
                           version: task.version,
+                          action: "dismiss",
                         });
                       }}
                     >
                       不再处理
                     </button>
-                    {dismissTarget?.id === task.id &&
-                      dismissTarget.version === task.version && (
-                        <div
-                          className="task-dismiss-confirmation"
-                          role="group"
-                          aria-label="确认结束待办"
-                        >
-                          <p>
-                            确认不再处理这条待办吗？结束后可在“已结束”中查看。
-                          </p>
-                          <button
-                            type="button"
-                            disabled={Boolean(busyId)}
-                            onClick={() => {
-                              setDismissTarget(null);
-                              onAction(task, "dismiss");
-                            }}
-                          >
-                            确认不再处理
-                          </button>
-                          <button
-                            type="button"
-                            disabled={Boolean(busyId)}
-                            onClick={() => {
-                              setDismissTarget(null);
-                              dismissTrigger.current?.focus();
-                            }}
-                          >
-                            取消
-                          </button>
-                        </div>
-                      )}
                   </>
                 )}
+                {task.canRelease && (
+                  <button
+                    type="button"
+                    disabled={Boolean(busyId)}
+                    aria-expanded={
+                      confirmation?.id === task.id &&
+                      confirmation.version === task.version &&
+                      confirmation.action === "release"
+                    }
+                    onClick={(event) => {
+                      confirmationTrigger.current = event.currentTarget;
+                      setConfirmation({
+                        id: task.id,
+                        version: task.version,
+                        action: "release",
+                      });
+                    }}
+                  >
+                    交回待认领
+                  </button>
+                )}
+                {confirmation?.id === task.id &&
+                  confirmation.version === task.version &&
+                  (confirmation.action === "release"
+                    ? task.canRelease
+                    : task.canFinish) && (
+                    <div
+                      className="task-dismiss-confirmation"
+                      role="group"
+                      aria-label={
+                        confirmation.action === "release"
+                          ? "确认交回待办"
+                          : "确认结束待办"
+                      }
+                    >
+                      <p>
+                        {confirmation.action === "release"
+                          ? "交回后将不再由你负责，其他有权限的家属可以认领。此待办仍未完成。"
+                          : "确认不再处理这条待办吗？结束后可在“已结束”中查看。"}
+                      </p>
+                      <button
+                        type="button"
+                        disabled={Boolean(busyId)}
+                        onClick={() => {
+                          const action = confirmation.action;
+                          setConfirmation(null);
+                          onAction(task, action);
+                        }}
+                      >
+                        {confirmation.action === "release"
+                          ? "确认交回"
+                          : "确认不再处理"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={Boolean(busyId)}
+                        onClick={() => {
+                          setConfirmation(null);
+                          confirmationTrigger.current?.focus();
+                        }}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  )}
               </div>
             </article>
           ))}

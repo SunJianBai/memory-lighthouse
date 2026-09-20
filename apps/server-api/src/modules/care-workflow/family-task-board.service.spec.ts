@@ -108,17 +108,18 @@ describe('FamilyTaskBoardService', () => {
     ]);
     const { tasks } = await h.service.read(principal, 'home', 'elder');
     expect(
-      tasks.map(({ canClaim, canFinish, assignedToMe }) => [
+      tasks.map(({ canClaim, canFinish, assignedToMe, canRelease }) => [
         canClaim,
         canFinish,
         assignedToMe,
+        canRelease,
       ]),
     ).toEqual([
-      [true, true, false],
-      [false, true, true],
-      [false, false, false],
-      [false, false, true],
-      [false, false, false],
+      [true, true, false, false],
+      [false, true, true, true],
+      [false, false, false, false],
+      [false, false, true, false],
+      [false, false, false, false],
     ]);
     expect(tasks[2].assigneeDisplayName).toBe('测试家属');
   });

@@ -446,6 +446,18 @@ class LighthouseRepository(
         }
     }
 
+    suspend fun releaseFamilyTask(householdId: String, task: FamilyTaskView): FamilyTaskView {
+        val normalizedCommand = JSONArray().put("family-task-release")
+            .put(householdId).put(task.id).put(task.version).toString()
+        return careCommands.execute(normalizedCommand) { idempotencyKey ->
+            FamilyJsonMapper.parseFamilyTask(requireNotNull(userRequest(
+                "POST", FamilyApiContract.familyTaskActionPath(householdId, task.id, "release"),
+                JSONObject().put("version", task.version),
+                headers = mapOf("Idempotency-Key" to idempotencyKey),
+            )))
+        }
+    }
+
     suspend fun finishFamilyTask(
         householdId: String,
         task: FamilyTaskView,

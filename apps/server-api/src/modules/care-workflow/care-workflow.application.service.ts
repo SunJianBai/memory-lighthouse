@@ -38,6 +38,7 @@ import type {
   CareEventView,
   CareWorkflowPrincipal,
   ClaimFamilyTaskCommand,
+  ReleaseFamilyTaskCommand,
   ConfirmOccurrenceCommand,
   CreateRoutineCommand,
   DeviceConfirmOccurrenceCommand,
@@ -54,6 +55,7 @@ import type {
 import {
   assertTaskCanClaim,
   assertTaskCanFinish,
+  assertTaskCanRelease,
 } from './domain/family-task-state-machine';
 import { assertOccurrenceTransition } from './domain/occurrence-state-machine';
 import {
@@ -901,6 +903,21 @@ export class CareWorkflowApplicationService {
     );
   }
 
+  releaseFamilyTask(
+    principal: CareWorkflowPrincipal,
+    householdId: string,
+    taskId: string,
+    command: ReleaseFamilyTaskCommand,
+  ): Promise<FamilyTaskView> {
+    return this.actOnFamilyTask(
+      principal,
+      householdId,
+      taskId,
+      'RELEASE',
+      command,
+    );
+  }
+
   resolveFamilyTask(
     principal: CareWorkflowPrincipal,
     householdId: string,
@@ -1252,7 +1269,7 @@ export class CareWorkflowApplicationService {
     principal: CareWorkflowPrincipal,
     householdId: string,
     taskId: string,
-    action: 'CLAIM' | 'RESOLVE' | 'DISMISS',
+    action: 'CLAIM' | 'RELEASE' | 'RESOLVE' | 'DISMISS',
     command: ClaimFamilyTaskCommand | FinishFamilyTaskCommand,
   ): Promise<FamilyTaskView> {
     const idempotencyKey = this.requiredText(
@@ -1273,11 +1290,11 @@ export class CareWorkflowApplicationService {
         'VIEW_EVENTS',
       );
       const finish = command as FinishFamilyTaskCommand;
-      const note = action === 'CLAIM' ? null : finish.note?.trim() || null;
-      const resolutionCode =
-        action === 'CLAIM'
-          ? null
-          : this.requiredText(finish.resolutionCode, 'resolutionCode');
+      const finishing = action === 'RESOLVE' || action === 'DISMISS';
+      const note = finishing ? finish.note?.trim() || null : null;
+      const resolutionCode = finishing
+        ? this.requiredText(finish.resolutionCode, 'resolutionCode')
+        : null;
       const commandType = `FAMILY_TASK_${action}`;
       const commandFingerprint = fingerprintCareCommand({
         action,
@@ -1303,6 +1320,11 @@ export class CareWorkflowApplicationService {
       }
       if (action === 'CLAIM') {
         assertTaskCanClaim(task.status);
+      } else if (action === 'RELEASE') {
+        assertTaskCanRelease(task.status);
+        if (task.assigneeMemberId !== member.id) {
+          throw new FamilyTaskAssigneeConflictException();
+        }
       } else {
         assertTaskCanFinish(task.status, action);
         if (task.assigneeMemberId && task.assigneeMemberId !== member.id) {
@@ -1310,11 +1332,13 @@ export class CareWorkflowApplicationService {
         }
       }
       const toStatus =
-        action === 'CLAIM'
-          ? FAMILY_TASK_STATUS.claimed
-          : action === 'RESOLVE'
-            ? FAMILY_TASK_STATUS.resolved
-            : FAMILY_TASK_STATUS.dismissed;
+        action === 'RELEASE'
+          ? FAMILY_TASK_STATUS.open
+          : action === 'CLAIM'
+            ? FAMILY_TASK_STATUS.claimed
+            : action === 'RESOLVE'
+              ? FAMILY_TASK_STATUS.resolved
+              : FAMILY_TASK_STATUS.dismissed;
       const encryptedNote = note ? this.cipher.encrypt(note) : null;
       const updated = await transaction.familyTask.updateMany({
         where: {
@@ -1325,8 +1349,9 @@ export class CareWorkflowApplicationService {
         },
         data: {
           status: toStatus,
-          assigneeMemberId: task.assigneeMemberId ?? member.id,
-          ...(action === 'CLAIM'
+          assigneeMemberId:
+            action === 'RELEASE' ? null : (task.assigneeMemberId ?? member.id),
+          ...(!finishing
             ? {}
             : {
                 resolvedAt: now,

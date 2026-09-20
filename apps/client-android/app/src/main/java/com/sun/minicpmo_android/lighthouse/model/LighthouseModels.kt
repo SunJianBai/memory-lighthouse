@@ -238,6 +238,7 @@ data class FamilyTaskView(
     val assignedToMe: Boolean = false,
     val canClaim: Boolean = false,
     val canFinish: Boolean = false,
+    val canRelease: Boolean = false,
 )
 
 data class ConsentDocumentVersionView(

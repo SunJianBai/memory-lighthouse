@@ -11,7 +11,7 @@
 | 003 | 提醒周期与日期范围 | 三端验收及双轴审查完成，本地提交 e45d1ca、3e8da32 | [需求与验收](003-routine-schedules.md) · [调研](003-routine-schedules-research.md) |
 | 004 | 陪伴启动检查 | 三端实现与双轴审查完成，本地提交 81531c5、64be4c4；模拟器回归批次异常见验收记录 | [需求与验收](004-companion-readiness.md) · [调研](004-companion-readiness-research.md) |
 | 005 | 设备激活结果与恢复 | 三端验证及双轴审查完成，提交 4452c25、ddb471e；陪伴页 375px 追加验证通过，其余限制见记录 | [需求与验收](005-activation-recovery.md) · [调研](005-activation-recovery-research.md) |
-| 006 | 家庭待办释放与交接恢复 | 官方调研完成，OWNER 回收权限待产品确认；尚未实施 | [候选调研](006-task-handoff-research.md) |
+| 006 | 家庭待办主动释放 | 三端实现及隔离测试通过，待双轴审查；OWNER 回收未纳入 | [需求与验收](006-task-handoff.md) · [候选调研](006-task-handoff-research.md) |
 
 ## 后续候选
 

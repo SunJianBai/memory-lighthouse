@@ -16,6 +16,7 @@ import { CareWorkflowApplicationService } from '../care-workflow.application.ser
 import type { FamilyTaskView } from '../care-workflow.types';
 import {
   ClaimFamilyTaskDto,
+  ReleaseFamilyTaskDto,
   FamilyTaskQueryDto,
   FinishFamilyTaskDto,
 } from './care-workflow.dto';
@@ -44,6 +45,20 @@ export class FamilyTasksController {
     @Body() body: ClaimFamilyTaskDto,
   ): Promise<FamilyTaskView> {
     return this.workflow.claimFamilyTask(principal, householdId, taskId, {
+      ...body,
+      idempotencyKey: requireMatchingIdempotencyKey(idempotencyKey),
+    });
+  }
+
+  @Post(':taskId/release')
+  release(
+    @CurrentUser() principal: UserPrincipal,
+    @Param('householdId') householdId: string,
+    @Param('taskId') taskId: string,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Body() body: ReleaseFamilyTaskDto,
+  ): Promise<FamilyTaskView> {
+    return this.workflow.releaseFamilyTask(principal, householdId, taskId, {
       ...body,
       idempotencyKey: requireMatchingIdempotencyKey(idempotencyKey),
     });

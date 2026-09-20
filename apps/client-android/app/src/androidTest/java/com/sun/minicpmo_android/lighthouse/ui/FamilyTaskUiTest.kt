@@ -11,6 +11,22 @@ import org.junit.Rule
 import org.junit.Test
 
 class FamilyTaskUiTest {
+    @Test fun releaseRequiresConfirmationAndCannotSubmitAnOldVersion() {
+        var released = 0
+        val current = mutableStateOf(task().copy(assignedToMe = true, canFinish = true, canRelease = true))
+        compose.setContent { MaterialTheme { FamilyTaskCard(current.value, false, "Asia/Shanghai", {}, { _, _ -> }, { released++ }) } }
+        compose.onNodeWithText("交回待认领").performClick()
+        compose.onNodeWithText("确认交回").assertIsDisplayed()
+        compose.onNodeWithText("取消").performClick()
+        compose.runOnIdle { org.junit.Assert.assertEquals(0, released) }
+        compose.onNodeWithText("交回待认领").performClick()
+        compose.runOnIdle { current.value = current.value.copy(version = 2) }
+        compose.onNodeWithText("确认交回").assertDoesNotExist()
+        compose.onNodeWithText("交回待认领").performClick()
+        compose.onNodeWithText("确认交回").performClick()
+        compose.runOnIdle { org.junit.Assert.assertEquals(1, released); current.value = current.value.copy(canRelease = false) }
+        compose.onNodeWithText("交回待认领").assertDoesNotExist()
+    }
     @get:Rule val compose = createComposeRule()
     private fun task() = FamilyTaskView("task", "elder", "internal-event", "other", "CLAIMED", "NORMAL", null, null, null, null, 1, "需要联系长者", "核对是否需要帮助", "测试家属", false, false, false)
     @Test fun endedTaskShowsVerificationResultWithoutANote() {
@@ -25,6 +41,7 @@ class FamilyTaskUiTest {
         compose.onNodeWithText("由负责人处理").assertIsDisplayed()
         compose.onNodeWithText("完成", substring = false).assertDoesNotExist()
         compose.onNodeWithText("认领", substring = false).assertDoesNotExist()
+        compose.onNodeWithText("交回待认领").assertDoesNotExist()
         compose.onNodeWithText("internal-event", substring = true).assertDoesNotExist()
     }
     @Test fun filtersAreSelectableAndMineDoesNotIncludeOtherMembers() {

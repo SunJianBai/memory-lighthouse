@@ -612,6 +612,24 @@ class LighthouseViewModel internal constructor(
         },
     )
 
+    fun releaseFamilyTask(task: FamilyTaskView) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "task:${task.id}",
+        reconcile = FamilyOperationReconcile.RECIPIENT,
+        request = {
+            require(task.recipientId == recipientId) { "待办不属于当前陪伴对象" }
+            val capturedHouseholdId = checkNotNull(householdId)
+            val capturedRecipientId = checkNotNull(recipientId)
+            repository.releaseFamilyTask(capturedHouseholdId, task)
+            repository.listFamilyTasks(capturedHouseholdId, capturedRecipientId)
+        },
+        apply = { tasks ->
+            _uiState.value = _uiState.value.copy(
+                familyTasks = tasks, familyTaskError = null, message = "待办已交回待认领",
+            )
+        },
+    )
+
     fun finishFamilyTask(task: FamilyTaskView, resolve: Boolean, note: String?) = familyAction(
         scope = FamilyOperationScope.RECIPIENT,
         lane = "task:${task.id}",

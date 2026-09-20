@@ -6,6 +6,9 @@ import { CareWorkflowApplicationService } from './care-workflow.application.serv
 import { OCCURRENCE_STATUS } from './care-workflow.constants';
 import {
   DeviceOccurrenceAccessDeniedException,
+  CareWorkflowVersionConflictException,
+  FamilyTaskAssigneeConflictException,
+  InvalidFamilyTaskTransitionException,
   FamilyTaskClaimConflictException,
   IdempotencyConflictException,
   InvalidOccurrenceTransitionException,
@@ -678,6 +681,152 @@ describe('CareWorkflowApplicationService device occurrence refresh', () => {
 });
 
 describe('CareWorkflowApplicationService task concurrency', () => {
+  const releaseFixture = (
+    assigneeMemberId: string | null = 'member-1',
+    status = 'CLAIMED',
+  ) => {
+    const test = harness({ openTask: true });
+    Object.assign(test.openTask!, { status, assigneeMemberId });
+    test.transaction.familyTask.findUniqueOrThrow.mockResolvedValue({
+      ...test.openTask!,
+      status: 'OPEN',
+      assigneeMemberId: null,
+      version: 1,
+    });
+    return test;
+  };
+  const releaseCommand = { version: 0, idempotencyKey: 'release-task-1' };
+
+  it('releases only the current assignee without marking the task complete and records once', async () => {
+    const test = releaseFixture();
+    const result = await test.service.releaseFamilyTask(
+      principal,
+      'household-1',
+      'task-1',
+      releaseCommand,
+    );
+    expect(result).toMatchObject({
+      status: 'OPEN',
+      assigneeMemberId: null,
+      version: 1,
+      resolvedAt: null,
+      resolutionCode: null,
+    });
+    const update = test.transaction.familyTask.updateMany.mock.calls[0][0];
+    expect(update.where).toMatchObject({
+      id: 'task-1',
+      householdId: 'household-1',
+      version: 0,
+      status: 'CLAIMED',
+    });
+    expect(update.data).toEqual({
+      status: 'OPEN',
+      assigneeMemberId: null,
+      version: { increment: 1 },
+    });
+    expect(test.policy.requireRecipientAction).toHaveBeenCalledWith(
+      test.transaction,
+      principal.userId,
+      'household-1',
+      'recipient-1',
+      'VIEW_EVENTS',
+    );
+    expect(test.transaction.familyTaskAction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'RELEASE',
+        actorMemberId: 'member-1',
+        fromStatus: 'CLAIMED',
+        toStatus: 'OPEN',
+      }),
+    });
+    await test.service.releaseFamilyTask(
+      principal,
+      'household-1',
+      'task-1',
+      releaseCommand,
+    );
+    expect(test.transaction.familyTaskAction.create).toHaveBeenCalledTimes(1);
+    expect(test.transaction.outboxEvent.create).toHaveBeenCalledTimes(1);
+  });
+  it.each(['OPEN', 'RESOLVED', 'DISMISSED'])(
+    'does not release a %s task',
+    async (status) => {
+      const test = releaseFixture('member-1', status);
+      await expect(
+        test.service.releaseFamilyTask(
+          principal,
+          'household-1',
+          'task-1',
+          releaseCommand,
+        ),
+      ).rejects.toBeInstanceOf(InvalidFamilyTaskTransitionException);
+      expect(test.transaction.familyTask.updateMany).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['member-other', null])(
+    'cannot release an unowned task (assignee=%s)',
+    async (assignee) => {
+      const test = releaseFixture(assignee);
+      await expect(
+        test.service.releaseFamilyTask(
+          principal,
+          'household-1',
+          'task-1',
+          releaseCommand,
+        ),
+      ).rejects.toBeInstanceOf(FamilyTaskAssigneeConflictException);
+      expect(test.transaction.familyTaskAction.create).not.toHaveBeenCalled();
+    },
+  );
+  it('rejects a lost release race without recording an action', async () => {
+    const test = releaseFixture();
+    test.transaction.familyTask.updateMany.mockResolvedValue({ count: 0 });
+    await expect(
+      test.service.releaseFamilyTask(
+        principal,
+        'household-1',
+        'task-1',
+        releaseCommand,
+      ),
+    ).rejects.toBeInstanceOf(CareWorkflowVersionConflictException);
+    expect(test.transaction.familyTaskAction.create).not.toHaveBeenCalled();
+  });
+  it('binds the release receipt to action and version and rechecks authority before replay', async () => {
+    const test = releaseFixture();
+    await test.service.releaseFamilyTask(
+      principal,
+      'household-1',
+      'task-1',
+      releaseCommand,
+    );
+    await expect(
+      test.service.releaseFamilyTask(principal, 'household-1', 'task-1', {
+        ...releaseCommand,
+        version: 1,
+      }),
+    ).rejects.toBeInstanceOf(IdempotencyConflictException);
+    await expect(
+      test.service.claimFamilyTask(
+        principal,
+        'household-1',
+        'task-1',
+        releaseCommand,
+      ),
+    ).rejects.toBeInstanceOf(IdempotencyConflictException);
+    test.policy.requireRecipientAction.mockRejectedValue(
+      new Error('authority revoked'),
+    );
+    await expect(
+      test.service.releaseFamilyTask(
+        principal,
+        'household-1',
+        'task-1',
+        releaseCommand,
+      ),
+    ).rejects.toThrow('authority revoked');
+    expect(test.transaction.familyTaskAction.create).toHaveBeenCalledTimes(1);
+  });
+
   it('reports a deterministic claim conflict when optimistic ownership loses', async () => {
     const test = harness({ openTask: true, taskUpdateCount: 0 });
     await expect(

@@ -7,6 +7,11 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class FamilyTaskBoardTest {
+    @Test fun releaseCapabilityDefaultsToFalseAndRequiresBoolean() {
+        assertFalse(FamilyJsonMapper.parseFamilyTaskBoard(board(), "home", "elder").single().canRelease)
+        assertTrue(FamilyJsonMapper.parseFamilyTaskBoard(board(item().put("canRelease", true)), "home", "elder").single().canRelease)
+        assertThrows(Exception::class.java) { FamilyJsonMapper.parseFamilyTaskBoard(board(item().put("canRelease", "true")), "home", "elder") }
+    }
     private fun item() = JSONObject("""{"id":"task","householdId":"home","recipientId":"elder","sourceEventId":"event","assigneeMemberId":null,"status":"OPEN","priority":"NORMAL","dueAt":null,"resolvedAt":null,"resolutionCode":null,"resolutionNote":null,"version":0,"sourceTitle":"请联系长者","sourceSummary":"核对是否需要帮助","assigneeDisplayName":null,"assignedToMe":false,"canClaim":true,"canFinish":true}""")
     private fun board(item: JSONObject? = item()) = JSONObject().put("householdId", "home").put("recipientId", "elder").put("tasks", JSONArray().apply { item?.let(::put) })
     @Test fun parsesNamesContextAndActions() {

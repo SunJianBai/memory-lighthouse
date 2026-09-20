@@ -38,6 +38,25 @@ const board = (tasks = [taskFixture()]) => ({
   tasks,
 });
 describe("family task board contract", () => {
+  it("defaults an absent release capability to false and validates new server values", () => {
+    expect(parseFamilyTaskBoard(board(), "home", "elder")[0].canRelease).toBe(
+      false,
+    );
+    expect(
+      parseFamilyTaskBoard(
+        board([taskFixture({ canRelease: true })]),
+        "home",
+        "elder",
+      )[0].canRelease,
+    ).toBe(true);
+    expect(() =>
+      parseFamilyTaskBoard(
+        { ...board(), tasks: [{ ...taskFixture(), canRelease: "true" }] },
+        "home",
+        "elder",
+      ),
+    ).toThrow();
+  });
   it("keeps priority meanings distinct and aligned with Android", () => {
     expect(["LOW", "NORMAL", "HIGH", "URGENT"].map(taskPriorityLabel)).toEqual([
       "低优先级",

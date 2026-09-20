@@ -40,6 +40,62 @@ const render = (tasks = [task], error = "", loading = false) =>
     />,
   );
 describe("family task presentation", () => {
+  it("confirms a release, restores focus on cancel and drops stale confirmations", async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onAction = vi.fn();
+    let mine = {
+      ...task,
+      assignedToMe: true,
+      canFinish: true,
+      canRelease: true,
+    };
+    const draw = async () =>
+      act(async () =>
+        root.render(
+          <FamilyTaskPanel
+            tasks={[mine]}
+            loading={false}
+            error=""
+            busyId=""
+            timezone="Asia/Shanghai"
+            onAction={onAction}
+          />,
+        ),
+      );
+    const button = (text: string) =>
+      [...host.querySelectorAll("button")].find(
+        (el) => el.textContent === text,
+      );
+    const click = async (text: string) =>
+      act(async () => button(text)!.click());
+    try {
+      await draw();
+      await click("交回待认领");
+      expect(host.textContent).toContain("此待办仍未完成");
+      expect(onAction).not.toHaveBeenCalled();
+      await click("取消");
+      expect(document.activeElement).toBe(button("交回待认领"));
+      await click("交回待认领");
+      await click("不再处理");
+      expect(button("确认交回")).toBeUndefined();
+      await click("交回待认领");
+      mine = { ...mine, version: mine.version + 1 };
+      await draw();
+      expect(button("确认交回")).toBeUndefined();
+      await click("交回待认领");
+      await click("确认交回");
+      expect(onAction).toHaveBeenCalledExactlyOnceWith(mine, "release");
+      mine = { ...mine, canRelease: false };
+      await draw();
+      expect(button("交回待认领")).toBeUndefined();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
   it.each([
     ["FAMILY_CONFIRMED", "家属已确认处理"],
     ["NOT_ACTIONABLE", "无需继续处理"],
@@ -129,6 +185,7 @@ describe("family task presentation", () => {
     expect(html).not.toContain("INTERNAL_");
     expect(html).not.toContain(">完成</button>");
     expect(html).not.toContain(">认领</button>");
+    expect(html).not.toContain("交回待认领");
   });
   it("shows actions for mine and exposes pressed filter state", () => {
     const html = render([{ ...task, assignedToMe: true, canFinish: true }]);

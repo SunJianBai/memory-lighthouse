@@ -64,6 +64,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -128,6 +129,7 @@ internal class FamilyUiActions(
     val deleteRoutine: (RoutineView) -> Unit,
     val verifyOccurrence: (OccurrenceView, Boolean, String?) -> Unit,
     val claimFamilyTask: (FamilyTaskView) -> Unit,
+    val releaseFamilyTask: (FamilyTaskView) -> Unit,
     val finishFamilyTask: (FamilyTaskView, Boolean, String?) -> Unit,
     val decideConsent: (String, Boolean) -> Unit,
     val loadCareAuthorities: () -> Unit,
@@ -273,6 +275,7 @@ internal fun FamilyManagementContent(
                         occurrenceDecision = OccurrenceDecision(occurrence, verified)
                     },
                     onClaimTask = actions.claimFamilyTask,
+                    onReleaseTask = actions.releaseFamilyTask,
                     onFinishTask = { task, resolve ->
                         taskDecision = TaskDecision(task, resolve)
                     },
@@ -1363,6 +1366,7 @@ private fun CareSection(
     onDeleteRoutine: (RoutineView) -> Unit,
     onVerifyOccurrence: (OccurrenceView, Boolean) -> Unit,
     onClaimTask: (FamilyTaskView) -> Unit,
+    onReleaseTask: (FamilyTaskView) -> Unit,
     onFinishTask: (FamilyTaskView, Boolean) -> Unit,
 ) {
     var taskFilter by remember(state.selectedHouseholdId, state.selectedRecipientId, state.user?.id) { mutableStateOf(FamilyTaskFilter.UNFINISHED) }
@@ -1411,6 +1415,7 @@ private fun CareSection(
                     busy = state.busy,
                     timezone = state.selectedRecipient?.timezone ?: "Asia/Shanghai",
                     onClaim = onClaimTask,
+                    onRelease = onReleaseTask,
                     onFinish = onFinishTask,
                 )
             }
@@ -1615,7 +1620,11 @@ internal fun FamilyTaskCard(
     timezone: String,
     onClaim: (FamilyTaskView) -> Unit,
     onFinish: (FamilyTaskView, Boolean) -> Unit,
+    onRelease: (FamilyTaskView) -> Unit = {},
 ) {
+    var confirmRelease by remember(task.id, task.version, task.canRelease) { mutableStateOf(false) }
+    val releaseFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(busy) { if (busy) confirmRelease = false }
     OutlinedCard(Modifier.fillMaxWidth().testTag("family-task-card")) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
@@ -1642,7 +1651,7 @@ internal fun FamilyTaskCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (task.canClaim || task.canFinish) {
+            if (task.canClaim || task.canFinish || task.canRelease) {
                 Column(
                     Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1656,8 +1665,21 @@ internal fun FamilyTaskCard(
                     }
                     if (task.canFinish) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { onFinish(task, true) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("完成") }
-                            TextButton(onClick = { onFinish(task, false) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("不再处理") }
+                            Button(onClick = { confirmRelease = false; onFinish(task, true) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("完成") }
+                            TextButton(onClick = { confirmRelease = false; onFinish(task, false) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("不再处理") }
+                        }
+                    }
+                    if (task.canRelease) {
+                        OutlinedButton(
+                            onClick = { confirmRelease = true }, enabled = !busy,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).focusRequester(releaseFocus),
+                        ) { Text("交回待认领") }
+                        if (confirmRelease) {
+                            Text("交回后将不再由你负责，其他有权限的家属可以认领。此待办仍未完成。")
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { confirmRelease = false; onRelease(task) }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("确认交回") }
+                                TextButton(onClick = { confirmRelease = false; releaseFocus.requestFocus() }, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("取消") }
+                            }
                         }
                     }
                 }
