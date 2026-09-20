@@ -701,6 +701,10 @@ class LighthouseRepository(
         requireNotNull(deviceRequest("GET", "device/context")),
     )
 
+    suspend fun getDeviceReadiness(): DeviceReadinessView = DeviceReadinessView.fromJson(
+        requireNotNull(deviceRequest("GET", "device/readiness")),
+    )
+
     internal suspend fun heartbeat(): DeviceHeartbeatView = recordCompanionHeartbeat(
         applyDirective = { _, _ -> },
         applyActiveFailure = { _ -> },

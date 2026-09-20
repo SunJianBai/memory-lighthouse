@@ -806,6 +806,8 @@ class LighthouseViewModel internal constructor(
         },
     )
 
+    suspend fun loadCompanionReadiness(): DeviceReadinessView = repository.getDeviceReadiness()
+
     fun refresh(): Job {
         if (_uiState.value.role != AppRole.FAMILY) return action { restoreDeviceData() }
         val scope = familyWorkspaceLoads.begin()

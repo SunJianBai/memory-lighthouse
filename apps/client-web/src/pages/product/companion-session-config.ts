@@ -19,7 +19,7 @@ export const formatCompanionContextSummary = (
       ? `已准备 ${memoryCount} 条记忆`
       : routineCount > 0
         ? `已准备 ${routineCount} 项日程`
-        : "陪伴已准备";
+        : "未载入记忆或日程";
 
 export const resolveCompanionSessionConfiguration = (
   response: ModelConnectionView,

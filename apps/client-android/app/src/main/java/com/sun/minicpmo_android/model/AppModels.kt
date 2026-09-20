@@ -80,7 +80,7 @@ data class EffectiveSessionConfiguration(
                     "已准备 $memories 条记忆和 $routines 项日程"
                 memories != null -> "已准备 $memories 条记忆"
                 routines != null -> "已准备 $routines 项日程"
-                else -> "陪伴已准备"
+                else -> "未载入记忆或日程"
             }
         }
 

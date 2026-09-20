@@ -293,6 +293,44 @@ h3 {
   gap: 20px;
 }
 
+.companion-readiness {
+  width: 100%;
+  min-width: 0;
+  font-size: 1rem;
+}
+
+.companion-readiness summary {
+  min-height: 44px;
+  padding-block: 8px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.companion-readiness summary span {
+  margin-left: 12px;
+  color: var(--color-muted-foreground);
+  font-weight: 400;
+}
+
+.companion-readiness dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.companion-readiness dl > div {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.companion-readiness dt { font-weight: 600; }
+.companion-readiness dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.companion-readiness .secondary-button { min-height: 44px; }
+.companion-readiness-note { color: var(--color-muted-foreground); }
+
 .welcome-header-actions {
   display: flex;
   align-items: center;

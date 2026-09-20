@@ -135,6 +135,7 @@ import com.sun.minicpmo_android.lighthouse.model.ActivationPresentation
 import com.sun.minicpmo_android.lighthouse.model.ActivationApprovalDetails
 import com.sun.minicpmo_android.lighthouse.model.AppRole
 import com.sun.minicpmo_android.lighthouse.model.CompanionBindingView
+import com.sun.minicpmo_android.lighthouse.model.DeviceReadinessView
 import com.sun.minicpmo_android.lighthouse.model.LighthouseUiState
 import com.sun.minicpmo_android.lighthouse.model.RemoteSessionView
 import com.sun.minicpmo_android.lighthouse.realtime.LiveCallPhase
@@ -455,6 +456,8 @@ fun LighthouseRoute(
                         }
                     },
                     onOpenAi = viewModel::openAiCompanion,
+                    loadCompanionReadiness = viewModel::loadCompanionReadiness,
+                    onRecheckPermissions = { permissionRevision += 1 },
                     onRequestCompanionPermissions = ::requestCompanionPermissions,
                     onOpenPermissionSettings = ::openPermissionSettings,
                     onAcceptCall = {
@@ -738,6 +741,8 @@ private fun SignedInShell(
     onClaimDynamic: (String, String) -> Unit,
     onOpenScanner: () -> Unit,
     onOpenAi: () -> Unit,
+    loadCompanionReadiness: suspend () -> DeviceReadinessView,
+    onRecheckPermissions: () -> Unit,
     onRequestCompanionPermissions: () -> Unit,
     onOpenPermissionSettings: () -> Unit,
     onAcceptCall: () -> Unit,
@@ -805,6 +810,9 @@ private fun SignedInShell(
                         onAcceptCall,
                         onDeclineCall,
                         onDismissRemoteCallFailure,
+                        loadCompanionReadiness,
+                        onRecheckPermissions,
+                        onRefresh,
                     )
                 }
             }
@@ -1209,6 +1217,9 @@ private fun CompanionScreen(
     onAcceptCall: () -> Unit,
     onDeclineCall: () -> Unit,
     onDismissRemoteCallFailure: () -> Unit,
+    loadCompanionReadiness: suspend () -> DeviceReadinessView,
+    onRecheckPermissions: () -> Unit,
+    onRefresh: () -> Unit,
 ) {
     if (!state.deviceActivated) {
         DeviceActivationScreen(state, onClaimDynamic, onOpenScanner)
@@ -1248,52 +1259,16 @@ private fun CompanionScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
-        OutlinedCard(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.outlinedCardColors(
-                containerColor = if (permissionReadiness.fullyReady) {
-                    MaterialTheme.colorScheme.primaryContainer
-                } else {
-                    MaterialTheme.colorScheme.errorContainer
-                },
-            ),
-        ) {
-            Column(
-                Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Icon(
-                        if (permissionReadiness.fullyReady) {
-                            Icons.Rounded.CheckCircle
-                        } else {
-                            Icons.Rounded.ErrorOutline
-                        },
-                        contentDescription = null,
-                    )
-                    Text(
-                        if (permissionReadiness.fullyReady) "设备已就绪" else "设备尚未完全就绪",
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                }
-                if (!permissionReadiness.fullyReady) {
-                    Text(
-                        "缺少${permissionReadiness.missingPermissionLabels.joinToString("、")}权限",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Button(onClick = onRequestPermissions, modifier = Modifier.fillMaxWidth()) {
-                        Text("补全权限")
-                    }
-                    TextButton(onClick = onOpenPermissionSettings, modifier = Modifier.fillMaxWidth()) {
-                        Text("打开系统设置")
-                    }
-                }
-            }
-        }
+        CompanionStartupCard(
+            deviceId = context?.deviceId,
+            bindingId = context?.bindingId,
+            permissions = permissionReadiness,
+            load = loadCompanionReadiness,
+            onRecheckPermissions = onRecheckPermissions,
+            onRequestPermissions = onRequestPermissions,
+            onOpenSettings = onOpenPermissionSettings,
+            onRefresh = onRefresh,
+        )
         state.remoteCallFailure?.let { failure ->
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth(),

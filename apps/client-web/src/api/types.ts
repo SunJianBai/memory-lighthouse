@@ -390,6 +390,22 @@ export type DeviceContextView = {
   model: { provider: string; model: string; realtimeUrl: string };
 };
 
+// Startup checks are a read-only snapshot, never a media or model connection probe.
+export type DeviceReadinessView = {
+  schemaVersion: 1;
+  deviceId: string;
+  bindingId: string;
+  checkedAt: string;
+  authorization: {
+    audio: { allowed: boolean; missingScopes: string[] };
+    audioVideo: { allowed: boolean; missingScopes: string[] };
+  };
+  model: {
+    configurationStatus: "CONFIGURED" | "INVALID";
+    connectionStatus: "NOT_TESTED";
+  };
+};
+
 export type DeviceHeartbeatView = {
   online: true;
   serverTime: string;

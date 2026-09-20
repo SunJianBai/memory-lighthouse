@@ -2,9 +2,18 @@ import {
   CARE_TEST_PASSWORD,
   createTodayCareHarness,
 } from '../test/support/today-care-harness';
+import { ulid } from 'ulid';
 
 async function main() {
   const fixture = await createTodayCareHarness();
+  // Preview-only device setup for this synthetic family, not a production grant.
+  await fixture.db.recipientMember.createMany({
+    data: [fixture.recipientId, fixture.emptyRecipientId].map((recipientId) => ({
+      id: ulid(), householdId: fixture.householdId, recipientId,
+      householdMemberId: fixture.ownerMemberId, status: 'ACTIVE', accessLevel: 'FULL',
+      canActivateDevice: true,
+    })),
+  });
   await fixture.app.listen(13100, '127.0.0.1');
   console.log(
     JSON.stringify({

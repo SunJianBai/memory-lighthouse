@@ -61,6 +61,21 @@ export interface DeviceContextView {
   };
 }
 
+export interface DeviceReadinessView {
+  schemaVersion: 1;
+  deviceId: string;
+  bindingId: string;
+  checkedAt: string;
+  authorization: {
+    audio: { allowed: boolean; missingScopes: string[] };
+    audioVideo: { allowed: boolean; missingScopes: string[] };
+  };
+  model: {
+    configurationStatus: 'CONFIGURED' | 'INVALID';
+    connectionStatus: 'NOT_TESTED';
+  };
+}
+
 export interface DeviceHeartbeatView {
   online: true;
   serverTime: string;

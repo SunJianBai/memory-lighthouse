@@ -75,10 +75,15 @@ function codeOf(error: unknown): string | undefined {
 
 function serviceWith(options: {
   consent: string[];
+  bindingAvailable?: boolean;
   modelSession?: Record<string, unknown>;
 }) {
   const prisma = {
-    companionBinding: { findFirst: jest.fn(async () => binding) },
+    companionBinding: {
+      findFirst: jest.fn(async () =>
+        options.bindingAvailable === false ? null : binding,
+      ),
+    },
     recipientConsentState: {
       findMany: jest.fn(async () =>
         options.consent.map((scope) => ({ scope, decision: 'GRANTED' })),
@@ -639,6 +644,35 @@ function lifecycleHarness(
 }
 
 describe('CompanionSessionApplicationService consent boundary', () => {
+  it('checks startup without memory, model-session, heartbeat or lease writes', async () => {
+    // This fixture has no write or memory methods; using one makes this test fail.
+    const result = await serviceWith({
+      consent: ['MICROPHONE_CAPTURE', 'MODEL_PROCESSING'],
+    }).getDeviceReadiness(principal);
+    expect(result.bindingId).toBe(principal.bindingId);
+    expect(result.authorization.audio.allowed).toBe(true);
+    expect(result.authorization.audioVideo.missingScopes).toEqual([
+      'CAMERA_CAPTURE',
+    ]);
+    expect(result.model.connectionStatus).toBe('NOT_TESTED');
+    expect(Object.keys(result).sort()).toEqual([
+      'authorization',
+      'bindingId',
+      'checkedAt',
+      'deviceId',
+      'model',
+      'schemaVersion',
+    ]);
+  });
+
+  it('does not expose a readiness report for an unavailable binding', async () => {
+    await expect(
+      serviceWith({ consent: [], bindingAvailable: false }).getDeviceReadiness(
+        principal,
+      ),
+    ).rejects.toThrow();
+  });
+
   it('requires separate camera consent for an audio-video session', async () => {
     const service = serviceWith({
       consent: ['MICROPHONE_CAPTURE', 'MODEL_PROCESSING'],

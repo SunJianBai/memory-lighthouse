@@ -9,7 +9,7 @@
 | 001 | 今日照护概览 | 三端验收及审查收尾完成，本地提交 09c2347、d71cd16 | [需求、设计与验收](001-today-care.md) |
 | 002 | 家庭待办协作 | 三端验收及双轴审查完成，本地提交 81416b2、b4b8390 | [需求与验收](002-task-collaboration.md) · [调研](002-task-collaboration-research.md) |
 | 003 | 提醒周期与日期范围 | 三端验收及双轴审查完成，本地提交 e45d1ca、3e8da32 | [需求与验收](003-routine-schedules.md) · [调研](003-routine-schedules-research.md) |
-| 004 | 陪伴设备自检与就绪说明 | 调研完成，待需求与代码可行性核对，尚未实现 | [调研](004-companion-readiness-research.md) |
+| 004 | 陪伴启动检查 | 三端实现与专项验证完成，完整回归及审查中 | [需求与计划](004-companion-readiness.md) · [调研](004-companion-readiness-research.md) |
 
 ## 后续候选
 

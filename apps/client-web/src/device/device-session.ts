@@ -6,6 +6,7 @@ import {
 import type {
   CompanionSessionStartView,
   DeviceContextView,
+  DeviceReadinessView,
   DeviceHeartbeatView,
   FamilyContactRequestView,
   ModelConnectionView,
@@ -358,6 +359,12 @@ export class DeviceSessionManager {
 
   context(): Promise<DeviceContextView> {
     return this.request<DeviceContextView>("/device/context");
+  }
+
+  readiness(): Promise<DeviceReadinessView> {
+    return this.request<DeviceReadinessView>("/device/readiness", {
+      cache: "no-store",
+    });
   }
 
   heartbeat(

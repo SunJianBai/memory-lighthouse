@@ -63,6 +63,10 @@ import {
 } from './companion-prompt';
 import { ensureCurrentCompanionPrompt } from './companion-prompt.registry';
 import {
+  companionReadiness,
+  requiredCompanionConsent,
+} from './companion-readiness';
+import {
   CompanionLiveContextService,
   type CompanionLiveContext,
 } from './companion-live-context.service';
@@ -74,6 +78,7 @@ import type {
   CompanionSessionView,
   ConsentSnapshot,
   DeviceContextView,
+  DeviceReadinessView,
   DeviceHeartbeatView,
   ModelConnectionView,
   ModelSessionView,
@@ -167,6 +172,22 @@ export class CompanionSessionApplicationService {
       careSnapshot,
       model: this.modelConfiguration(),
     };
+  }
+
+  async getDeviceReadiness(
+    principal: DevicePrincipal,
+  ): Promise<DeviceReadinessView> {
+    const binding = await this.requireBindingContext(principal);
+    const consent = await this.captureConsent(
+      binding.householdId,
+      binding.recipientId,
+    );
+    return companionReadiness(
+      principal.deviceId,
+      binding.id,
+      consent,
+      this.modelConfiguration(),
+    );
   }
 
   async recordHeartbeat(
@@ -289,10 +310,8 @@ export class CompanionSessionApplicationService {
       binding.householdId,
       binding.recipientId,
     );
-    this.requireConsent(consent, 'MICROPHONE_CAPTURE');
-    this.requireConsent(consent, 'MODEL_PROCESSING');
-    if (command.mode === 'AUDIO_VIDEO') {
-      this.requireConsent(consent, 'CAMERA_CAPTURE');
+    for (const scope of requiredCompanionConsent(command.mode)) {
+      this.requireConsent(consent, scope);
     }
 
     const careSnapshot = await this.buildCareSnapshot(binding, consent);
@@ -366,10 +385,8 @@ export class CompanionSessionApplicationService {
           binding.recipientId,
           transaction,
         );
-        this.requireConsent(currentConsent, 'MICROPHONE_CAPTURE');
-        this.requireConsent(currentConsent, 'MODEL_PROCESSING');
-        if (command.mode === 'AUDIO_VIDEO') {
-          this.requireConsent(currentConsent, 'CAMERA_CAPTURE');
+        for (const scope of requiredCompanionConsent(command.mode)) {
+          this.requireConsent(currentConsent, scope);
         }
         if (!this.sameConsentDecisions(consent, currentConsent)) {
           throw new CareSnapshotChangedException();
@@ -1105,11 +1122,9 @@ export class CompanionSessionApplicationService {
     snapshot: ConsentSnapshot,
     mode: string,
   ): string | undefined {
-    return [
-      'MICROPHONE_CAPTURE',
-      'MODEL_PROCESSING',
-      ...(mode === 'AUDIO_VIDEO' ? ['CAMERA_CAPTURE'] : []),
-    ].find((scope) => snapshot.decisions[scope] !== true);
+    return requiredCompanionConsent(mode).find(
+      (scope) => snapshot.decisions[scope] !== true,
+    );
   }
 
   private async buildCareSnapshot(

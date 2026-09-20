@@ -33,6 +33,7 @@ import type {
 import { hrefFor, navigate } from "../../app/navigation";
 import { useAuth } from "../../auth/auth-context";
 import { BrandMark } from "../../components/BrandMark";
+import { CompanionReadinessPanel } from "../../components/CompanionReadinessPanel";
 import {
   CareExperience,
   type CareExperienceHandle,
@@ -1087,6 +1088,7 @@ export const CompanionPage = () => {
           <PhoneCall aria-hidden="true" size={18} /> 等待家人来电
         </div>
       </div>
+      {context && <CompanionReadinessPanel key={`${context.deviceId}:${context.bindingId}`} deviceId={context.deviceId} bindingId={context.bindingId} />}
       {error && (
         <div className="inline-alert danger" role="alert">
           <span>{error}</span>

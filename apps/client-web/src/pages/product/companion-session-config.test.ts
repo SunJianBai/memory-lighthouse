@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelConnectionView } from "../../api/types";
-import { resolveCompanionSessionConfiguration } from "./companion-session-config";
+import { formatCompanionContextSummary, resolveCompanionSessionConfiguration } from "./companion-session-config";
 
 const modelResponse = {
   session: { id: "model-1", companionSessionId: "companion-1", status: "CREATED" },
@@ -23,6 +23,9 @@ const modelResponse = {
 } as unknown as ModelConnectionView;
 
 describe("companion session configuration", () => {
+  it("does not claim the device is ready when no care content was loaded", () => {
+    expect(formatCompanionContextSummary(0, 0)).toBe("未载入记忆或日程");
+  });
   it("uses the server effective prompt and connection without rebuilding either locally", () => {
     const resolved = resolveCompanionSessionConfiguration(modelResponse);
 

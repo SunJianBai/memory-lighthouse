@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Headers,
   Param,
   Post,
@@ -38,6 +39,12 @@ export class CompanionSessionController {
     @Body() body: DeviceHeartbeatDto,
   ) {
     return this.companion.recordHeartbeat(principal, body);
+  }
+
+  @Get('readiness')
+  @Header('Cache-Control', 'no-store')
+  getReadiness(@CurrentDevice() principal: DevicePrincipal) {
+    return this.companion.getDeviceReadiness(principal);
   }
 
   @Post('companion-sessions')
