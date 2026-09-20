@@ -38,3 +38,15 @@ data class CareHistoryPage<T>(
     val from: String?,
     val to: String?,
 )
+
+enum class CareHistoryRetry { REFRESH, MORE }
+
+data class CareHistoryState<T>(
+    val filter: CareHistoryFilter = CareHistoryFilter(),
+    val page: CareHistoryPage<T>? = null,
+    val loading: Boolean = false,
+    val appending: Boolean = false,
+    val error: String? = null,
+    val retry: CareHistoryRetry = CareHistoryRetry.REFRESH,
+    val accessDenied: Boolean = false,
+)
