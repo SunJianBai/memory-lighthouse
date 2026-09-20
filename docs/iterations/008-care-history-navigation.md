@@ -90,8 +90,18 @@ Server 与 Web 初步实现，Android 尚未改动；本轮不关闭。
 
 汇总：原检查点 Standards 1（P3），Spec 1（P1，已修正待复核）；Android 与真实环境验收仍未关闭。
 
+补充复核结果（截至 `8ba4ef5`）：
+
+- Standards：`a784b45...a34a5b1`、`a34a5b1...8ba4ef5` 两个补充 diff 均 Hard 0／Judgement 0；原 P3 建议保留。均为静态审查。
+- Spec：原 P1 闭环。`a34a5b1` 的第一次修正曾引入 P2：整体取消 metadata 请求会误丢弃拥有独立 MANAGE_ROUTINE 权限的日程响应。以实际 React 页构造快速 history 403／延迟 routines 的用例先运行失败，再在 `8ba4ef5` 改为仅以 accessSequence 丢弃旧 tasks，日程照常交付。全量 Web **45 files / 296 tests** 及生产构建通过。
+- 独立 Spec agent 对两种竞态复核，3 个 Web 测试文件／31 项通过；当前该检查点未关闭缺失／范围蔓延／错误实现均 0，最坏项无。历史 P1、P2 各 1 项仍如实保留且均已修正。没有宣称真实 SQL／浏览器验收。
+
+阶段汇总：Standards 尚有 1 项低优先级维护建议（P3），Spec 无未解决的检查点错误。整轮 Android 页面与真实环境验收仍待完成，不能据此关闭第 008 轮。
+
 ## Android 契约增量
 
 2026-09-21：新增 `CareHistoryFilter`／泛型页对象、查询路径与边界验证、页响应范围核对以及 Repository 两个分页方法。原数组读接口暂时保留供未迁移页面使用。事件解析必须先检查返回行 householdId／recipientId，再交给原 `FamilyJsonMapper`，不将缺失 cursor 等协议错误当作已到末页。
 
 `:app:testDebugUnitTest -PisolatedTestApp=true` 通过；读取 Gradle XML 为 **50 suites / 260 tests，0 failure/error/skipped**，其中新增 5 项契约测试。未运行本轮 connected 测试、未修改原安装包数据、未使用生产账号。**ViewModel／Compose 页面仍是旧读取路径，用户目前还不能在 App 使用本轮历史查询。** 后续迁移必须覆盖初载、手动刷新、核验回刷及切换／退出生命周期，并接入同工作区失权清理。
+
+Android 契约本地提交 `b106ee2`；最后再次执行全量 260 项通过（7 秒），并重新读取 XML 核对。传输契约已验证不等于页面接入或设备运行已验证。
