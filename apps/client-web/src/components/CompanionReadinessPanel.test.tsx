@@ -81,6 +81,21 @@ describe("companion startup checks", () => {
     expect(host.textContent).toContain("结果已失效");
     expect(host.textContent).not.toContain("本次访问成功");
   });
+  it("includes slow transport in the 60-second snapshot lifetime", async () => {
+    vi.mocked(deviceSession.readiness).mockImplementationOnce(
+      () => new Promise((resolve) => setTimeout(() => resolve(report), 10_000)),
+    );
+    await click();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(host.textContent).toContain("本次访问成功");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50_000);
+    });
+    expect(host.textContent).toContain("结果已失效");
+    expect(host.textContent).not.toContain("本次访问成功");
+  });
   it("invalidates on loss of foreground and ignores the late server response", async () => {
     let resolve!: (value: DeviceReadinessView) => void;
     vi.mocked(deviceSession.readiness).mockReturnValueOnce(

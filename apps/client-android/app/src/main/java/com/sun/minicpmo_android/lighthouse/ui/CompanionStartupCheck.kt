@@ -2,6 +2,7 @@ package com.sun.minicpmo_android.lighthouse.ui
 
 import com.sun.minicpmo_android.lighthouse.model.DeviceReadinessView
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
@@ -36,6 +37,11 @@ internal class CompanionStartupCheck(
         job?.cancel()
         mutableState.value = StartupCheckState(StartupCheckPhase.CHECKING)
         job = scope.launch {
+            // Start expiry before transport; response latency cannot extend freshness.
+            launch(start = CoroutineStart.UNDISPATCHED) {
+                delay(60_000)
+                if (generation == ticket) invalidate()
+            }
             try {
                 val report = withTimeout(15_000) { load() }
                 if (generation != ticket) return@launch
@@ -50,8 +56,6 @@ internal class CompanionStartupCheck(
                 if (generation != ticket) return@launch
                 mutableState.value = StartupCheckState(StartupCheckPhase.ERROR, error = error.message ?: "检查失败，请重试")
             }
-            delay(60_000)
-            if (generation == ticket) invalidate()
         }
     }
 

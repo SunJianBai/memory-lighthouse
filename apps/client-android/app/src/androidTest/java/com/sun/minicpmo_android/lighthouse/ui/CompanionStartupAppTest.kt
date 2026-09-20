@@ -78,7 +78,9 @@ class CompanionStartupAppTest {
         val directory = InstrumentationRegistry.getArguments().getString("additionalTestOutputDir")?.let(::File)
             ?: InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir("qa")!!
         directory.mkdirs()
-        compose.waitUntil(20_000) { compose.onAllNodesWithText("启动检查").fetchSemanticsNodes().isNotEmpty() }
+        // Wait for this fixture's binding context, not just the initial device shell.
+        // The context arrival intentionally replaces any unbound check state.
+        compose.waitUntil(20_000) { compose.onAllNodesWithText("测试长者甲，今天也陪着您").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("启动检查").performScrollTo().performClick()
         compose.onNodeWithText("检查启动条件").performScrollTo()
         File(directory, "companion-startup-device-before.png").outputStream().use {

@@ -40,6 +40,7 @@ export function CompanionReadinessPanel({
   const [error, setError] = useState("");
   const generation = useRef(0);
   const running = useRef(false);
+  const expiresAt = useRef(0);
 
   useEffect(() => {
     const invalidate = () => {
@@ -68,13 +69,16 @@ export function CompanionReadinessPanel({
 
   useEffect(() => {
     if (phase !== "done" && phase !== "error") return;
-    const timer = setTimeout(() => {
-      ++generation.current;
-      setReport(null);
-      setPermissions({});
-      setError("");
-      setPhase("expired");
-    }, 60_000);
+    const timer = setTimeout(
+      () => {
+        ++generation.current;
+        setReport(null);
+        setPermissions({});
+        setError("");
+        setPhase("expired");
+      },
+      Math.max(0, expiresAt.current - performance.now()),
+    );
     return () => clearTimeout(timer);
   }, [phase, report]);
 
@@ -82,6 +86,8 @@ export function CompanionReadinessPanel({
     if (running.current) return;
     running.current = true;
     const ticket = ++generation.current;
+    // Count transport time too, without trusting the device/server wall-clock offset.
+    expiresAt.current = performance.now() + 60_000;
     setReport(null);
     setPermissions({});
     setError("");
@@ -105,6 +111,10 @@ export function CompanionReadinessPanel({
         ),
       ]);
       if (generation.current !== ticket) return;
+      if (performance.now() >= expiresAt.current) {
+        setPhase("expired");
+        return;
+      }
       setPermissions({ microphone, camera });
       if ("cause" in server) throw server.cause;
       if (

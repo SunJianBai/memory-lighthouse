@@ -5,6 +5,7 @@ import com.sun.minicpmo_android.lighthouse.model.DeviceReadinessView
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -39,6 +40,19 @@ class CompanionStartupCheckTest {
         assertEquals("离线", check.state.value.error)
         failed = false
         check.check(); runCurrent(); assertEquals(StartupCheckPhase.DONE, check.state.value.phase)
+    }
+
+    @Test fun transportTimeCountsTowardsSnapshotLifetime() = runTest {
+        val check = CompanionStartupCheck("device", "binding", backgroundScope) {
+            delay(10_000)
+            report
+        }
+        check.check(); runCurrent()
+        advanceTimeBy(10_000); runCurrent()
+        assertEquals(StartupCheckPhase.DONE, check.state.value.phase)
+        advanceTimeBy(50_000); runCurrent()
+        assertEquals(StartupCheckPhase.EXPIRED, check.state.value.phase)
+        assertNull(check.state.value.report)
     }
 
     @Test fun lateNonCancellableResultCannotReplaceANewerCheck() = runTest {
