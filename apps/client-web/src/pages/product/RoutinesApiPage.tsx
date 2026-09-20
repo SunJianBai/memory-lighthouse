@@ -45,6 +45,7 @@ const EMPTY_ROUTINE_PAGE_DATA: RoutinePageData = {
   tasks: [],
   errors: {},
 };
+type HistoryAccessError = { sequence: number; message: string };
 
 export const RoutinesApiPage = () => {
   const { user } = useAuth();
@@ -54,6 +55,10 @@ export const RoutinesApiPage = () => {
   );
   const [loadingScopeKey, setLoadingScopeKey] = useState("");
   const [historyRevision, setHistoryRevision] = useState(0);
+  const [historyAccessState, setHistoryAccessState] = useState<
+    ScopedPageState<HistoryAccessError | null>
+  >(() => createScopedPageState("", null));
+  const accessSequence = useRef(0);
   const [busyState, setBusyState] = useState<ScopedPageState<string>>(() =>
     createScopedPageState("", ""),
   );
@@ -86,6 +91,11 @@ export const RoutinesApiPage = () => {
       pageState.scopeKey !== workspace.workspaceScopeKey);
   const busyId = pageValueForScope(busyState, workspace.workspaceScopeKey, "");
   const error = pageValueForScope(errorState, workspace.workspaceScopeKey, "");
+  const historyAccessError = pageValueForScope(
+    historyAccessState,
+    workspace.workspaceScopeKey,
+    null,
+  );
   const formIsCurrent = isScopedMutationOwnerCurrent(formOwner, scopeIdentity);
   const careCommands = useMemo(
     () =>
@@ -110,7 +120,12 @@ export const RoutinesApiPage = () => {
         setLoadingScopeKey("");
         return;
       }
-      if (refreshHistory) setHistoryRevision((revision) => revision + 1);
+      if (refreshHistory) {
+        setHistoryAccessState(
+          createScopedPageState(workspace.workspaceScopeKey, null),
+        );
+        setHistoryRevision((revision) => revision + 1);
+      }
       const owner = createWorkspaceOperationOwner(
         workspace.workspaceScopeKey,
         workspace.householdId,
@@ -207,6 +222,9 @@ export const RoutinesApiPage = () => {
       ),
     );
     setLoadingScopeKey("");
+    setHistoryAccessState(
+      createScopedPageState(workspace.workspaceScopeKey, null),
+    );
     setBusyState(createScopedPageState(workspace.workspaceScopeKey, ""));
     setErrorState(createScopedPageState(workspace.workspaceScopeKey, ""));
     setFormOpen(false);
@@ -606,6 +624,33 @@ export const RoutinesApiPage = () => {
             revision={historyRevision}
             busyId={busyId}
             onVerify={(item, verified) => void verifyOccurrence(item, verified)}
+            accessError={historyAccessError}
+            onRetryAccess={() => void load()}
+            onAccessDenied={(message) => {
+              if (
+                scopeIdentity.key !== currentScopeIdentity.current.key ||
+                scopeIdentity.epoch !== currentScopeIdentity.current.epoch
+              )
+                return;
+              // Tasks and both history panels share VIEW_EVENTS. Invalidate pending reads too.
+              loadRequests.current.invalidate();
+              setLoadingScopeKey("");
+              setHistoryAccessState(
+                createScopedPageState(scopeIdentity.key, {
+                  sequence: ++accessSequence.current,
+                  message,
+                }),
+              );
+              setPageState((current) =>
+                current.scopeKey !== scopeIdentity.key
+                  ? current
+                  : createScopedPageState(scopeIdentity.key, {
+                      ...current.value,
+                      tasks: [],
+                      errors: { ...current.value.errors, tasks: message },
+                    }),
+              );
+            }}
           />
         ))}
       </div>

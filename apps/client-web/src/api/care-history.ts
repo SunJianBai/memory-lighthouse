@@ -129,6 +129,7 @@ export class CareHistorySession {
     readonly householdId: string,
     readonly recipientId: string,
     private readonly request: (path: string) => Promise<unknown>,
+    private readonly onAccessDenied?: (message: string) => void,
   ) {}
 
   subscribe(listener: (state: CareHistoryState) => void) {
@@ -143,6 +144,18 @@ export class CareHistorySession {
   private update(state: CareHistoryState) {
     this.state = state;
     this.listener?.(state);
+  }
+
+  denyAccess(message: string) {
+    this.generation++;
+    this.update({
+      ...this.state,
+      page: null,
+      loading: false,
+      appending: false,
+      error: message,
+      retry: "refresh",
+    });
   }
 
   refresh(filter = this.state.filter) {
@@ -210,6 +223,7 @@ export class CareHistorySession {
         error: readableError(error),
         retry: append && !denied && !invalidCursor ? "more" : "refresh",
       });
+      if (denied) this.onAccessDenied?.(readableError(error));
     }
   }
 }

@@ -1,5 +1,5 @@
 import { CheckCircle2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiClient } from "../api/api-client";
 import {
   CareHistorySession,
@@ -37,6 +37,9 @@ export function CareHistoryPanel({
   revision,
   busyId,
   onVerify,
+  accessError,
+  onAccessDenied,
+  onRetryAccess,
 }: {
   kind: CareHistoryKind;
   householdId: string;
@@ -45,11 +48,20 @@ export function CareHistoryPanel({
   revision: number;
   busyId: string;
   onVerify: (item: OccurrenceView, verified: boolean) => void;
+  accessError?: { sequence: number; message: string } | null;
+  onAccessDenied?: (message: string) => void;
+  onRetryAccess?: () => void;
 }) {
+  const deniedCallback = useRef(onAccessDenied);
+  deniedCallback.current = onAccessDenied;
   const session = useMemo(
     () =>
-      new CareHistorySession(kind, householdId, recipientId, (path) =>
-        apiClient.request<unknown>(path),
+      new CareHistorySession(
+        kind,
+        householdId,
+        recipientId,
+        (path) => apiClient.request<unknown>(path),
+        (message) => deniedCallback.current?.(message),
       ),
     [kind, householdId, recipientId],
   );
@@ -64,10 +76,15 @@ export function CareHistoryPanel({
   useEffect(() => {
     void session.refresh();
   }, [session, revision]);
+  useEffect(() => {
+    if (accessError) session.denyAccess(accessError.message);
+  }, [session, accessError]);
   const isOccurrence = kind === "occurrences";
   const title = isOccurrence ? "提醒记录" : "照护动态";
-  const zone = state.page?.timezone ?? timezone;
-  const items = state.page?.items ?? [];
+  const page = accessError ? null : state.page;
+  const zone = page?.timezone ?? timezone;
+  const items = page?.items ?? [];
+  const error = accessError?.message ?? state.error;
   const filter = state.filter;
   return (
     <section className="panel-card care-history-panel" aria-label={title}>
@@ -101,6 +118,7 @@ export function CareHistoryPanel({
           <button
             type="button"
             className="secondary-button"
+            disabled={Boolean(accessError)}
             onClick={() => {
               setFormError("");
               setDraft({ ...recentHistoryDates(zone), status: "" });
@@ -120,7 +138,7 @@ export function CareHistoryPanel({
             event.preventDefault();
             const error = historyDateError(draft.startDate, draft.endDate);
             setFormError(error);
-            if (!error)
+            if (!error && !accessError)
               void session.refresh({
                 startDate: draft.startDate,
                 endDate: draft.endDate,
@@ -191,33 +209,41 @@ export function CareHistoryPanel({
               {formError}
             </p>
           )}
-          <button type="submit" className="primary-button">
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={Boolean(accessError)}
+          >
             查询
           </button>
         </form>
       )}
-      {state.loading && (
+      {!accessError && state.loading && (
         <p className="list-loading" role="status">
           正在加载{title}…
         </p>
       )}
-      {state.error && (
+      {error && (
         <div className="care-history-error" role="alert">
-          <p>{state.error}</p>
+          <p>{error}</p>
           <button
             type="button"
             className="secondary-button"
             onClick={() =>
-              void (state.retry === "more"
-                ? session.loadMore()
-                : session.refresh())
+              accessError
+                ? onRetryAccess?.()
+                : void (state.retry === "more"
+                    ? session.loadMore()
+                    : session.refresh())
             }
           >
-            {state.retry === "more" ? "重试加载更多" : "重新查询"}
+            {!accessError && state.retry === "more"
+              ? "重试加载更多"
+              : "重新查询"}
           </button>
         </div>
       )}
-      {!state.loading && state.page && (
+      {!state.loading && page && (
         <>
           <p className="care-history-count" role="status">
             已加载 {items.length} 条
@@ -296,8 +322,8 @@ export function CareHistoryPanel({
               })}
             </div>
           )}
-          {!state.error &&
-            (state.page.nextCursor ? (
+          {!error &&
+            (page.nextCursor ? (
               <button
                 type="button"
                 className="secondary-button care-history-more"

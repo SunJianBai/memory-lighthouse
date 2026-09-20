@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RoutinesApiPage } from "./RoutinesApiPage";
-import { NetworkError } from "../../api/api-client";
+import { ApiError, NetworkError } from "../../api/api-client";
 
 const fixture = vi.hoisted(() => ({
   request: vi.fn(),
@@ -255,6 +255,75 @@ describe("independent routine and task loading", () => {
         body: expect.objectContaining({ version: 2, verified: true }),
       }),
     );
+  });
+  it("removes both protected panels and invalidates a sibling pending page on access denial", async () => {
+    let complete!: (value: unknown) => void;
+    const pending = new Promise((resolve) => {
+      complete = resolve;
+    });
+    fixture.request.mockImplementation(async (path: string) => {
+      if (path.endsWith("/family-task-board"))
+        return { householdId: "home", recipientId: "elder", tasks: [] };
+      if (path.includes("/occurrences/history?")) {
+        if (path.includes("cursor=")) return pending;
+        return {
+          ...history([
+            {
+              id: "private-occurrence",
+              status: "EXPIRED",
+              routineTitle: "受保护提醒正文",
+              scheduledAtUtc: "2026-09-20T00:00:00Z",
+            },
+          ]),
+          nextCursor: "occurrence-next",
+        };
+      }
+      if (path.includes("/events/history?")) {
+        if (path.includes("cursor="))
+          throw new ApiError(403, { message: "照护权限已撤回" });
+        return {
+          ...history([
+            {
+              id: "private-event",
+              title: "受保护动态正文",
+              sourceType: "FAMILY",
+              severity: "INFO",
+              type: "ROUTINE_CONFIRMED",
+              occurredAt: "2026-09-20T00:00:00Z",
+            },
+          ]),
+          nextCursor: "event-next",
+        };
+      }
+      return [];
+    });
+    await act(async () => root.render(<RoutinesApiPage />));
+    expect(container.textContent).toContain("受保护提醒正文");
+    expect(container.textContent).toContain("受保护动态正文");
+    const more = (label: string) =>
+      Array.from(
+        container
+          .querySelector(`section[aria-label='${label}']`)!
+          .querySelectorAll("button"),
+      ).find((button) => button.textContent === "加载更多")!;
+    await act(async () => more("提醒记录").click());
+    await act(async () => more("照护动态").click());
+    expect(container.textContent).not.toContain("受保护提醒正文");
+    expect(container.textContent).not.toContain("受保护动态正文");
+    await act(async () =>
+      complete(
+        history([
+          {
+            id: "late",
+            status: "DUE",
+            routineTitle: "迟到的私密正文",
+            scheduledAtUtc: "2026-09-20T00:00:00Z",
+          },
+        ]),
+      ),
+    );
+    expect(container.textContent).not.toContain("迟到的私密正文");
+    expect(container.textContent).toContain("照护权限已撤回");
   });
   it("keeps the applied historical review filter after verifying an occurrence", async () => {
     let verified = false;
