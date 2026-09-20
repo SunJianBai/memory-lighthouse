@@ -103,6 +103,17 @@ describe("independent routine and task loading", () => {
       assertion();
     });
   }
+  const history = (items: object[]) => ({
+    items: items.map((item) => ({
+      householdId: "home",
+      recipientId: fixture.recipientId,
+      ...item,
+    })),
+    nextCursor: null,
+    timezone: fixture.timezone,
+    from: null,
+    to: null,
+  });
   it("renders history labels and switches recipient timezone without stale records", async () => {
     fixture.request.mockImplementation(async (path: string) => {
       if (path.endsWith("/family-task-board"))
@@ -111,8 +122,8 @@ describe("independent routine and task loading", () => {
           recipientId: fixture.recipientId,
           tasks: [],
         };
-      if (path.includes("/occurrences?"))
-        return [
+      if (path.includes("/occurrences/history?"))
+        return history([
           {
             id: "closed",
             routineTitle: `已关闭-${fixture.recipientId}`,
@@ -120,9 +131,9 @@ describe("independent routine and task loading", () => {
             instructions: "保留家属原文",
             scheduledAtUtc: "2026-12-31T16:30:00Z",
           },
-        ];
-      if (path.endsWith("/events"))
-        return [
+        ]);
+      if (path.includes("/events/history?"))
+        return history([
           {
             id: "event",
             title: "一条记录",
@@ -132,7 +143,7 @@ describe("independent routine and task loading", () => {
             severity: "ATTENTION",
             occurredAt: "2026-12-31T16:30:00Z",
           },
-        ];
+        ]);
       return [];
     });
     await act(async () => root.render(<RoutinesApiPage />));
@@ -164,16 +175,16 @@ describe("independent routine and task loading", () => {
       complete = resolve;
     });
     fixture.request.mockImplementation(async (path: string) => {
-      if (path.includes("/elder/occurrences?")) return oldHistory;
-      if (path.includes("/other/occurrences?"))
-        return [
+      if (path.includes("/elder/occurrences/history?")) return oldHistory;
+      if (path.includes("/other/occurrences/history?"))
+        return history([
           {
             id: "new",
             status: "CONFIRMED",
             routineTitle: "新长者记录",
             scheduledAtUtc: "2026-12-31T16:30:00Z",
           },
-        ];
+        ]);
       if (path.endsWith("/family-task-board"))
         return {
           householdId: "home",
@@ -189,14 +200,16 @@ describe("independent routine and task loading", () => {
     await act(async () => root.render(<RoutinesApiPage />));
     expect(container.textContent).toContain("新长者记录");
     await act(async () =>
-      complete([
-        {
-          id: "old",
-          status: "DUE",
-          routineTitle: "旧长者迟到记录",
-          scheduledAtUtc: "2026-09-20T04:00:00Z",
-        },
-      ]),
+      complete(
+        history([
+          {
+            id: "old",
+            status: "DUE",
+            routineTitle: "旧长者迟到记录",
+            scheduledAtUtc: "2026-09-20T04:00:00Z",
+          },
+        ]),
+      ),
     );
     expect(container.textContent).toContain("新长者记录");
     expect(container.textContent).toContain("2026-12-31 08:30");
@@ -210,8 +223,8 @@ describe("independent routine and task loading", () => {
           return { id: "review", status: "CONFIRMED" };
         if (path.endsWith("/family-task-board"))
           return { householdId: "home", recipientId: "elder", tasks: [] };
-        if (path.includes("/occurrences?"))
-          return [
+        if (path.includes("/occurrences/history?"))
+          return history([
             {
               id: "review",
               status: "NEEDS_FAMILY_REVIEW",
@@ -225,7 +238,7 @@ describe("independent routine and task loading", () => {
               routineTitle: "未知",
               scheduledAtUtc: "invalid",
             },
-          ];
+          ]);
         return [];
       },
     );
@@ -242,6 +255,61 @@ describe("independent routine and task loading", () => {
         body: expect.objectContaining({ version: 2, verified: true }),
       }),
     );
+  });
+  it("keeps the applied historical review filter after verifying an occurrence", async () => {
+    let verified = false;
+    fixture.request.mockImplementation(
+      async (path: string, options?: { method?: string }) => {
+        if (options?.method === "POST") {
+          verified = true;
+          return { id: "review", status: "CONFIRMED" };
+        }
+        if (path.endsWith("/family-task-board"))
+          return { householdId: "home", recipientId: "elder", tasks: [] };
+        if (path.includes("/occurrences/history?"))
+          return history(
+            verified
+              ? []
+              : [
+                  {
+                    id: "review",
+                    status: "NEEDS_FAMILY_REVIEW",
+                    version: 2,
+                    routineTitle: "历史待核验记录",
+                    scheduledAtUtc: "2026-08-01T04:00:00Z",
+                  },
+                ],
+          );
+        if (path.includes("/events/history?")) return history([]);
+        return [];
+      },
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("查询历史");
+    await field("开始日期", "2026-08-01");
+    await field("结束日期", "2026-08-02");
+    await field("状态", "NEEDS_FAMILY_REVIEW");
+    await click("查询");
+    await click("核验已完成");
+    // The real idempotency registry awaits Web Crypto before and after POST.
+    // Wait for the command and its follow-up GET, not merely the click handler.
+    await settle(() => {
+      expect(verified).toBe(true);
+      expect(
+        fixture.request.mock.calls.filter(([path]) =>
+          (path as string).includes("/occurrences/history?"),
+        ),
+      ).toHaveLength(3);
+      expect(container.textContent).not.toContain("历史待核验记录");
+    });
+    const calls = fixture.request.mock.calls.filter(([path]) =>
+      (path as string).includes("/occurrences/history?"),
+    );
+    expect(calls.at(-1)?.[0]).toContain(
+      "startDate=2026-08-01&endDate=2026-08-02&status=NEEDS_FAMILY_REVIEW",
+    );
+    expect(container.textContent).not.toContain("历史待核验记录");
+    expect(container.textContent).toContain("2026-08-01 至 2026-08-02");
   });
   it("edits the complete rule with version and displays the returned once summary", async () => {
     let stored = original;

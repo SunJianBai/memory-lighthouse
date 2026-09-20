@@ -1,16 +1,9 @@
-import {
-  CalendarClock,
-  CheckCircle2,
-  ClipboardCheck,
-  Plus,
-  RefreshCw,
-} from "lucide-react";
+import { CalendarClock, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiClient, readableError } from "../../api/api-client";
 import { IdempotentCommandRegistry } from "../../api/idempotent-command";
 import { useAuth } from "../../auth/auth-context";
 import type {
-  CareEventView,
   FamilyTaskView,
   OccurrenceView,
   RoutineView,
@@ -39,41 +32,17 @@ import {
   type FamilyTaskBoardItem,
 } from "../../api/family-task-board";
 import { FamilyTaskPanel } from "../../components/FamilyTaskPanel";
-import {
-  careEventSeverityLabel,
-  careEventSourceLabel,
-  careEventTypeLabel,
-  careHistoryTimezoneLabel,
-  formatCareHistoryTime,
-  occurrenceStatusLabel,
-} from "./care-history-presentation";
-
-function CareHistoryTime({
-  value,
-  timezone,
-}: {
-  value: string;
-  timezone: string | undefined;
-}) {
-  const formatted = formatCareHistoryTime(value, timezone);
-  return <time dateTime={formatted.dateTime}>{formatted.text}</time>;
-}
+import { CareHistoryPanel } from "../../components/CareHistoryPanel";
 
 type RoutinePageData = {
   routines: RoutineView[];
   tasks: FamilyTaskBoardItem[];
-  occurrences: OccurrenceView[];
-  events: CareEventView[];
-  errors: Partial<
-    Record<"routines" | "tasks" | "occurrences" | "events", string>
-  >;
+  errors: Partial<Record<"routines" | "tasks", string>>;
 };
 
 const EMPTY_ROUTINE_PAGE_DATA: RoutinePageData = {
   routines: [],
   tasks: [],
-  occurrences: [],
-  events: [],
   errors: {},
 };
 
@@ -84,6 +53,7 @@ export const RoutinesApiPage = () => {
     () => createScopedPageState("", EMPTY_ROUTINE_PAGE_DATA),
   );
   const [loadingScopeKey, setLoadingScopeKey] = useState("");
+  const [historyRevision, setHistoryRevision] = useState(0);
   const [busyState, setBusyState] = useState<ScopedPageState<string>>(() =>
     createScopedPageState("", ""),
   );
@@ -109,13 +79,7 @@ export const RoutinesApiPage = () => {
     workspace.workspaceScopeKey,
     EMPTY_ROUTINE_PAGE_DATA,
   );
-  const {
-    routines,
-    tasks,
-    occurrences,
-    events,
-    errors: resourceErrors,
-  } = pageData;
+  const { routines, tasks, errors: resourceErrors } = pageData;
   const loading =
     loadingScopeKey === workspace.workspaceScopeKey ||
     (Boolean(workspace.householdId && workspace.recipientId) &&
@@ -133,36 +97,35 @@ export const RoutinesApiPage = () => {
     [user?.id],
   );
 
-  const load = useCallback(async () => {
-    if (!workspace.householdId || !workspace.recipientId) {
-      loadRequests.current.invalidate();
-      setPageState(
-        createScopedPageState(
-          workspace.workspaceScopeKey,
-          EMPTY_ROUTINE_PAGE_DATA,
-        ),
+  const load = useCallback(
+    async (refreshHistory = true) => {
+      if (!workspace.householdId || !workspace.recipientId) {
+        loadRequests.current.invalidate();
+        setPageState(
+          createScopedPageState(
+            workspace.workspaceScopeKey,
+            EMPTY_ROUTINE_PAGE_DATA,
+          ),
+        );
+        setLoadingScopeKey("");
+        return;
+      }
+      if (refreshHistory) setHistoryRevision((revision) => revision + 1);
+      const owner = createWorkspaceOperationOwner(
+        workspace.workspaceScopeKey,
+        workspace.householdId,
+        workspace.recipientId,
       );
-      setLoadingScopeKey("");
-      return;
-    }
-    const owner = createWorkspaceOperationOwner(
-      workspace.workspaceScopeKey,
-      workspace.householdId,
-      workspace.recipientId,
-    );
-    const request = loadRequests.current.begin(owner.scopeKey);
-    const ownerEpoch = workspace.workspaceScopeEpoch;
-    const requestIsCurrent = () =>
-      loadRequests.current.isCurrent(request) &&
-      currentScopeKey.current === owner.scopeKey &&
-      currentScopeIdentity.current.epoch === ownerEpoch;
-    setLoadingScopeKey(owner.scopeKey);
-    setErrorState(createScopedPageState(owner.scopeKey, ""));
-    try {
-      const from = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
-      const to = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
-      const [nextRoutines, nextTasks, nextOccurrences, nextEvents] =
-        await Promise.allSettled([
+      const request = loadRequests.current.begin(owner.scopeKey);
+      const ownerEpoch = workspace.workspaceScopeEpoch;
+      const requestIsCurrent = () =>
+        loadRequests.current.isCurrent(request) &&
+        currentScopeKey.current === owner.scopeKey &&
+        currentScopeIdentity.current.epoch === ownerEpoch;
+      setLoadingScopeKey(owner.scopeKey);
+      setErrorState(createScopedPageState(owner.scopeKey, ""));
+      try {
+        const [nextRoutines, nextTasks] = await Promise.allSettled([
           apiClient.request<RoutineView[]>(
             `/households/${owner.householdId}/care-recipients/${owner.recipientId}/routines`,
           ),
@@ -173,81 +136,67 @@ export const RoutinesApiPage = () => {
             .then((board) =>
               parseFamilyTaskBoard(board, owner.householdId, owner.recipientId),
             ),
-          apiClient.request<OccurrenceView[]>(
-            `/households/${owner.householdId}/care-recipients/${owner.recipientId}/occurrences?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-          ),
-          apiClient.request<CareEventView[]>(
-            `/households/${owner.householdId}/care-recipients/${owner.recipientId}/events`,
-          ),
         ]);
-      if (!requestIsCurrent()) return;
-      const results = {
-        routines: nextRoutines,
-        tasks: nextTasks,
-        occurrences: nextOccurrences,
-        events: nextEvents,
-      };
-      const errors = Object.fromEntries(
-        Object.entries(results).flatMap(([key, result]) =>
-          result.status === "rejected"
-            ? [[key, readableError(result.reason)]]
-            : [],
-        ),
-      );
-      const labels = {
-        routines: "日程",
-        tasks: "待办",
-        occurrences: "提醒记录",
-        events: "最近动态",
-      };
-      setErrorState(
-        createScopedPageState(
-          owner.scopeKey,
-          Object.entries(errors)
-            .map(
-              ([key, message]) =>
-                `${labels[key as keyof typeof labels]}：${message}`,
-            )
-            .join("；"),
-        ),
-      );
-      setPageState(
-        createScopedPageState(owner.scopeKey, {
-          routines:
-            nextRoutines.status === "fulfilled" ? nextRoutines.value : [],
-          tasks: nextTasks.status === "fulfilled" ? nextTasks.value : [],
-          occurrences:
-            nextOccurrences.status === "fulfilled" ? nextOccurrences.value : [],
-          events:
-            nextEvents.status === "fulfilled"
-              ? nextEvents.value.slice(0, 30)
+        if (!requestIsCurrent()) return;
+        const results = {
+          routines: nextRoutines,
+          tasks: nextTasks,
+        };
+        const errors = Object.fromEntries(
+          Object.entries(results).flatMap(([key, result]) =>
+            result.status === "rejected"
+              ? [[key, readableError(result.reason)]]
               : [],
-          errors,
-        }),
-      );
-    } catch (loadError) {
-      if (requestIsCurrent()) {
+          ),
+        );
+        const labels = {
+          routines: "日程",
+          tasks: "待办",
+        };
         setErrorState(
-          createScopedPageState(owner.scopeKey, readableError(loadError)),
+          createScopedPageState(
+            owner.scopeKey,
+            Object.entries(errors)
+              .map(
+                ([key, message]) =>
+                  `${labels[key as keyof typeof labels]}：${message}`,
+              )
+              .join("；"),
+          ),
         );
         setPageState(
           createScopedPageState(owner.scopeKey, {
-            ...EMPTY_ROUTINE_PAGE_DATA,
-            errors: { tasks: readableError(loadError) },
+            routines:
+              nextRoutines.status === "fulfilled" ? nextRoutines.value : [],
+            tasks: nextTasks.status === "fulfilled" ? nextTasks.value : [],
+            errors,
           }),
         );
+      } catch (loadError) {
+        if (requestIsCurrent()) {
+          setErrorState(
+            createScopedPageState(owner.scopeKey, readableError(loadError)),
+          );
+          setPageState(
+            createScopedPageState(owner.scopeKey, {
+              ...EMPTY_ROUTINE_PAGE_DATA,
+              errors: { tasks: readableError(loadError) },
+            }),
+          );
+        }
+      } finally {
+        if (requestIsCurrent()) {
+          setLoadingScopeKey("");
+        }
       }
-    } finally {
-      if (requestIsCurrent()) {
-        setLoadingScopeKey("");
-      }
-    }
-  }, [
-    workspace.householdId,
-    workspace.recipientId,
-    workspace.workspaceScopeKey,
-    workspace.workspaceScopeEpoch,
-  ]);
+    },
+    [
+      workspace.householdId,
+      workspace.recipientId,
+      workspace.workspaceScopeKey,
+      workspace.workspaceScopeEpoch,
+    ],
+  );
 
   useEffect(() => {
     loadRequests.current.invalidate();
@@ -266,7 +215,7 @@ export const RoutinesApiPage = () => {
   }, [workspace.workspaceScopeKey, workspace.workspaceScopeEpoch]);
 
   useEffect(() => {
-    void load();
+    void load(false);
     return () => loadRequests.current.invalidate();
   }, [load]);
 
@@ -441,35 +390,22 @@ export const RoutinesApiPage = () => {
         verified,
         null,
       ]);
-      const updated = await careCommands.execute(
-        normalizedCommand,
-        (idempotencyKey) =>
-          apiClient.request<OccurrenceView>(
-            `/households/${owner.householdId}/occurrences/${occurrence.id}/family-verify`,
-            {
-              method: "POST",
-              headers: { "Idempotency-Key": idempotencyKey },
-              body: {
-                version: occurrence.version,
-                idempotencyKey,
-                verified,
-              },
+      await careCommands.execute(normalizedCommand, (idempotencyKey) =>
+        apiClient.request<OccurrenceView>(
+          `/households/${owner.householdId}/occurrences/${occurrence.id}/family-verify`,
+          {
+            method: "POST",
+            headers: { "Idempotency-Key": idempotencyKey },
+            body: {
+              version: occurrence.version,
+              idempotencyKey,
+              verified,
             },
-          ),
+          },
+        ),
       );
       if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
         return;
-      setPageState((current) =>
-        !isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current) ||
-        current.scopeKey !== owner.scopeKey
-          ? current
-          : createScopedPageState(owner.scopeKey, {
-              ...current.value,
-              occurrences: current.value.occurrences.map((item) =>
-                item.id === updated.id ? updated : item,
-              ),
-            }),
-      );
       await load();
     } catch (verifyError) {
       if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
@@ -527,7 +463,7 @@ export const RoutinesApiPage = () => {
     setFormOpen(true);
   };
 
-  if (!workspace.recipientId) {
+  if (!workspace.householdId || !workspace.recipientId) {
     return (
       <section className="empty-resource-state">
         <CalendarClock aria-hidden="true" size={34} />
@@ -660,125 +596,18 @@ export const RoutinesApiPage = () => {
       </div>
 
       <div className="routine-task-columns">
-        <section className="panel-card">
-          <div className="panel-heading">
-            <div>
-              <h2>提醒记录</h2>
-              <p className="care-history-timezone">
-                {careHistoryTimezoneLabel(workspace.recipient?.timezone)}
-              </p>
-            </div>
-            <span className="count-badge attention">
-              {
-                occurrences.filter(
-                  (item) => !["CONFIRMED", "EXPIRED"].includes(item.status),
-                ).length
-              }
-            </span>
-          </div>
-          {loading ? (
-            <div className="list-loading">正在加载提醒记录…</div>
-          ) : resourceErrors.occurrences ? (
-            <div className="compact-empty" role="status">
-              提醒记录未能加载，请核对权限或刷新重试。
-            </div>
-          ) : occurrences.length === 0 ? (
-            <div className="compact-empty">
-              <CalendarClock aria-hidden="true" size={28} />
-              <strong>暂无提醒记录</strong>
-            </div>
-          ) : (
-            <div className="family-task-list care-history-list">
-              {occurrences.map((occurrence) => (
-                <article key={occurrence.id}>
-                  <div>
-                    <span
-                      className={`status-pill ${occurrence.status === "CONFIRMED" ? "success" : occurrence.status === "NEEDS_FAMILY_REVIEW" ? "attention" : "neutral"}`}
-                    >
-                      {occurrenceStatusLabel(occurrence.status)}
-                    </span>
-                    <strong>{occurrence.routineTitle}</strong>
-                    <p>
-                      <CareHistoryTime
-                        value={occurrence.scheduledAtUtc}
-                        timezone={workspace.recipient?.timezone}
-                      />
-                    </p>
-                    <p>{occurrence.instructions}</p>
-                  </div>
-                  {occurrence.status === "NEEDS_FAMILY_REVIEW" && (
-                    <div className="task-actions">
-                      <button
-                        type="button"
-                        disabled={busyId === occurrence.id}
-                        onClick={() => void verifyOccurrence(occurrence, true)}
-                      >
-                        <CheckCircle2 aria-hidden="true" size={17} /> 核验已完成
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyId === occurrence.id}
-                        onClick={() => void verifyOccurrence(occurrence, false)}
-                      >
-                        核验未完成
-                      </button>
-                    </div>
-                  )}
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="panel-card">
-          <div className="panel-heading">
-            <div>
-              <h2>最近动态</h2>
-              <p className="care-history-timezone">
-                {careHistoryTimezoneLabel(workspace.recipient?.timezone)}
-              </p>
-            </div>
-            <span className="count-badge">{events.length}</span>
-          </div>
-          {loading ? (
-            <div className="list-loading">正在加载动态…</div>
-          ) : resourceErrors.events ? (
-            <div className="compact-empty" role="status">
-              最近动态未能加载，请核对权限或刷新重试。
-            </div>
-          ) : events.length === 0 ? (
-            <div className="compact-empty">
-              <ClipboardCheck aria-hidden="true" size={28} />
-              <strong>暂无动态</strong>
-            </div>
-          ) : (
-            <div className="family-task-list care-history-list">
-              {events.map((event) => (
-                <article key={event.id}>
-                  <div>
-                    <span
-                      className={`status-pill ${event.severity === "ATTENTION" ? "attention" : "neutral"}`}
-                    >
-                      {careEventSeverityLabel(event.severity)}
-                    </span>
-                    <strong>{event.title}</strong>
-                    <p>
-                      <CareHistoryTime
-                        value={event.occurredAt}
-                        timezone={workspace.recipient?.timezone}
-                      />
-                    </p>
-                    <p>{event.summary}</p>
-                    <p>
-                      {careEventSourceLabel(event.sourceType)} ·{" "}
-                      {careEventTypeLabel(event.type)}
-                    </p>
-                  </div>
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
+        {(["occurrences", "events"] as const).map((kind) => (
+          <CareHistoryPanel
+            key={`${user?.id}:${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}:${workspace.recipient?.timezone}:${kind}`}
+            kind={kind}
+            householdId={workspace.householdId!}
+            recipientId={workspace.recipientId!}
+            timezone={workspace.recipient?.timezone}
+            revision={historyRevision}
+            busyId={busyId}
+            onVerify={(item, verified) => void verifyOccurrence(item, verified)}
+          />
+        ))}
       </div>
     </div>
   );

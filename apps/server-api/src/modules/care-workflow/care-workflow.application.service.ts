@@ -69,6 +69,14 @@ import {
 } from './domain/routine-schedule';
 import type { CareWorkflowClock } from './ports/care-workflow-clock.port';
 import type { CareWorkflowContentCipher } from './ports/content-cipher.port';
+import {
+  careEventView,
+  decryptCarePair,
+  occurrenceView,
+  type CareEventRecord,
+  type OccurrenceRecord,
+  type ProtectedCarePair,
+} from './care-record.projection';
 
 type TransactionClient = Prisma.TransactionClient;
 
@@ -101,48 +109,6 @@ interface ScheduleRecord {
   familyNoticeMinutes: number;
   scheduleVersion: number;
   active?: boolean;
-}
-
-interface OccurrenceRecord {
-  id: string;
-  householdId: string;
-  recipientId: string;
-  routineId: string;
-  scheduleId: string;
-  scheduledAtUtc: Date;
-  scheduledLocalDate: Date;
-  status: string;
-  confirmationDeadlineAt: Date | null;
-  escalationAt: Date | null;
-  completedAt: Date | null;
-  version: number;
-  routine: Pick<
-    RoutineRecord,
-    | 'title'
-    | 'type'
-    | 'instructionsCiphertext'
-    | 'confirmationQuestionCiphertext'
-    | 'contentNonce'
-    | 'encryptionKeyId'
-  >;
-}
-
-interface CareEventRecord {
-  id: string;
-  householdId: string;
-  recipientId: string;
-  type: string;
-  severity: string;
-  sourceType: string;
-  sourceId: string | null;
-  routineOccurrenceId: string | null;
-  titleCiphertext: Uint8Array;
-  summaryCiphertext: Uint8Array;
-  contentNonce: Uint8Array;
-  encryptionKeyId: string;
-  payloadJson: Prisma.JsonValue | null;
-  occurredAt: Date;
-  createdAt: Date;
 }
 
 interface FamilyTaskRecord {
@@ -1515,33 +1481,11 @@ export class CareWorkflowApplicationService {
     };
   }
 
-  private decryptPair(record: {
-    instructionsCiphertext?: Uint8Array;
-    confirmationQuestionCiphertext?: Uint8Array;
-    titleCiphertext?: Uint8Array;
-    summaryCiphertext?: Uint8Array;
-    contentNonce: Uint8Array;
-    encryptionKeyId: string;
-  }): { first: string; second: string } {
-    const first = record.instructionsCiphertext ?? record.titleCiphertext;
-    const second =
-      record.confirmationQuestionCiphertext ?? record.summaryCiphertext;
-    if (!first || !second) throw new Error('Protected content pair is missing');
-    const plaintext = this.cipher.decrypt({
-      ciphertext: Buffer.concat([Buffer.from(first), Buffer.from(second)]),
-      nonce: Buffer.from(record.contentNonce),
-      encryptionKeyId: record.encryptionKeyId,
-    });
-    const parsed: unknown = JSON.parse(plaintext);
-    if (
-      !Array.isArray(parsed) ||
-      parsed.length !== 2 ||
-      typeof parsed[0] !== 'string' ||
-      typeof parsed[1] !== 'string'
-    ) {
-      throw new Error('Protected content pair is invalid');
-    }
-    return { first: parsed[0], second: parsed[1] };
+  private decryptPair(record: ProtectedCarePair): {
+    first: string;
+    second: string;
+  } {
+    return decryptCarePair(this.cipher, record);
   }
 
   private toRoutineView(record: RoutineRecord): RoutineView {
@@ -1577,45 +1521,11 @@ export class CareWorkflowApplicationService {
   }
 
   private toOccurrenceView(record: OccurrenceRecord): OccurrenceView {
-    const content = this.decryptPair(record.routine);
-    return {
-      id: record.id,
-      householdId: record.householdId,
-      recipientId: record.recipientId,
-      routineId: record.routineId,
-      scheduleId: record.scheduleId,
-      routineTitle: record.routine.title,
-      routineType: record.routine.type,
-      instructions: content.first,
-      contentProvenance: 'FAMILY_ENTERED_VERBATIM',
-      scheduledAtUtc: record.scheduledAtUtc.toISOString(),
-      scheduledLocalDate: record.scheduledLocalDate.toISOString().slice(0, 10),
-      status: record.status,
-      confirmationDeadlineAt:
-        record.confirmationDeadlineAt?.toISOString() ?? null,
-      escalationAt: record.escalationAt?.toISOString() ?? null,
-      completedAt: record.completedAt?.toISOString() ?? null,
-      version: record.version,
-    };
+    return occurrenceView(this.cipher, record);
   }
 
   private toCareEventView(record: CareEventRecord): CareEventView {
-    const content = this.decryptPair(record);
-    return {
-      id: record.id,
-      householdId: record.householdId,
-      recipientId: record.recipientId,
-      type: record.type,
-      severity: record.severity,
-      sourceType: record.sourceType,
-      sourceId: record.sourceId,
-      routineOccurrenceId: record.routineOccurrenceId,
-      title: content.first,
-      summary: content.second,
-      payload: record.payloadJson,
-      occurredAt: record.occurredAt.toISOString(),
-      createdAt: record.createdAt.toISOString(),
-    };
+    return careEventView(this.cipher, record);
   }
 
   private toFamilyTaskView(record: FamilyTaskRecord): FamilyTaskView {

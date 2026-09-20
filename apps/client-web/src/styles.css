@@ -2319,6 +2319,16 @@ input[type="checkbox"] {
 .care-history-list article, .care-history-timezone { overflow-wrap: anywhere; }
 .care-history-list time { font-variant-numeric: tabular-nums; }
 .panel-heading .care-history-timezone { font-size: 1rem; color: var(--color-muted-foreground); margin: 8px 0 0; }
+.care-history-panel { min-width: 0; }
+.care-history-range, .care-history-count, .care-history-filter p { font-size: 1rem; line-height: 1.6; overflow-wrap: anywhere; }
+.care-history-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.care-history-filter { display: grid; gap: 12px; margin: 16px 0; padding: 16px; border: 1px solid var(--color-border); border-radius: 12px; }
+.care-history-filter label, .care-history-filter input, .care-history-filter select { min-width: 0; font-size: 1rem; }
+.care-history-filter input, .care-history-filter select { width: 100%; min-height: 44px; }
+.care-history-panel button { min-height: 44px; white-space: normal; }
+.care-history-filter .primary-button { justify-self: start; }
+.care-history-error { margin: 12px 0; color: var(--color-danger); overflow-wrap: anywhere; }
+.care-history-more { margin-top: 16px; }
 .task-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .task-actions button { min-height: 44px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--color-border); border-radius: 9px; padding: 8px 12px; background: var(--color-surface); font-weight: 750; }
 

@@ -3,6 +3,8 @@ import { TodayCareController } from './http/today-care.controller';
 import { TodayCareService } from './today-care.service';
 import { FamilyTaskBoardService } from './family-task-board.service';
 import { FamilyTaskBoardController } from './http/family-task-board.controller';
+import { CareHistoryController } from './http/care-history.controller';
+import { CareHistoryService } from './care-history.service';
 
 import { PrismaModule } from '../../infrastructure/database/prisma.module';
 import { DeviceActivationModule } from '../device-activation/device-activation.module';
@@ -31,6 +33,7 @@ import { SystemCareWorkflowClock } from './ports/care-workflow-clock.port';
     HouseholdModule,
   ],
   controllers: [
+    CareHistoryController,
     FamilyTaskBoardController,
     TodayCareController,
     RoutinesController,
@@ -39,6 +42,7 @@ import { SystemCareWorkflowClock } from './ports/care-workflow-clock.port';
     FamilyTasksController,
   ],
   providers: [
+    CareHistoryService,
     FamilyTaskBoardService,
     TodayCareService,
     SystemCareWorkflowClock,
