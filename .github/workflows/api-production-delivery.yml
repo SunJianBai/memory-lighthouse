@@ -10,7 +10,8 @@ on:
 permissions:
   actions: read
   contents: read
-  deployments: read
+  deployments: write
+  packages: write
 
 concurrency:
   group: production-openbmb-api
@@ -28,6 +29,8 @@ jobs:
   plan-api:
     name: Plan API production reconciliation
     if: >-
+      vars.PRODUCTION_DEPLOY_ENABLED == 'true' &&
+      vars.PRODUCTION_DELIVERY_MODE == 'hybrid' &&
       ((github.event_name == 'workflow_dispatch' &&
         github.ref == 'refs/heads/main') ||
        (github.event_name == 'workflow_run' &&
@@ -38,6 +41,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+      ci_run_id: ${{ steps.plan.outputs.ci_run_id }}
       production_sha: ${{ steps.plan.outputs.production_sha }}
       should_release: ${{ steps.plan.outputs.should_release }}
 
@@ -80,6 +85,8 @@ jobs:
             should_release=true
           fi
           {
+            echo "source_sha=$SOURCE_SHA"
+            echo "ci_run_id=${{ github.event.workflow_run.id }}"
             echo "production_sha=$production_sha"
             echo "should_release=$should_release"
           } >> "$GITHUB_OUTPUT"
@@ -110,6 +117,8 @@ jobs:
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 90
+    outputs:
+      upgrade: ${{ steps.route.outputs.upgrade }}
 
     steps:
       - name: Check out the exact CI-validated source
@@ -190,13 +199,29 @@ jobs:
             echo "should_release=$should_release"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Select fast delivery or a safe database upgrade
+        id: route
+        if: steps.reconcile.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Broken/unsettled state is not an upgrade signal: compatibility must succeed.
+          state="$RUNNER_TEMP/api-compatibility.json"
+          ssh tx4h4g-api-prod sudo -n bash -s -- compatibility \
+            < scripts/hybrid/remote-promotion-guard.sh > "$state"
+          digest="$(node infra/production/hybrid/api/artifact-tool.mjs tree-digest --root apps/server-api/prisma)"
+          epoch="$(cat infra/production/compatibility/security-epoch)"
+          route="$(node scripts/hybrid/api-upgrade-route.mjs "$digest" "$epoch" "$state")"
+          [[ "$route" == fast || "$route" == upgrade ]]
+          echo "upgrade=$([[ "$route" == upgrade ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - name: Skip API delivery when the locked server is current
         if: steps.reconcile.outputs.should_release == 'false'
         run: |
           echo "No API-relevant file changes detected for ${SOURCE_SHA}; skip delivery."
 
       - name: Validate immutable source identity
-        if: steps.reconcile.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true' && steps.route.outputs.upgrade == 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -205,7 +230,7 @@ jobs:
           [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
 
       - name: Set up the pinned native runtime version
-        if: steps.reconcile.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true' && steps.route.outputs.upgrade == 'false'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -213,7 +238,7 @@ jobs:
           cache: npm
 
       - name: Pin the package manager and runner architecture
-        if: steps.reconcile.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true' && steps.route.outputs.upgrade == 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -222,18 +247,18 @@ jobs:
           [[ "$(npm --version)" == 11.4.2 ]]
 
       - name: Install the locked server dependency graph
-        if: steps.reconcile.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true' && steps.route.outputs.upgrade == 'false'
         run: >-
           npm ci
           --workspace @memory-lighthouse/server-api
           --include-workspace-root
 
       - name: Build the NestJS server
-        if: steps.reconcile.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true' && steps.route.outputs.upgrade == 'false'
         run: npm run build --workspace @memory-lighthouse/server-api
 
       - name: Prune development-only dependencies
-        if: steps.reconcile.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true' && steps.route.outputs.upgrade == 'false'
         run: >-
           npm prune --omit=dev
           --package-lock=false
@@ -241,14 +266,14 @@ jobs:
           --include-workspace-root
 
       - name: Verify the complete production dependency closure
-        if: steps.reconcile.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true' && steps.route.outputs.upgrade == 'false'
         run: >-
           npm ls --omit=dev --all
           --workspace @memory-lighthouse/server-api
           --include-workspace-root
 
       - name: Verify build and pruning preserved immutable source
-        if: steps.reconcile.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true' && steps.route.outputs.upgrade == 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -262,7 +287,7 @@ jobs:
 
       - name: Package and verify the native API artifact
         id: package
-        if: steps.reconcile.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true' && steps.route.outputs.upgrade == 'false'
         shell: bash
         run: |
           set -euo pipefail
@@ -307,7 +332,7 @@ jobs:
 
       - name: Upload and atomically promote the exact API artifact
         id: promote
-        if: steps.reconcile.outputs.should_release == 'true'
+        if: steps.reconcile.outputs.should_release == 'true' && steps.route.outputs.upgrade == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -377,6 +402,7 @@ jobs:
           [[ "$transfer_succeeded" == true ]]
 
           bash scripts/hybrid/assert-current-main.sh "$SOURCE_SHA"
+          bash scripts/hybrid/assert-source-ci.sh "$SOURCE_SHA" "${{ github.event.workflow_run.id }}"
           ssh tx4h4g-api-prod sudo -n bash -s -- \
             api "$SOURCE_SHA" "$REMOTE_DIRECTORY/$ARCHIVE_NAME" \
             "$REMOTE_DIRECTORY/$ARCHIVE_NAME.sha256" "$ARCHIVE_SHA256" \
@@ -407,6 +433,8 @@ jobs:
             echo '### API production delivery: SKIPPED' >> "$GITHUB_STEP_SUMMARY"
             echo "The locked server already contains every API-relevant change through $SOURCE_SHA." \
               >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ steps.route.outputs.upgrade }}" == true ]]; then
+            echo '### API production delivery: UPGRADE REQUIRED' >> "$GITHUB_STEP_SUMMARY"
           elif [[ "${{ steps.promote.outcome }}" == success ]]; then
             echo '### API production delivery: DEPLOYED' >> "$GITHUB_STEP_SUMMARY"
             echo "Promoted immutable API source $SOURCE_SHA." >> "$GITHUB_STEP_SUMMARY"
@@ -430,3 +458,28 @@ jobs:
           fi
           bash scripts/hybrid/production-deployment-marker.sh mark api \
             "$SOURCE_SHA" "$GITHUB_RUN_ID" "$result"
+
+  upgrade-api:
+    name: Safely upgrade the database and restore hybrid API
+    needs: [plan-api, deliver-api]
+    if: needs.deliver-api.outputs.upgrade == 'true'
+    uses: ./.github/workflows/production-delivery.yml
+    with:
+      source_sha: ${{ needs.plan-api.outputs.source_sha }}
+      ci_run_id: ${{ needs.plan-api.outputs.ci_run_id }}
+      return_to_hybrid: true
+    secrets: inherit
+
+  deliver-web:
+    name: Deliver Web after verified API reconciliation
+    needs: [plan-api, deliver-api, upgrade-api]
+    if: >-
+      always() && needs.plan-api.result == 'success' &&
+      (needs.plan-api.outputs.should_release == 'false' ||
+       (needs.deliver-api.result == 'success' &&
+        (needs.deliver-api.outputs.upgrade != 'true' || needs.upgrade-api.result == 'success')))
+    uses: ./.github/workflows/web-production-delivery.yml
+    with:
+      source_sha: ${{ needs.plan-api.outputs.source_sha }}
+      ci_run_id: ${{ needs.plan-api.outputs.ci_run_id }}
+    secrets: inherit

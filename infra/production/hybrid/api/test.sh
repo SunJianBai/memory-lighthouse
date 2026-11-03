@@ -79,6 +79,51 @@ state_fixture="$(mktemp -d)"
   # shellcheck source=../deploy-native-api.sh
   source "$script_dir/deploy-native-api.sh"
 
+  # The explicit Docker path accepts a retained expected API only when the
+  # runtime adapter authenticates a prepared rebootstrap journal. A mere mode
+  # status response is not enough; ordinary hybrid deploy remains unchanged.
+  runtime_mock="$state_fixture/runtime-mode"
+  cat >"$runtime_mock" <<'MOCK'
+#!/usr/bin/env bash
+case "$1" in
+  status) printf 'mode=docker\nupstream=127.0.0.1:13100\npending=yes\n' ;;
+  assert-bootstrap) [[ "$2" == --expected-current-api && "$3" == git-111111111111 ]] ;;
+  *) exit 2 ;;
+esac
+MOCK
+  chmod 0700 "$runtime_mock"
+  runtime_mode="$runtime_mock"
+  bootstrap_from_docker=true
+  assert_deploy_runtime_mode 127.0.0.1:13100 git-111111111111
+  if (assert_deploy_runtime_mode 127.0.0.1:13100 git-222222222222) 2>/dev/null; then
+    printf 'bootstrap accepted an unauthenticated journal identity\n' >&2; exit 1
+  fi
+  if (assert_deploy_runtime_mode 127.0.0.1:13101 git-111111111111) 2>/dev/null; then
+    printf 'bootstrap accepted a non-Docker upstream\n' >&2; exit 1
+  fi
+  assert_bootstrap_source 0123456789abcdef0123456789abcdef01234567 0123456789abcdef0123456789abcdef01234567
+  if (assert_bootstrap_source 0123456789ab0000000000000000000000000000 0123456789abcdef0123456789abcdef01234567) 2>/dev/null; then
+    printf 'bootstrap accepted a different full source SHA with the same release prefix\n' >&2; exit 1
+  fi
+  bootstrap_from_docker=false
+  if (assert_deploy_runtime_mode 127.0.0.1:13100 git-111111111111) 2>/dev/null; then
+    printf 'ordinary deployment accepted Docker mode\n' >&2; exit 1
+  fi
+  # Fast-path native releases can still advance the source SHA independently.
+  assert_bootstrap_source 0123456789ab0000000000000000000000000000 0123456789abcdef0123456789abcdef01234567
+  infra_env="$state_fixture/infra.env"
+  native_env="$state_fixture/native.env"
+  printf 'LIVEKIT_API_SECRET=0123456789abcdef0123456789abcdef\n' >"$infra_env"
+  cp "$infra_env" "$native_env"
+  chmod 0600 "$infra_env" "$native_env"
+  assert_native_signing_credential
+  printf 'LIVEKIT_API_SECRET=ffffffffffffffffffffffffffffffff\n' >"$native_env"
+  if (assert_native_signing_credential) 2>/dev/null; then
+    printf 'bootstrap accepted drifted native signing credentials\n' >&2; exit 1
+  else
+    [[ "$?" -eq 78 ]] || exit 1
+  fi
+
   unit_fixture="$state_fixture/unit-state"
   unit_mock="$state_fixture/systemctl"
   mkdir -- "$unit_fixture"
@@ -86,6 +131,7 @@ state_fixture="$(mktemp -d)"
 #!/usr/bin/env bash
 unit="${@: -1}"
 key="${unit//[^A-Za-z0-9]/_}"
+printf '%s\n' "$*" >>"$UNIT_FIXTURE/calls"
 case "$1" in
   show)
     case "$2" in
@@ -182,6 +228,72 @@ MOCK
     gc_command --execute >/dev/null
     [[ ! -e "$pending_release" ]]
   fi
+
+  # Use the real native journal and recovery implementation for the new
+  # Docker-origin path: the retained old native pointers are audit evidence,
+  # never an instruction to start an incompatible native worker on rollback.
+  mkdir -p -- "$pending_release"
+  chmod 0555 -- "$pending_release"
+  rm -f "$unit_fixture/$fixture_key.fail-disable"
+  helper_mock="$state_fixture/upstream-helper"
+  export RECOVERY_UPSTREAM_FILE="$state_fixture/recovery-upstream"
+  cat >"$helper_mock" <<'MOCK'
+#!/usr/bin/env bash
+case "$1" in
+  current) cat "$RECOVERY_UPSTREAM_FILE" ;;
+  switch|stage)
+    [[ "$2" == --expected-upstream && "$4" == --target-upstream && \
+       "$(cat "$RECOVERY_UPSTREAM_FILE")" == "$3" ]] || exit 1
+    printf '%s\n' "$5" >"$RECOVERY_UPSTREAM_FILE"
+    ;;
+  *) exit 2 ;;
+esac
+MOCK
+  chmod 0700 -- "$helper_mock"
+  caddy_helper="$helper_mock"
+  # Network and GC are separate seams; journal parsing, pointer writes,
+  # systemd unit-state checks and route CAS below are the production functions.
+  direct_health() { [[ "$1" == 127.0.0.1:13101 ]]; }
+  gc_releases() { :; }
+  boot_recovery=true
+  for phase in prepared candidate-ready switched committed; do
+    candidate_slot=blue
+    candidate_unit=openbmb-native-api@blue.service
+    old_upstream=127.0.0.1:13100
+    target_upstream=127.0.0.1:13101
+    old_slot=none
+    old_current_api="$current_release"
+    old_previous_api="$previous_release"
+    old_slot_target="$current_release"
+    target_release="$pending_release"
+    write_journal "$phase"
+    grep -Fxq "old_current_api=$current_release" "$deployment_pending"
+    grep -Fxq "old_previous_api=$previous_release" "$deployment_pending"
+    grep -Fxq "old_slot_target=$current_release" "$deployment_pending"
+    atomic_link "$pending_release" "$slots_root/blue"
+    atomic_link "$pending_release" "$current_api"
+    atomic_link "$current_release" "$previous_api"
+    printf '%s\n' "$target_upstream" >"$RECOVERY_UPSTREAM_FILE"
+    touch "$unit_fixture/$fixture_key.active"
+    rm -f "$unit_fixture/$fixture_key.enabled" "$unit_fixture/calls"
+    recover_command
+    [[ ! -e "$deployment_pending" ]]
+    if [[ "$phase" == committed ]]; then
+      [[ "$(readlink -f "$current_api")" == "$pending_release" && \
+         "$(readlink -f "$previous_api")" == "$current_release" ]]
+      assert_native_unit_state "$candidate_unit" active enabled
+      grep -Fxq 'enable --now openbmb-native-api@blue.service' "$unit_fixture/calls"
+      ! grep -Eq '^(enable|restart|start).*green' "$unit_fixture/calls"
+    else
+      [[ "$(readlink -f "$current_api")" == "$current_release" && \
+         "$(readlink -f "$previous_api")" == "$previous_release" && \
+         "$(readlink -f "$slots_root/blue")" == "$current_release" ]]
+      [[ "$(cat "$RECOVERY_UPSTREAM_FILE")" == 127.0.0.1:13100 ]]
+      assert_native_unit_state "$candidate_unit" inactive disabled
+      ! grep -Eq '^(enable|restart|start) ' "$unit_fixture/calls"
+    fi
+  done
+  printf 'native Docker-origin bootstrap and recovery tests passed\n'
 )
 rm -rf -- "$state_fixture"
 state_fixture=''

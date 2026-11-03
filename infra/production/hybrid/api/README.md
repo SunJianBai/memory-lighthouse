@@ -25,11 +25,18 @@ security-epoch state machine rely on it remaining a direct child of
 
 ## Bootstrap and first artifact
 
-The current container export is a one-time bridge; it refuses a stopped
+The current container export is the bridge for first migration and an explicitly
+reviewed post-upgrade rebootstrap; it refuses a stopped
 container, an unexpected container name, an OCI revision mismatch, or a
 `current-app` link outside the stack release root. It also exports
 `/usr/local/bin/node` from the attested image and proves that the host can run
 it as exactly Node `22.19.0`.
+
+After a full Docker database/security upgrade, use the operator entry point in
+`../bootstrap/README.md` with the retained native release as
+`--expected-current-api`. The bootstrap artifact must match the full
+`current-app` source SHA, not merely its 12-character release prefix. The
+ordinary native fast path still cannot deploy while runtime mode is Docker.
 
 ```bash
 sudo install -d -o root -g root -m 0750 /var/lib/openbmb/bootstrap

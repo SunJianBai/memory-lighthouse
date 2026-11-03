@@ -165,6 +165,27 @@ read_web_baseline() {
 }
 
 case "$component" in
+  compatibility)
+    [[ "$#" -eq 1 ]] || fail 'usage: remote-promotion-guard.sh compatibility'
+    read_api_baseline >/dev/null
+    anchor="$(readlink -f -- /opt/openbmb/current-app)"
+    [[ "$(dirname -- "$anchor")" == /opt/openbmb/releases && \
+       "$(basename -- "$anchor")" =~ ^git-[0-9a-f]{12}$ ]] || fail 'invalid stack anchor'
+    [[ -d "$anchor" && ! -L "$anchor" && "$(stat -c %u -- "$anchor")" == 0 ]] || fail 'unsafe stack anchor'
+    [[ -z "$(find "$anchor" -xdev \( ! -user root -o -perm /0022 -o -type l \) -print -quit)" ]] || fail 'mutable or linked stack anchor'
+    epoch_file="$anchor/infra/production/compatibility/security-epoch"
+    [[ -f "$epoch_file" && ! -L "$epoch_file" ]] || fail 'missing security epoch'
+    mapfile -t epochs <"$epoch_file"
+    [[ "${#epochs[@]}" -eq 1 && "${epochs[0]}" =~ ^[1-9][0-9]*$ ]] || fail 'invalid security epoch'
+    artifact_tool=/usr/local/libexec/openbmb-native-api/artifact-tool.mjs
+    [[ -f "$artifact_tool" && ! -L "$artifact_tool" && "$(stat -c %u -- "$artifact_tool")" == 0 ]] || fail 'unsafe artifact tool'
+    [[ -z "$(find "$artifact_tool" -maxdepth 0 -perm /0022 -print -quit)" ]] || fail 'writable artifact tool'
+    digest="$("$node_bin" "$artifact_tool" tree-digest --root "$anchor/apps/server-api/prisma")"
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'invalid Prisma tree digest'
+    current_api="$(basename -- "$(readlink -f -- "$current_api_pointer")")"
+    printf '{"mode":"hybrid","pending":"no","upstream":"%s","currentApp":"%s","currentApi":"%s","migrationsDigest":"%s","securityEpoch":"%s"}\n' \
+      "$active_upstream" "$(basename -- "$anchor")" "$current_api" "$digest" "${epochs[0]}"
+    ;;
   baseline)
     [[ "$#" -eq 2 ]] || fail 'usage: remote-promotion-guard.sh baseline api|web'
     case "$2" in

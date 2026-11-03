@@ -14,7 +14,7 @@
 | 006 | 家庭待办主动释放 | 三端验收及双轴审查完成，提交 b632ffb、a0d2809、f77e94b；OWNER 回收未纳入 | [需求与验收](006-task-handoff.md) · [候选调研](006-task-handoff-research.md) |
 | 007 | 照护记录可读性与时区一致性 | 两端展示及服务端兼容验证、实际 Web／模拟器与双轴审查完成；提交 ba7d5bf、3772907 | [需求与验收](007-care-history-readability.md) · [候选调研](007-care-history-readability-research.md) |
 | 008 | 照护记录筛选与历史查询 | 三端实现、隔离 MySQL／真实 Web／Android MainActivity 联调及双轴审查闭环完成；提交 7211dd5、a7e0507、5b95e5c，保留两项P3维护建议 | [需求与验收](008-care-history-navigation.md) · [候选调研](008-care-history-navigation-research.md) |
-| 009 | 日程暂停与恢复 | 三端实现与本地 MySQL／Web／Android 验收完成；全部未发布修改已审查并修复发现项，混合架构升级流程与发布进行中 | [实施决定与历史草案](009-routine-pause.md) · [本轮验收与发布状态](009-release-verification.md) · [接口](../ROUTINE_LIFECYCLE_API.md) |
+| 009 | 日程暂停与恢复 | 三端实现与本地 MySQL／Web／Android 验收完成；全部未发布修改已审查并修复发现项，混合架构升级流程完成，准备发布 | [实施决定与历史草案](009-routine-pause.md) · [本轮验收与发布状态](009-release-verification.md) · [接口](../ROUTINE_LIFECYCLE_API.md) |
 
 ## 后续候选
 

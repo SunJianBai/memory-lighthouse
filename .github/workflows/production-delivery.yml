@@ -1,11 +1,26 @@
 name: Production delivery
 
 on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      ci_run_id:
+        required: false
+        type: string
+        default: ""
+      return_to_hybrid:
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   packages: write
+  deployments: write
 
 concurrency:
   group: production-openbmb
@@ -14,16 +29,17 @@ concurrency:
 env:
   DEPLOY_HOST: 124.220.81.104
   DEPLOY_USER: ubuntu
-  SOURCE_SHA: ${{ github.sha }}
+  SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+  CI_RUN_ID: ${{ inputs.ci_run_id }}
 
 jobs:
   deliver:
     name: Build, transfer, and safely activate
     if: >-
       vars.PRODUCTION_DEPLOY_ENABLED == 'true' &&
-      vars.PRODUCTION_DELIVERY_MODE == 'docker-full' &&
-      github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/main'
+      ((inputs.return_to_hybrid && vars.PRODUCTION_DELIVERY_MODE == 'hybrid') ||
+       (vars.PRODUCTION_DELIVERY_MODE == 'docker-full' &&
+        github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 360
@@ -107,6 +123,20 @@ jobs:
              release_free_kib="$(sudo -n df -Pk /opt/openbmb/releases | awk "NR == 2 { print \$4 }")"
             test "${docker_free_kib:-0}" -ge 4194304
             test "${release_free_kib:-0}" -ge 1048576'
+
+      - name: Verify source CI and restore exact Docker fallback before building
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/hybrid/assert-current-main.sh "$SOURCE_SHA"
+          bash scripts/hybrid/assert-source-ci.sh "$SOURCE_SHA" "$CI_RUN_ID"
+          bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
+          [[ "$GITHUB_ACTOR" =~ ^[A-Za-z0-9_-]+(\[bot\])?$ ]]
+          # Credential travels only over stdin; it never enters argv, a source archive, or logs.
+          { printf '%s\n' "$GH_TOKEN"; cat scripts/hybrid/restore-docker-fallback.sh; } |
+            ssh tx4h4g-prod "sudo -n bash -c 'IFS= read -r GH_TOKEN; export GH_TOKEN; exec bash -s -- \"\$1\"' -- '$GITHUB_ACTOR'"
 
       - name: Reuse only a fully verified immutable release
         shell: bash
@@ -467,19 +497,14 @@ jobs:
           ssh tx4h4g-prod \
             "set -euo pipefail; test \"\$(sudo cat /opt/openbmb/releases/$RELEASE_ID/.openbmb-release-sha)\" = '$SOURCE_SHA'; sudo OPENBMB_INFRA_ENV_FILE=/etc/openbmb/infra.env OPENBMB_API_ENV_FILE=/etc/openbmb/api.env bash /opt/openbmb/releases/$RELEASE_ID/infra/production/scripts/verify-release-images.sh"
 
-      - name: Reject stale manual activation
+      - name: Reject stale or unvalidated activation
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          current_main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          [[ "$current_main_sha" =~ ^[0-9a-f]{40}$ ]]
-          if [[ "$current_main_sha" != "$SOURCE_SHA" ]]; then
-            printf 'Refusing stale activation: validated=%s current-main=%s\n' \
-              "$SOURCE_SHA" "$current_main_sha" >&2
-            exit 1
-          fi
+          bash scripts/hybrid/assert-current-main.sh "$SOURCE_SHA"
+          bash scripts/hybrid/assert-source-ci.sh "$SOURCE_SHA" "$CI_RUN_ID"
 
       - name: Activate validated release
         shell: bash
@@ -548,6 +573,22 @@ jobs:
             https://sun227454.online/openBMB/api/v1/health/ready \
             --output /dev/null
 
+      - name: Restore verified hybrid runtime after the safe Docker upgrade
+        id: hybrid
+        if: inputs.return_to_hybrid
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Docker has already activated this exact source. Finish its safe hybrid
+          # transition even if main advanced meanwhile; the wrapper verifies the
+          # attested current-app SHA and never activates a different release.
+          bash scripts/hybrid/assert-source-ci.sh "$SOURCE_SHA" "$CI_RUN_ID"
+          bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5
+          ssh tx4h4g-prod sudo -n bash \
+            "/opt/openbmb/releases/$RELEASE_ID/scripts/hybrid/return-to-hybrid.sh" "$SOURCE_SHA"
+
       - name: Close pinned SSH master
         if: always()
         shell: bash
@@ -557,3 +598,13 @@ jobs:
             ssh -O exit "tx4h4g-prod-lane-$lane" >/dev/null 2>&1 || true
           done
           ssh -O exit tx4h4g-prod >/dev/null 2>&1 || true
+
+      - name: Record verified upgraded API marker
+        if: inputs.return_to_hybrid && steps.hybrid.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash scripts/hybrid/production-deployment-marker.sh mark api \
+            "$SOURCE_SHA" "$GITHUB_RUN_ID" DEPLOYED

@@ -84,7 +84,14 @@ emitting tar hard-link members, and verifies both the archive and extracted
 tree before upload.
 
 Every successful `main` CI run can deliver API and/or Web artifacts depending on
-what changed. The change detector evaluates:
+what changed, when both `PRODUCTION_DEPLOY_ENABLED=true` and
+`PRODUCTION_DELIVERY_MODE=hybrid` are configured. Merely merging this workflow
+does not enable deployment; `false` or a missing mode keeps it disabled.
+API delivery is the CI-triggered coordinator and the only manual hybrid workflow
+entry. Web is reusable-only, and waits for the API fast path or full upgrade to succeed (or a
+valid no-change decision). The exact source SHA and original CI run ID are passed
+to Web so its directory filter still examines the original changes.
+The change detector evaluates:
 
 - `apps/server-api`, `packages/api-contracts`, `packages/event-contracts`
 - `apps/client-web`, `apps/admin-web`, `design-system`, `packages/api-contracts`,
@@ -108,6 +115,8 @@ locked server is already current; that one run is reported as `SKIPPED` and
 writes a `RECONCILED` marker for later planning runs.
 
 Immediately before either promotion, the runner rechecks the current remote `main`
+SHA and a successful same-SHA push-to-main CI run from this repository. Reusable
+workflows prefer the explicit `source_sha` input, never the caller event's default
 SHA. The server then
 holds `/run/lock/openbmb-operation.lock`, requires exactly `mode=hybrid`, a
 native `13101`/`13102` upstream, and `pending=no`, and only then calls the
@@ -115,6 +124,46 @@ stable promoter. Incoming cleanup is limited to eight precisely named,
 owned, older-than-24-hours entries per run, and both upload and promotion are
 guarded by an artifact-size-aware free-space check.
 
-The complete Docker delivery workflow is mutually exclusive, manual-only, and
-activates only when `PRODUCTION_DELIVERY_MODE=docker-full` is explicitly
-selected. It also rechecks remote `main` immediately before activation.
+After reading the real locked native baseline, the API router compares the
+candidate Prisma tree digest (`sha256:<64 hex>`) and security epoch with the
+root-owned `current-app` anchor. Equal values use the fast native path; changed
+Prisma or a newer epoch calls the complete Docker workflow with
+`return_to_hybrid=true`. Invalid/pending server state and an epoch downgrade fail
+closed: they are not instructions to repair production. This compatibility guard
+is distinct from a missing planning marker, which can safely request a rebuild.
+
+The reusable complete Docker workflow first verifies current main and same-SHA
+CI, then restores only missing fallback application images from the root-owned
+anchor's exact recorded GHCR digests. It checks original image identity and OCI
+revision before tagging, refuses conflicting existing tags, uses a temporary
+root-only registry credential directory, and never starts containers or changes
+data during restoration. Package-access denial stops before building or switching;
+it never substitutes a digest or rebuilds an old image. Downloads are bounded.
+
+The existing guarded Docker switch, backup, Prisma migration and security-boundary
+upgrade remain authoritative. After Docker health passes, the workflow installs
+the candidate hybrid controls, exports that exact Docker API, and explicitly runs
+reviewed rebootstrap with both expected current pointers. Only after local/public
+hybrid health and source identity pass does it write the API success marker and
+release Web delivery. Export evidence is retained under
+`/var/lib/openbmb/hybrid-upgrade.*`; failures leave inspectable state, not a success
+marker. Before Docker activation the workflow rechecks latest main and same-SHA
+CI. Once that exact source is activated, hybrid completion verifies the attested
+current-app identity and same-SHA CI but deliberately does not reject a newer
+main: completing this safety transition must not leave Docker mode stranded.
+To publish manually, dispatch API production delivery; there is no independent
+Web dispatch that could put new UI ahead of its required API.
+
+Standalone full Docker delivery remains manual and requires
+`PRODUCTION_DELIVERY_MODE=docker-full`. Caller and callee concurrency groups are
+distinct; server operations still use the shared production lock.
+
+Local workflow/router/restoration checks:
+
+```powershell
+powershell -File scripts/hybrid/test-delivery-static.ps1
+node --test scripts/hybrid/api-upgrade-route.test.mjs scripts/hybrid/delivery-contract.test.mjs
+```
+
+These mocked/static checks do not establish GHCR package authorization or prove a
+live production upgrade. Confirm those through the protected delivery run.

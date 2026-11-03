@@ -42,10 +42,9 @@ Docker-to-hybrid switch additionally runs `openbmb-deploy-native-api
 compatibility`; it refuses a retained native release whose Prisma migration
 digest, security epoch, or derived LiveKit signing credential no longer matches
 `current-app`, the durable security floor, and root-only infrastructure state.
-After such a slow-path release, remain in Docker mode until a
-separate, explicitly reviewed rebootstrap operation introduces a compatible
-native artifact; ordinary `switch hybrid` and fast deploy deliberately refuse
-to improvise that transition.
+After such a slow-path release, use the explicitly reviewed rebootstrap below
+to introduce a compatible native artifact; ordinary `switch hybrid` and fast
+deploy deliberately refuse to improvise that transition.
 
 ## First migration
 
@@ -82,6 +81,53 @@ health endpoints while Docker still serves `13100`. Only the final Caddy
 compare-and-swap stops the Docker API. Docker application containers are
 removed only after local and public hybrid health checks pass; their images and
 immutable Compose release are retained for `switch docker`.
+
+## Reviewed rebootstrap after a full Docker upgrade
+
+Finish the normal full release, including its database/security upgrade and
+health gates, before starting this operation. Keep `current-api` and both slot
+links intact: they are old native evidence, not an upgrade bypass. Runtime mode
+must be settled `docker`, the new `current-app` API and both Web containers must
+be running, and both native units must be inactive and disabled.
+
+Reinstall this control plane from the reviewed new release (which also refreshes
+the minimized native environment), then use `api/export-current-container.sh`
+to export the healthy `openbmb-api` container with its full 40-character source
+SHA. Pass that archive and sidecar to the explicit operator entry point:
+
+```bash
+sudo /usr/local/sbin/openbmb-rebootstrap-from-docker \
+  --domain sun227454.online \
+  --expected-current-app git-0123456789ab \
+  --expected-current-api git-aaaaaaaaaaaa \
+  --api-artifact /root/openbmb-stage/openbmb-native-api-git-0123456789ab.tar.gz \
+  --api-sha256 /root/openbmb-stage/openbmb-native-api-git-0123456789ab.tar.gz.sha256
+```
+
+`expected-current-api` is the **retained old native pointer**, not the new Docker
+release ID. The saved hybrid Caddyfile is reused by default; `--caddyfile` remains
+available for a separately reviewed replacement. This thin entry point invokes
+the same migration engine with `--reviewed-rebootstrap`; it is not a second
+upgrade or database-migration implementation. First migration still requires
+`current-api` to be absent.
+
+The operation holds the shared lock, refuses pending recovery work before
+changing saved configurations, pins the inputs and all four native pointer
+identities under `/var/lib/openbmb/hybrid-bootstrap/<transaction>/`, and snapshots
+the **new healthy Docker** configuration as its rollback target. Native deploy
+requires a prepared `rebootstrap` journal, the exact expected native pointer,
+the full source SHA of `current-app`, matching Prisma/security metadata, and a
+matching derived LiveKit signing credential. No pointer deletion or manifest
+identity rewriting is used.
+
+Candidate or later health failures recover to the new Docker release, with both
+native units stopped and disabled. Pre-commit native recovery restores the old
+pointers without starting that old artifact. If the native transaction already
+committed, its new compatible pointer may remain, with the old current pointer
+as `previous-api`; the durable `*.before` evidence remains in either case.
+Boot recovery follows these same journals and never selects the incompatible
+retained native release as the rebootstrap rollback worker. Inspect `status`
+and the actual pointer before retrying; do not delete pointers to force a retry.
 
 ## Locking and durable recovery
 
@@ -154,4 +200,7 @@ bash infra/production/hybrid/bootstrap/test-runtime-mode.sh
 
 It syntax-checks every bootstrap script and verifies lock invariants, durable
 journal primitives, Caddy-failure Docker recovery ordering, idempotent mode
-switching, and boot-time native-unit behavior with isolated mocks.
+switching, boot-time native-unit behavior, and reviewed rebootstrap success,
+stale expectations, pending-work rejection and early/late failure recovery with
+isolated mocks. Run `../api/test.sh` as well for native bootstrap identity,
+signing-credential and journal/pointer checks.

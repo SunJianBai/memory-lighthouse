@@ -12,6 +12,8 @@ source "$bootstrap_lib"
 
 domain=''
 expected_current_app=''
+expected_current_api=none
+reviewed_rebootstrap=false
 api_artifact=''
 api_sha256=''
 caddy_source=''
@@ -34,6 +36,10 @@ caddy_bin="${OPENBMB_CADDY_BIN:-caddy}"
 current_app="${OPENBMB_CURRENT_APP_LINK:-/opt/openbmb/current-app}"
 current_api="${OPENBMB_CURRENT_API_LINK:-/opt/openbmb/current-api}"
 releases_root="${OPENBMB_STACK_RELEASES_ROOT:-/opt/openbmb/releases}"
+api_releases="${OPENBMB_NATIVE_API_RELEASES_ROOT:-/opt/openbmb/hybrid/api-releases}"
+api_slots="${OPENBMB_NATIVE_API_SLOTS_ROOT:-/opt/openbmb/hybrid/api-slots}"
+previous_api="${OPENBMB_PREVIOUS_API_LINK:-/opt/openbmb/previous-api}"
+web_release="${OPENBMB_WEB_RELEASE_BIN:-/usr/local/sbin/openbmb-web-release}"
 transaction_root=''
 transition_started=false
 migration_complete=false
@@ -50,6 +56,8 @@ while (($#)); do
   case "$1" in
     --domain) domain="${2:-}"; shift 2 ;;
     --expected-current-app) expected_current_app="${2:-}"; shift 2 ;;
+    --expected-current-api) expected_current_api="${2:-}"; shift 2 ;;
+    --reviewed-rebootstrap) reviewed_rebootstrap=true; shift ;;
     --api-artifact) api_artifact="${2:-}"; shift 2 ;;
     --api-sha256) api_sha256="${2:-}"; shift 2 ;;
     --caddyfile) caddy_source="${2:-}"; shift 2 ;;
@@ -62,6 +70,13 @@ hybrid_require_root || exit 1
   fail 'domain must be a DNS hostname'
 [[ "$expected_current_app" =~ ^git-[0-9a-f]{12}$ ]] || \
   fail 'expected-current-app must be an immutable git-* release ID'
+if [[ "$reviewed_rebootstrap" == true ]]; then
+  [[ "$expected_current_api" =~ ^git-[0-9a-f]{12}$ ]] || \
+    fail 'reviewed rebootstrap requires an explicit expected-current-api git-* release ID'
+  caddy_source="${caddy_source:-$runtime_state/configs/hybrid/Caddyfile}"
+else
+  [[ "$expected_current_api" == none ]] || fail 'an existing API requires --reviewed-rebootstrap'
+fi
 export OPENBMB_DOMAIN="$domain"
 
 # The shared production lock is opened without truncation only after proving
@@ -113,8 +128,28 @@ hybrid_pin_file "$caddy_env" "$transaction_root/openbmb.env.docker" 0600 "${OPEN
 
 [[ "$(readlink -f -- "$current_app")" == "$releases_root/$expected_current_app" ]] || \
   fail 'current-app does not match the caller expectation'
-[[ ! -e "$current_api" && ! -L "$current_api" ]] || \
-  fail 'this one-time migration requires current-api to be absent'
+if [[ "$reviewed_rebootstrap" == true ]]; then
+  [[ -L "$current_api" && "$(readlink -f -- "$current_api")" == "$api_releases/$expected_current_api" ]] || \
+    fail 'current-api does not match the reviewed rebootstrap expectation'
+else
+  [[ ! -e "$current_api" && ! -L "$current_api" ]] || \
+    fail 'this one-time migration requires current-api to be absent'
+fi
+# Retain immutable pointer evidence even when the native deployer has already
+# committed and removed its shorter-lived journal before a later health failure.
+for pointer in "$current_api" "$previous_api" "$api_slots/blue" "$api_slots/green"; do
+  target=none
+  if [[ -L "$pointer" ]]; then
+    target="$(readlink -f -- "$pointer")"
+    [[ "$(dirname -- "$target")" == "$(readlink -f -- "$api_releases")" && \
+       "$(basename -- "$target")" =~ ^git-[0-9a-f]{12}$ && -d "$target" && ! -L "$target" ]] || \
+      fail "unsafe retained API pointer: $pointer"
+  elif [[ -e "$pointer" ]]; then
+    fail "retained API pointer is not a symlink: $pointer"
+  fi
+  hybrid_write_scalar "$transaction_root/$(basename -- "$pointer").before" \
+    0600 "${OPENBMB_EXPECTED_GID:-0}" "$target"
+done
 [[ "$($upstream_helper current)" == 127.0.0.1:13100 ]] || \
   fail 'the Docker API is no longer the expected Caddy upstream'
 [[ "$($docker_bin inspect --format '{{.State.Running}}' openbmb-api 2>/dev/null || true)" == true ]] || \
@@ -130,7 +165,7 @@ for web_container in openbmb-client-web openbmb-admin-web; do
   [[ "$($docker_bin inspect --format '{{.State.Running}}' "$web_container" 2>/dev/null || true)" == true ]] || \
     fail "$web_container must be running before migration"
 done
-web_status="$(/usr/local/sbin/openbmb-web-release status)"
+web_status="$("$web_release" status)"
 grep -Eq '^current_release=web-[0-9a-f]{40}-[0-9a-f]{16}$' <<<"$web_status" || \
   fail 'a verified Web release must be promoted before migration'
 "$systemctl_bin" is-enabled --quiet openbmb.service || \
@@ -144,8 +179,13 @@ grep -Eq '^current_release=web-[0-9a-f]{40}-[0-9a-f]{16}$' <<<"$web_status" || \
    *'/usr/local/sbin/openbmb-stack-control stop'* ]] || \
   fail 'OpenBMB stack service is not using the runtime-aware stop adapter'
 
-case "$($runtime_mode status | sed -n 's/^mode=//p')" in
-  uninitialized) "$runtime_mode" initialize-docker ;;
+runtime_status="$("$runtime_mode" status)"
+[[ "$(sed -n 's/^pending=//p' <<<"$runtime_status")" == no ]] || \
+  fail 'recover pending runtime or native API work before replacing saved configuration'
+case "$(sed -n 's/^mode=//p' <<<"$runtime_status")" in
+  uninitialized)
+    [[ "$reviewed_rebootstrap" == false ]] || fail 'rebootstrap requires initialized Docker mode'
+    "$runtime_mode" initialize-docker ;;
   docker) ;;
   *) fail 'runtime mode is not an unused Docker bootstrap state' ;;
 esac
@@ -156,7 +196,11 @@ hybrid_pin_file "$transaction_root/Caddyfile.hybrid" \
   "$runtime_state/configs/hybrid/Caddyfile" 0600 "${OPENBMB_EXPECTED_GID:-0}"
 hybrid_pin_file "$transaction_root/openbmb.env.docker" \
   "$runtime_state/configs/hybrid/openbmb.env" 0600 "${OPENBMB_EXPECTED_GID:-0}"
-"$runtime_mode" begin-migration
+if [[ "$reviewed_rebootstrap" == true ]]; then
+  "$runtime_mode" begin-rebootstrap --expected-current-api "$expected_current_api"
+else
+  "$runtime_mode" begin-migration
+fi
 transition_started=true
 
 on_exit() {
@@ -185,7 +229,7 @@ OPENBMB_API_UPSTREAM_HELPER="$upstream_helper" \
     --artifact "$staged_artifact" \
     --sha256 "$staged_sidecar" \
     --expected-current-app "$expected_current_app" \
-    --expected-current-api none
+    --expected-current-api "$expected_current_api"
 
 OPENBMB_DOMAIN="$domain" "$hybrid_health" --local
 OPENBMB_DOMAIN="$domain" "$hybrid_health" --public

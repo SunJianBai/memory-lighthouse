@@ -34,6 +34,7 @@ for source in \
   "$script_dir/openbmb-backup-control" \
   "$script_dir/openbmb-bootstrap-api-cutover" \
   "$script_dir/migrate-from-docker.sh" \
+  "$script_dir/rebootstrap-from-docker.sh" \
   "$hybrid_dir/../systemd/openbmb-hybrid-recovery.service" \
   "$hybrid_dir/../systemd/caddy-openbmb-hybrid-recovery.conf" \
   "$hybrid_dir/../systemd/openbmb.service" \
@@ -51,6 +52,7 @@ bash -n "$script_dir/openbmb-stack-control"
 bash -n "$script_dir/openbmb-backup-control"
 bash -n "$script_dir/openbmb-bootstrap-api-cutover"
 bash -n "$script_dir/migrate-from-docker.sh"
+bash -n "$script_dir/rebootstrap-from-docker.sh"
 
 # Module-owned installers retain responsibility for their private state and
 # implementation files. This top-level installer owns only the two cross-module
@@ -91,6 +93,8 @@ install_atomic "$script_dir/openbmb-bootstrap-api-cutover" \
   /usr/local/libexec/openbmb-bootstrap-api-cutover 0555
 install_atomic "$script_dir/migrate-from-docker.sh" \
   /usr/local/sbin/openbmb-migrate-from-docker 0555
+install_atomic "$script_dir/rebootstrap-from-docker.sh" \
+  /usr/local/sbin/openbmb-rebootstrap-from-docker 0555
 install_atomic "$hybrid_dir/../systemd/openbmb-hybrid-recovery.service" \
   /etc/systemd/system/openbmb-hybrid-recovery.service 0444
 install_atomic "$hybrid_dir/../systemd/caddy-openbmb-hybrid-recovery.conf" \

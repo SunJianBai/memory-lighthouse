@@ -58,6 +58,12 @@ cleanup_temporary() {
 is_release_id() { [[ "$1" =~ ^git-[0-9a-f]{12}$ ]]; }
 is_upstream() { [[ "$1" =~ ^127\.0\.0\.1:(13100|13101|13102)$ ]]; }
 
+assert_bootstrap_source() {
+  if [[ "$bootstrap_from_docker" == true && "$1" != "$2" ]]; then
+    fail 'Docker bootstrap artifact must match the full current-app source SHA'
+  fi
+}
+
 assert_deploy_runtime_mode() {
   local observed_upstream="$1" expected_api="$2" status
   local -a mode_values=() upstream_values=() pending_values=()
@@ -73,9 +79,11 @@ assert_deploy_runtime_mode() {
     fail 'runtime-mode and Caddy disagree about the active API upstream'
   case "$bootstrap_from_docker" in
     true)
-      [[ "$expected_api" == none && "${mode_values[0]}" == docker && \
+      [[ "${mode_values[0]}" == docker && \
          "${pending_values[0]}" == yes && "$observed_upstream" == 127.0.0.1:13100 ]] || \
         fail 'Docker bootstrap requires the durable migration journal and the 13100 upstream'
+      "$runtime_mode" assert-bootstrap --expected-current-api "$expected_api" || \
+        fail 'Docker bootstrap does not match its prepared migration/rebootstrap journal'
       ;;
     false)
       [[ "$expected_api" != none && "${mode_values[0]}" == hybrid && \
@@ -560,6 +568,9 @@ deploy_command() {
   is_upstream "$helper_current" || fail 'Caddy helper returned an invalid upstream'
   old_upstream="$helper_current"
   assert_deploy_runtime_mode "$old_upstream" "$expected_current_api"
+  if [[ "$bootstrap_from_docker" == true ]]; then
+    assert_native_signing_credential
+  fi
 
   anchor_epoch="$(read_epoch "$anchor_target/infra/production/compatibility/security-epoch" current-app)"
   floor_epoch="$(read_minimum_epoch)"
@@ -596,6 +607,7 @@ deploy_command() {
   target_epoch="$($node_bin "$artifact_tool" manifest-field --manifest "$manifest" --field securityEpoch)"
   target_migrations="$($node_bin "$artifact_tool" manifest-field --manifest "$manifest" --field migrationsDigest)"
   [[ "$release_id" == "git-${target_source:0:12}" ]] || fail 'artifact release identity is inconsistent'
+  assert_bootstrap_source "$target_source" "$anchor_source_sha"
   [[ "$target_epoch" == "$anchor_epoch" ]] || \
     slow_path "security epoch changed ($anchor_epoch -> $target_epoch)"
   [[ "$target_migrations" == "$active_migrations_digest" ]] || \
@@ -709,10 +721,30 @@ recover_command() {
   log "recovered the previous API route $old_upstream"
 }
 
+assert_native_signing_credential() {
+  local infra_secret='' native_secret='' infra_secret_count=0 native_secret_count=0 line
+  assert_managed_file "$infra_env"
+  assert_managed_file "$native_env"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == LIVEKIT_API_SECRET=* ]]; then
+      infra_secret_count=$((infra_secret_count + 1))
+      infra_secret="${line#LIVEKIT_API_SECRET=}"
+    fi
+  done <"$infra_env"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == LIVEKIT_API_SECRET=* ]]; then
+      native_secret_count=$((native_secret_count + 1))
+      native_secret="${line#LIVEKIT_API_SECRET=}"
+    fi
+  done <"$native_env"
+  [[ "$infra_secret_count" -eq 1 && "$native_secret_count" -eq 1 && \
+     "$infra_secret" =~ ^[A-Za-z0-9_-]{32,}$ && "$infra_secret" == "$native_secret" ]] || \
+    slow_path 'native API LiveKit signing credential differs from infrastructure state'
+}
+
 compatibility_command() {
   local anchor_target native_target anchor_epoch floor_epoch native_epoch
   local active_migrations_digest native_migrations manifest
-  local infra_secret='' native_secret='' infra_secret_count=0 native_secret_count=0 line
   (($# == 0)) || fail 'compatibility takes no arguments'
   [[ ! -e "$security_pending" && ! -L "$security_pending" ]] || \
     slow_path 'the durable security boundary is pending'
@@ -734,23 +766,7 @@ compatibility_command() {
     slow_path 'native API security epoch is below the durable floor'
   [[ "$native_migrations" == "$active_migrations_digest" ]] || \
     slow_path 'native API Prisma migration set differs from current-app'
-  assert_managed_file "$infra_env"
-  assert_managed_file "$native_env"
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == LIVEKIT_API_SECRET=* ]]; then
-      infra_secret_count=$((infra_secret_count + 1))
-      infra_secret="${line#LIVEKIT_API_SECRET=}"
-    fi
-  done <"$infra_env"
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == LIVEKIT_API_SECRET=* ]]; then
-      native_secret_count=$((native_secret_count + 1))
-      native_secret="${line#LIVEKIT_API_SECRET=}"
-    fi
-  done <"$native_env"
-  [[ "$infra_secret_count" -eq 1 && "$native_secret_count" -eq 1 && \
-     "$infra_secret" =~ ^[A-Za-z0-9_-]{32,}$ && "$infra_secret" == "$native_secret" ]] || \
-    slow_path 'native API LiveKit signing credential differs from infrastructure state'
+  assert_native_signing_credential
   log "$(basename -- "$native_target") is compatible with $(basename -- "$anchor_target")"
 }
 

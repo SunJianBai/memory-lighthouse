@@ -94,7 +94,7 @@ write_mode() {
 
 write_journal() {
   local phase="$1" temporary
-  [[ "$journal_operation" =~ ^(migrate|switch-hybrid|switch-docker)$ ]] || fail 'invalid journal operation'
+  [[ "$journal_operation" =~ ^(migrate|rebootstrap|switch-hybrid|switch-docker)$ ]] || fail 'invalid journal operation'
   [[ "$phase" =~ ^(prepared|candidate-ready|docker-api-stopped|caddy-staged|routed|cleanup|committed|recovering)$ ]] || \
     fail "invalid journal phase: $phase"
   [[ "$journal_previous_mode" =~ ^(docker|hybrid)$ && "$journal_target_mode" =~ ^(docker|hybrid)$ ]] || \
@@ -144,7 +144,7 @@ load_journal() {
     esac
   done <"$journal"
   [[ "$version" == 1 ]] || fail 'journal version is invalid'
-  [[ "$journal_operation" =~ ^(migrate|switch-hybrid|switch-docker)$ ]] || fail 'journal operation is invalid'
+  [[ "$journal_operation" =~ ^(migrate|rebootstrap|switch-hybrid|switch-docker)$ ]] || fail 'journal operation is invalid'
   [[ "$journal_phase" =~ ^(prepared|candidate-ready|docker-api-stopped|caddy-staged|routed|cleanup|committed|recovering)$ ]] || \
     fail 'journal phase is invalid'
   [[ "$journal_previous_mode" =~ ^(docker|hybrid)$ && "$journal_target_mode" =~ ^(docker|hybrid)$ ]] || \
@@ -551,7 +551,7 @@ begin_transition() {
 bootstrap_cutover() {
   local expected="$1" target="$2" status=0
   load_journal
-  [[ "$journal_operation" == migrate && "$journal_previous_mode" == docker && "$journal_target_mode" == hybrid ]] || \
+  [[ "$journal_operation" =~ ^(migrate|rebootstrap)$ && "$journal_previous_mode" == docker && "$journal_target_mode" == hybrid ]] || \
     fail 'bootstrap cutover has no matching migration journal'
   [[ "$expected" == "$journal_previous_upstream" && "$expected" == 127.0.0.1:13100 ]] || \
     fail 'bootstrap cutover expected upstream is inconsistent'
@@ -581,7 +581,7 @@ bootstrap_cutover() {
 
 bootstrap_commit() {
   load_journal
-  [[ "$journal_operation" == migrate && "$journal_target_mode" == hybrid && \
+  [[ "$journal_operation" =~ ^(migrate|rebootstrap)$ && "$journal_target_mode" == hybrid && \
      "$journal_target_upstream" =~ ^127\.0\.0\.1:1310[12]$ ]] || fail 'no bootstrap cutover can be committed'
   [[ "$journal_phase" == routed ]] || fail 'bootstrap cutover is not durably routed'
   [[ "$(read_mode)" == docker ]] || fail 'bootstrap previous mode changed unexpectedly'
@@ -710,7 +710,7 @@ main() {
   # operation lock used by deploy and rollback workflows.
   ensure_state
   if [[ "$boot_recovery" == false && \
-        "$command" =~ ^(begin-migration|bootstrap-cutover|bootstrap-commit|switch|recover)$ ]]; then
+        "$command" =~ ^(begin-migration|begin-rebootstrap|bootstrap-cutover|bootstrap-commit|switch|recover)$ ]]; then
     assert_runtime_barriers_active || \
       fail 'online runtime changes require active stack and recovery barriers'
   fi
@@ -724,9 +724,44 @@ main() {
     begin-migration)
       [[ $# -eq 1 ]] || fail 'begin-migration takes no arguments'
       [[ "$(read_mode)" == docker ]] || fail 'migration requires Docker mode'
-      [[ ! -e "$native_pending" && ! -L "$native_pending" ]] || \
-        fail "recover the interrupted native API deployment first: $native_pending"
+      [[ ! -e "$journal" && ! -L "$journal" && ! -e "$native_pending" && ! -L "$native_pending" ]] || \
+        fail 'recover pending work before migration'
+      [[ ! -e "$current_api" && ! -L "$current_api" ]] || fail 'first migration requires current-api to be absent'
+      snapshot_active_config docker
       begin_transition migrate docker hybrid 127.0.0.1:13100 true
+      ;;
+    begin-rebootstrap)
+      [[ $# -eq 3 && "$2" == --expected-current-api && "$3" =~ ^git-[0-9a-f]{12}$ ]] || \
+        fail 'usage: begin-rebootstrap --expected-current-api git-RELEASE'
+      [[ "$(read_mode)" == docker && "$($upstream_helper current)" == 127.0.0.1:13100 ]] || \
+        fail 'rebootstrap requires settled Docker mode'
+      [[ ! -e "$journal" && ! -L "$journal" && ! -e "$native_pending" && ! -L "$native_pending" ]] || \
+        fail 'recover pending work before rebootstrap'
+      [[ -L "$current_api" && "$(readlink -f -- "$current_api")" == "$api_releases/$3" ]] || \
+        fail 'retained current-api changed from the rebootstrap expectation'
+      health_docker_direct || fail 'Docker rollback target is not healthy'
+      for slot in blue green; do
+        assert_native_unit_state "openbmb-native-api@${slot}.service" inactive disabled || \
+          fail 'retained native units must be inactive and disabled before rebootstrap'
+      done
+      snapshot_active_config docker
+      begin_transition rebootstrap docker hybrid 127.0.0.1:13100 false
+      ;;
+    assert-bootstrap)
+      [[ $# -eq 3 && "$2" == --expected-current-api ]] || fail 'usage: assert-bootstrap --expected-current-api RELEASE|none'
+      load_journal
+      [[ "$(read_mode)" == docker && "$journal_previous_mode" == docker && \
+         "$journal_target_mode" == hybrid && "$journal_phase" == prepared && \
+         "$journal_previous_upstream" == 127.0.0.1:13100 && "$journal_target_upstream" == none ]] || \
+        fail 'bootstrap is not in its prepared Docker phase'
+      if [[ "$3" == none ]]; then
+        [[ "$journal_operation" == migrate && "$journal_cleanup_native" == true && \
+           ! -e "$current_api" && ! -L "$current_api" ]] || fail 'first migration identity does not match'
+      else
+        [[ "$3" =~ ^git-[0-9a-f]{12}$ && "$journal_operation" == rebootstrap && \
+           "$journal_cleanup_native" == false && -L "$current_api" && \
+           "$(readlink -f -- "$current_api")" == "$api_releases/$3" ]] || fail 'reviewed rebootstrap identity does not match'
+      fi
       ;;
     bootstrap-cutover)
       [[ $# -eq 5 && "$2" == --expected-upstream && "$4" == --target-upstream ]] || \
@@ -754,7 +789,7 @@ main() {
       [[ $# -eq 1 ]] || fail 'status takes no arguments'
       status_command
       ;;
-    *) fail 'usage: openbmb-runtime-mode initialize-docker|begin-migration|bootstrap-cutover|bootstrap-commit|switch|recover|status' ;;
+    *) fail 'usage: openbmb-runtime-mode initialize-docker|begin-migration|begin-rebootstrap|assert-bootstrap|bootstrap-cutover|bootstrap-commit|switch|recover|status' ;;
   esac
 }
 

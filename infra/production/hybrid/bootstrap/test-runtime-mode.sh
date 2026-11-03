@@ -28,6 +28,7 @@ for candidate in \
   "$script_dir/bootstrap-lib.sh" \
   "$script_dir/install-hybrid-control-plane.sh" \
   "$script_dir/migrate-from-docker.sh" \
+  "$script_dir/rebootstrap-from-docker.sh" \
   "$script_dir/openbmb-bootstrap-api-cutover" \
   "$script_dir/openbmb-hybrid-health" \
   "$script_dir/openbmb-runtime-mode" \
@@ -211,6 +212,7 @@ unit_state_path() {
   printf '%s/unit-%s.%s\n' "$FIXTURE_STATE" "$key" "$state"
 }
 case "$1" in
+  is-enabled) exit 0 ;;
   is-active)
     case "${3:-${2:-}}" in
       caddy) [[ -f "$FIXTURE_STATE/caddy-active" ]] ;;
@@ -231,6 +233,8 @@ case "$1" in
       --property=UnitFileState)
         [[ -f "$(unit_state_path "$4" enabled)" ]] && printf 'enabled\n' || printf 'disabled\n'
         ;;
+      --property=ExecStart) printf '/usr/local/sbin/openbmb-stack-control start\n' ;;
+      --property=ExecStop) printf '/usr/local/sbin/openbmb-stack-control stop\n' ;;
       *) exit 2 ;;
     esac
     ;;
@@ -325,6 +329,29 @@ fd="${OPENBMB_OPERATION_LOCK_FD:-}"
    "$(stat -Lc %d:%i -- "$OPENBMB_OPERATION_LOCK")" ]]
 printf 'native-deploy %s\n' "$*" >>"$FIXTURE_STATE/calls"
 printf 'native-boot %s\n' "${OPENBMB_NATIVE_API_BOOT_RECOVERY:-false}" >>"$FIXTURE_STATE/calls"
+if [[ "$1" == deploy ]]; then
+  [[ "${OPENBMB_NATIVE_API_BOOTSTRAP_FROM_DOCKER:-false}" == true ]]
+  shift
+  expected=''
+  while (($#)); do
+    case "$1" in
+      --expected-current-api) expected="$2"; shift 2 ;;
+      --artifact|--sha256|--expected-current-app) shift 2 ;;
+      *) exit 2 ;;
+    esac
+  done
+  "$OPENBMB_RUNTIME_MODE_BIN" assert-bootstrap --expected-current-api "$expected"
+  [[ "$expected" == git-aaaaaaaaaaaa ]]
+  [[ ! -f "$FIXTURE_STATE/fail-candidate" ]] || exit 1
+  old="$(readlink -f "$OPENBMB_CURRENT_API_LINK")"
+  target="$OPENBMB_NATIVE_API_RELEASES_ROOT/git-0123456789ab"
+  ln -sfn "$target" "$OPENBMB_NATIVE_API_SLOTS_ROOT/blue"
+  "$OPENBMB_SYSTEMCTL_BIN" restart openbmb-native-api@blue.service
+  "$OPENBMB_NATIVE_API_CADDY_HELPER" switch --expected-upstream 127.0.0.1:13100 --target-upstream 127.0.0.1:13101
+  ln -sfn "$old" "$OPENBMB_PREVIOUS_API_LINK"
+  ln -sfn "$target" "$OPENBMB_CURRENT_API_LINK"
+  "$OPENBMB_SYSTEMCTL_BIN" enable openbmb-native-api@blue.service
+fi
 exit 0
 MOCK
 cat >"$mock_bin/compose.sh" <<'MOCK'
@@ -342,6 +369,12 @@ cat >"$mock_bin/upstream-helper" <<'MOCK'
 #!/usr/bin/env bash
 case "$1" in
   current) sed -n 's/^OPENBMB_API_UPSTREAM=//p' "$OPENBMB_CADDY_ENV_FILE" ;;
+  switch)
+    [[ "$#" -eq 5 && "$2" == --expected-upstream && "$4" == --target-upstream ]]
+    [[ "$(sed -n 's/^OPENBMB_API_UPSTREAM=//p' "$OPENBMB_CADDY_ENV_FILE")" == "$3" ]]
+    sed "s/^OPENBMB_API_UPSTREAM=.*/OPENBMB_API_UPSTREAM=$5/" "$OPENBMB_CADDY_ENV_FILE" >"$OPENBMB_CADDY_ENV_FILE.new"
+    mv "$OPENBMB_CADDY_ENV_FILE.new" "$OPENBMB_CADDY_ENV_FILE"
+    ;;
   *) exit 2 ;;
 esac
 MOCK
@@ -560,3 +593,100 @@ else
 fi
 
 printf 'hybrid runtime recovery tests passed\n'
+
+# Reviewed rebootstrap reuses the real migration/runtime state machines. Only
+# Docker/systemd/network and artifact installation are replaced at their seams.
+# An old native release must remain as evidence, not become a rollback worker.
+for control in openbmb-runtime-mode openbmb-bootstrap-api-cutover migrate-from-docker.sh rebootstrap-from-docker.sh; do
+  cp "$script_dir/$control" "$mock_bin/$control"
+  /usr/bin/chmod 0700 "$mock_bin/$control"
+done
+cat >"$mock_bin/hybrid-health" <<'MOCK'
+#!/usr/bin/env bash
+printf 'hybrid-health %s\n' "$*" >>"$FIXTURE_STATE/calls"
+[[ ! -f "$FIXTURE_STATE/fail-hybrid-health" ]]
+MOCK
+cat >"$mock_bin/web-release" <<'MOCK'
+#!/usr/bin/env bash
+printf 'current_release=web-0123456789abcdef0123456789abcdef01234567-0123456789abcdef\n'
+MOCK
+/usr/bin/chmod 0700 "$mock_bin/hybrid-health" "$mock_bin/web-release"
+export OPENBMB_RUNTIME_MODE_BIN="$mock_bin/openbmb-runtime-mode"
+export OPENBMB_BOOTSTRAP_CUTOVER_HELPER="$mock_bin/openbmb-bootstrap-api-cutover"
+export OPENBMB_STACK_CONTROL_BIN="$mock_bin/compose.sh"
+export OPENBMB_HYBRID_HEALTH_BIN="$mock_bin/hybrid-health"
+export OPENBMB_WEB_RELEASE_BIN="$mock_bin/web-release"
+export OPENBMB_MIGRATE_FROM_DOCKER_BIN="$mock_bin/migrate-from-docker.sh"
+export OPENBMB_STACK_RELEASES_ROOT="$runtime_fixture/stack-releases"
+export OPENBMB_CURRENT_APP_LINK="$runtime_fixture/current-app"
+export OPENBMB_PREVIOUS_API_LINK="$runtime_fixture/previous-api"
+export OPENBMB_HYBRID_BOOTSTRAP_EVIDENCE="$runtime_fixture/evidence"
+mkdir -p "$OPENBMB_STACK_RELEASES_ROOT/git-0123456789ab" "$api_release_root/git-aaaaaaaaaaaa" "$runtime_fixture/input"
+ln -s "$OPENBMB_STACK_RELEASES_ROOT/git-0123456789ab" "$OPENBMB_CURRENT_APP_LINK"
+printf 'artifact fixture\n' >"$runtime_fixture/input/api.tar.gz"
+printf 'sidecar fixture\n' >"$runtime_fixture/input/api.tar.gz.sha256"
+rebootstrap() {
+  "$mock_bin/rebootstrap-from-docker.sh" --domain example.com \
+    --expected-current-app git-0123456789ab --expected-current-api "${1:-git-aaaaaaaaaaaa}" \
+    --api-artifact "$runtime_fixture/input/api.tar.gz" --api-sha256 "$runtime_fixture/input/api.tar.gz.sha256"
+}
+reset_docker_fixture() {
+  printf 'docker\n' >"$state_root/mode"
+  printf 'new Docker config\n' >"$caddy_root/Caddyfile"
+  printf 'OPENBMB_API_UPSTREAM=127.0.0.1:13100\n' >"$caddy_root/openbmb.env"
+  ln -sfn "$api_release_root/git-aaaaaaaaaaaa" "$runtime_fixture/current-api"
+  ln -sfn "$api_release_root/git-aaaaaaaaaaaa" "$api_slots_root/blue"
+  rm -f "$state_root/transition.pending" "$mock_state/calls"
+  "$mock_bin/systemctl" disable --now openbmb-native-api@blue.service
+  "$mock_bin/systemctl" disable --now openbmb-native-api@green.service
+  touch "$mock_state/caddy-active" "$mock_state/openbmb-api" "$mock_state/openbmb-client-web" "$mock_state/openbmb-admin-web"
+}
+
+reset_docker_fixture
+if "$mock_bin/migrate-from-docker.sh" --domain example.com --expected-current-app git-0123456789ab \
+  --expected-current-api git-aaaaaaaaaaaa >/dev/null 2>&1; then fail 'existing native pointer accepted without reviewed opt-in'; fi
+if rebootstrap git-bbbbbbbbbbbb >/dev/null 2>&1; then fail 'stale expected native pointer accepted'; fi
+[[ ! -e "$state_root/transition.pending" && "$(cat "$state_root/mode")" == docker ]]
+
+# A generic Docker->hybrid switch journal cannot authorize a bootstrap deploy.
+write_pending switch-hybrid prepared docker hybrid 127.0.0.1:13100 none
+if "$OPENBMB_RUNTIME_MODE_BIN" assert-bootstrap --expected-current-api git-aaaaaaaaaaaa >/dev/null 2>&1; then
+  fail 'ordinary switch journal authorized rebootstrap'
+fi
+saved_hybrid_digest="$(sha256sum "$state_root/configs/hybrid/openbmb.env")"
+if rebootstrap >/dev/null 2>&1; then fail 'rebootstrap accepted an existing runtime journal'; fi
+[[ "$(sha256sum "$state_root/configs/hybrid/openbmb.env")" == "$saved_hybrid_digest" ]] || \
+  fail 'rebootstrap overwrote recovery configuration before rejecting pending work'
+rm "$state_root/transition.pending"
+
+touch "$mock_state/fail-candidate"
+if rebootstrap >/dev/null 2>&1; then fail 'candidate failure was reported as rebootstrap success'; fi
+rm "$mock_state/fail-candidate"
+[[ "$(cat "$state_root/mode")" == docker && ! -e "$state_root/transition.pending" ]]
+[[ "$(readlink -f "$runtime_fixture/current-api")" == "$api_release_root/git-aaaaaaaaaaaa" ]]
+! grep -Fq 'systemctl enable --now openbmb-native-api' "$mock_state/calls"
+
+reset_docker_fixture
+touch "$mock_state/fail-hybrid-health"
+if rebootstrap >/dev/null 2>&1; then fail 'late health failure was reported as rebootstrap success'; fi
+rm "$mock_state/fail-hybrid-health"
+[[ "$(cat "$state_root/mode")" == docker && ! -e "$state_root/transition.pending" ]]
+[[ -f "$mock_state/openbmb-api" && "$(cat "$caddy_root/Caddyfile")" == 'new Docker config' ]]
+[[ "$(readlink -f "$runtime_fixture/previous-api")" == "$api_release_root/git-aaaaaaaaaaaa" ]]
+! grep -Fq 'systemctl enable --now openbmb-native-api' "$mock_state/calls"
+grep -RFl "$api_release_root/git-aaaaaaaaaaaa" "$OPENBMB_HYBRID_BOOTSTRAP_EVIDENCE"/*/current-api.before >/dev/null
+
+# An interrupted rebootstrap restores Docker during boot and preserves links.
+reset_docker_fixture
+write_pending rebootstrap candidate-ready docker hybrid 127.0.0.1:13100 127.0.0.1:13101
+"$OPENBMB_RUNTIME_MODE_BIN" recover --boot
+[[ "$(readlink -f "$runtime_fixture/current-api")" == "$api_release_root/git-aaaaaaaaaaaa" ]]
+! grep -Fq 'systemctl enable --now openbmb-native-api' "$mock_state/calls"
+
+reset_docker_fixture
+rebootstrap
+[[ "$(cat "$state_root/mode")" == hybrid && ! -e "$state_root/transition.pending" ]]
+[[ "$(readlink -f "$runtime_fixture/current-api")" == "$api_release_root/git-0123456789ab" ]]
+[[ "$(readlink -f "$runtime_fixture/previous-api")" == "$api_release_root/git-aaaaaaaaaaaa" ]]
+grep -Fq -- '--expected-current-api git-aaaaaaaaaaaa' "$mock_state/calls"
+printf 'reviewed rebootstrap tests passed\n'
