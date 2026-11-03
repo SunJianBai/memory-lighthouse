@@ -13,7 +13,9 @@ concurrency:
 
 env:
   CI: "true"
-  NODE_VERSION: "20.19.0"
+  # Test-only toolchain: current jsdom requires >=24.15 on the Node 24 line.
+  # Native production artifacts remain pinned separately to Node 22.19.0.
+  NODE_VERSION: "24.19.0"
 
 jobs:
   web-server-contracts:
