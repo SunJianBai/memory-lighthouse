@@ -239,15 +239,21 @@ jobs:
       - name: Pull pinned infrastructure images
         if: env.ALREADY_STAGED != 'true'
         shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          auth_dir="$(mktemp -d "$RUNNER_TEMP/openbmb-existing-images.XXXXXX")"
+          trap 'rm -rf -- "$auth_dir"' EXIT
+          printf '%s\n' "$GHCR_TOKEN" | docker --config "$auth_dir" login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin >/dev/null
           source infra/production/scripts/release-image-set.sh
           openbmb_load_release_image_set "$RELEASE_ID"
           for index in "${!OPENBMB_REQUIRED_IMAGES[@]}"; do
             source_image="${OPENBMB_SOURCE_IMAGES[$index]}"
             release_image="${OPENBMB_REQUIRED_IMAGES[$index]}"
             if [[ "$source_image" != "$release_image" ]]; then
-              docker pull "$source_image"
+              docker --config "$auth_dir" pull "$source_image"
               docker tag "$source_image" "$release_image"
              fi
            done
@@ -301,6 +307,13 @@ jobs:
           images=("${OPENBMB_REQUIRED_IMAGES[@]}")
           components=("${OPENBMB_DELIVERY_COMPONENTS[@]}")
           for index in "${!images[@]}"; do
+            if openbmb_existing_storage_image "${components[$index]}"; then
+              # Reuse the original attestation without publishing another copy.
+              [[ "$(docker image inspect --format '{{.Id}}' "${images[$index]}")" == "$OPENBMB_EXISTING_STORAGE_ID" ]]
+              printf '%s %s %s\n' "${images[$index]}" \
+                "$OPENBMB_EXISTING_STORAGE_REF" "$OPENBMB_EXISTING_STORAGE_DIGEST" >> "$transport_manifest"
+              continue
+            fi
             delivery_ref="$DELIVERY_IMAGE:${components[$index]}-$RELEASE_ID"
             docker tag "${images[$index]}" "$delivery_ref"
             push_log="$auth_dir/push-${components[$index]}.log"

@@ -112,8 +112,14 @@ for index in "${!expected_images[@]}"; do
   current_delivery_repository="${delivery_ref%:*}"
   [[ "$current_delivery_repository" =~ ^ghcr\.io/[a-z0-9][a-z0-9-]*/memory-lighthouse-delivery$ ]] || \
     fail "transport repository is invalid for $image_name"
-  [[ "$delivery_ref" == "$current_delivery_repository:$delivery_component-$release_id" ]] || \
-    fail "transport reference is invalid for $image_name"
+  if [[ "$delivery_component" == minio || "$delivery_component" == minio-mc ]]; then
+    openbmb_verify_existing_storage_transport \
+      "$delivery_component" "$delivery_ref" "$delivery_digest" "$expected_id" || \
+      fail "reused storage image differs from the production anchor for $image_name"
+  else
+    [[ "$delivery_ref" == "$current_delivery_repository:$delivery_component-$release_id" ]] || \
+      fail "transport reference is invalid for $image_name"
+  fi
   if [[ -z "$delivery_repository" ]]; then
     delivery_repository="$current_delivery_repository"
   else

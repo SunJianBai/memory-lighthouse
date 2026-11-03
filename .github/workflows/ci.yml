@@ -92,6 +92,9 @@ jobs:
     name: Server E2E with local infrastructure
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
 
     steps:
       - name: Check out source
@@ -212,8 +215,25 @@ jobs:
 
       - name: Start MySQL, Redis, MinIO, and LiveKit
         shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Read only existing program images. No production SSH or data access,
+          # no new image publication, and no registry credentials in the tests.
+          auth_dir="$(mktemp -d "$RUNNER_TEMP/openbmb-existing-images.XXXXXX")"
+          trap 'rm -rf -- "$auth_dir"' EXIT
+          printf '%s\n' "$GHCR_TOKEN" | docker --config "$auth_dir" login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin >/dev/null
+          source infra/production/scripts/release-image-set.sh
+          openbmb_load_release_image_set git-000000000000
+          export MINIO_IMAGE="${OPENBMB_SOURCE_IMAGES[6]}"
+          export MINIO_MC_IMAGE="${OPENBMB_SOURCE_IMAGES[7]}"
+          docker --config "$auth_dir" pull "$MINIO_IMAGE"
+          docker --config "$auth_dir" pull "$MINIO_MC_IMAGE"
+          printf 'MINIO_IMAGE=%s\nMINIO_MC_IMAGE=%s\n' "$MINIO_IMAGE" "$MINIO_MC_IMAGE" >> "$GITHUB_ENV"
+          rm -rf -- "$auth_dir"
+          trap - EXIT
           docker compose \
             --env-file "$COMPOSE_ENV_FILE" \
             -f infra/compose/compose.yml \

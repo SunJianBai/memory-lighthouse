@@ -67,6 +67,37 @@ test('both upgrade-only remote steps establish SSH before contacting production'
   }
 });
 
+test('existing storage copies are pinned, verified, and never republished', () => {
+  const result = spawnSync(bash, ['-c', `
+    set -euo pipefail
+    source infra/production/scripts/release-image-set.sh
+    openbmb_load_release_image_set git-000000000000
+    for index in 6 7; do
+      component="\${OPENBMB_DELIVERY_COMPONENTS[$index]}"
+      openbmb_existing_storage_image "$component"
+      ref="$OPENBMB_EXISTING_STORAGE_REF"
+      digest="$OPENBMB_EXISTING_STORAGE_DIGEST"
+      image_id="$OPENBMB_EXISTING_STORAGE_ID"
+      [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ && "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+      [[ "\${OPENBMB_SOURCE_IMAGES[$index]}" == "\${ref%%:*}@$digest" ]]
+      openbmb_verify_existing_storage_transport "$component" "$ref" "$digest" "$image_id"
+      ! openbmb_verify_existing_storage_transport "$component" "$ref-changed" "$digest" "$image_id"
+      ! openbmb_verify_existing_storage_transport "$component" "$ref" "sha256:wrong" "$image_id"
+      ! openbmb_verify_existing_storage_transport "$component" "$ref" "$digest" "sha256:wrong"
+    done
+    ! openbmb_existing_storage_image api
+    [[ -z "$OPENBMB_EXISTING_STORAGE_REF" ]]
+  `], { cwd: root, encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const publish = full.slice(full.indexOf('name: Publish exact release transport images'), full.indexOf('name: Transfer exact release images'));
+  assert.match(publish, /openbmb_existing_storage_image "\$\{components\[\$index\]}"/);
+  assert.ok(publish.indexOf('continue') < publish.indexOf('docker push'));
+  assert.match(read('infra/production/scripts/verify-release-images.sh'), /openbmb_verify_existing_storage_transport/);
+  const ci = read('.github/workflows/ci.yml');
+  assert.match(ci, /packages: read/);
+  assert.doesNotMatch(ci, /TX4H4G_SSH|docker push/);
+});
+
 test('a newer main cannot interrupt already-activated Docker-to-hybrid completion', () => {
   const beforeActivation = full.slice(full.indexOf('Reject stale or unvalidated activation'), full.indexOf('Activate validated release'));
   assert.match(beforeActivation, /assert-current-main.sh/);
