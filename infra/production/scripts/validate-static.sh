@@ -515,8 +515,9 @@ grep -Fq 'ControlPath ~/.ssh/openbmb-%n-%C' "$delivery_workflow"
 grep -Fq 'ControlPersist 130m' "$delivery_workflow"
 grep -Fq 'ProxyCommand /bin/false' "$delivery_workflow"
 grep -Fq 'timeout-minutes: 360' "$delivery_workflow"
+# Includes the exact-fallback restore and post-upgrade hybrid rebootstrap steps.
 [[ "$(grep -Fc 'bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5' \
-  "$delivery_workflow")" -eq 8 ]]
+  "$delivery_workflow")" -eq 10 ]]
 grep -Fq 'for lane in {1..8}; do' "$delivery_workflow"
 grep -Fq '"tx4h4g-prod-lane-$lane" 6 5' "$delivery_workflow"
 grep -Fq 'OPENBMB_TRANSFER_SSH_LANES=8' "$delivery_workflow"

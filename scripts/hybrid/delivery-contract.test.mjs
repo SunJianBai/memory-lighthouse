@@ -54,6 +54,19 @@ test('hybrid restoration uses the installed reviewed rebootstrap interface', () 
   assert.ok(read('scripts/hybrid/remote-promotion-guard.sh').includes('"$digest" =~ ^sha256:[0-9a-f]{64}$'));
 });
 
+test('both upgrade-only remote steps establish SSH before contacting production', () => {
+  for (const name of [
+    'Verify source CI and restore exact Docker fallback before building',
+    'Restore verified hybrid runtime',
+  ]) {
+    const step = full.split(/\n      - name: /).find(block => block.startsWith(name));
+    assert.ok(step, `missing step: ${name}`);
+    const establish = step.indexOf('bash infra/production/scripts/ensure-ssh-master.sh tx4h4g-prod 6 5');
+    const contact = step.indexOf('ssh tx4h4g-prod');
+    assert.ok(establish >= 0 && contact > establish, `SSH must be established first: ${name}`);
+  }
+});
+
 test('a newer main cannot interrupt already-activated Docker-to-hybrid completion', () => {
   const beforeActivation = full.slice(full.indexOf('Reject stale or unvalidated activation'), full.indexOf('Activate validated release'));
   assert.match(beforeActivation, /assert-current-main.sh/);
