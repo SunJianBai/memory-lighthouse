@@ -125,6 +125,18 @@ export class VersionQueryDto {
   version!: number;
 }
 
+export class RoutineListQueryDto {
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  includePaused?: string;
+}
+
+export class RoutineLifecycleDto {
+  @IsInt()
+  @Min(0)
+  version!: number;
+}
+
 export class OccurrenceQueryDto {
   @IsOptional()
   @IsISO8601()

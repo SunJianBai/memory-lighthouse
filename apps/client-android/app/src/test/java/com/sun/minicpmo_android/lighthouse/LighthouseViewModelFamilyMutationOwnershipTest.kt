@@ -62,6 +62,120 @@ class LighthouseViewModelFamilyMutationOwnershipTest {
     private val mainDispatcher = StandardTestDispatcher()
 
     @Test
+    fun olderPostPauseReloadCannotOverwriteANewerExplicitRefresh() = runTest(mainDispatcher) {
+        val original = RoutineView("routine", HOUSEHOLD_ID, RECIPIENT_A, "OTHER", null, "散步", "慢慢走", "完成了吗", "FAMILY", "ACTIVE", emptyList(), "2026-08-01T00:00:00Z", 1)
+        val stale = CompletableDeferred<List<RoutineView>>()
+        val newest = original.copy(status = "ACTIVE", version = 3)
+        var reads = 0
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repo ->
+            coEvery { repo.listRoutines(any(), any()) } coAnswers {
+                when (++reads) { 1 -> listOf(original); 2 -> stale.await(); else -> listOf(newest) }
+            }
+            coEvery { repo.setRoutinePaused(HOUSEHOLD_ID, original, true) } returns original.copy(status = "PAUSED", version = 2)
+        })
+        try {
+            fixture.signIn(this)
+            fixture.viewModel.setRoutinePaused(original, true); runCurrent()
+            fixture.viewModel.refresh(); runCurrent()
+            stale.complete(listOf(original.copy(status = "PAUSED", version = 2))); advanceUntilIdle()
+            assertEquals(listOf(newest), fixture.viewModel.uiState.value.routines)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun acceptedPauseThenFailedReadDoesNotResubmitOrReplaceKnownState() = runTest(mainDispatcher) {
+        val original = RoutineView("routine", HOUSEHOLD_ID, RECIPIENT_A, "OTHER", null, "散步", "慢慢走", "完成了吗", "FAMILY", "ACTIVE", emptyList(), "2026-08-01T00:00:00Z", 1)
+        var accepted = false
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repo ->
+            coEvery { repo.listRoutines(any(), any()) } answers { if (accepted) throw IOException("offline") else listOf(original) }
+            coEvery { repo.setRoutinePaused(HOUSEHOLD_ID, original, true) } answers { accepted = true; original.copy(status = "PAUSED") }
+        })
+        try {
+            fixture.signIn(this)
+            fixture.viewModel.setRoutinePaused(original, true); advanceUntilIdle()
+            assertEquals(listOf(original), fixture.viewModel.uiState.value.routines)
+            assertTrue(fixture.viewModel.uiState.value.message.orEmpty().contains("操作已受理，状态暂未刷新"))
+            assertNull(fixture.viewModel.uiState.value.routineCommandPendingId)
+            assertEquals(1L, fixture.viewModel.uiState.value.routineCommandRevision)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun noFutureResumeOffersEditingInsteadOfGenericVersionConflict() = runTest(mainDispatcher) {
+        val original = RoutineView("routine", HOUSEHOLD_ID, RECIPIENT_A, "OTHER", null, "散步", "慢慢走", "完成了吗", "FAMILY", "PAUSED", emptyList(), "2026-08-01T00:00:00Z", 1)
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repo ->
+            coEvery { repo.listRoutines(any(), any()) } returns listOf(original)
+            coEvery { repo.setRoutinePaused(HOUSEHOLD_ID, original, false) } throws LighthouseApiException(409, "ROUTINE_NO_FUTURE_OCCURRENCE", "no future")
+        })
+        try {
+            fixture.signIn(this)
+            fixture.viewModel.setRoutinePaused(original, false); advanceUntilIdle()
+            assertEquals("原安排没有后续提醒时间，请先修改日期或重复规则", fixture.viewModel.uiState.value.routineCommandError)
+            assertEquals(listOf(original), fixture.viewModel.uiState.value.routines)
+            assertEquals(0L, fixture.viewModel.uiState.value.routineCommandRevision)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun lifecycleDenialClearsSensitiveRoutineCards() = runTest(mainDispatcher) {
+        val original = RoutineView("routine", HOUSEHOLD_ID, RECIPIENT_A, "OTHER", null, "散步", "慢慢走", "完成了吗", "FAMILY", "ACTIVE", emptyList(), "2026-08-01T00:00:00Z", 1)
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repo ->
+            coEvery { repo.listRoutines(any(), any()) } returns listOf(original)
+            coEvery { repo.setRoutinePaused(HOUSEHOLD_ID, original, true) } throws LighthouseApiException(403, "DENIED", "权限已撤销")
+        })
+        try {
+            fixture.signIn(this)
+            fixture.viewModel.setRoutinePaused(original, true); advanceUntilIdle()
+            assertTrue(fixture.viewModel.uiState.value.routines.isEmpty())
+            assertEquals("日程权限已变化，请刷新", fixture.viewModel.uiState.value.routineLoadError)
+            assertNull(fixture.viewModel.uiState.value.routineCommandPendingId)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun pauseReceiptUsesAuthoritativeReloadAndPreservesHistoryFilters() = runTest(mainDispatcher) {
+        val original = RoutineView("routine", HOUSEHOLD_ID, RECIPIENT_A, "OTHER", null, "散步", "慢慢走", "完成了吗", "FAMILY", "ACTIVE", emptyList(), "2026-08-01T00:00:00Z", 1)
+        val authoritative = original.copy(status = "ACTIVE", version = 3)
+        var changed = false
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repo ->
+            coEvery { repo.listRoutines(any(), any()) } answers { listOf(if (changed) authoritative else original) }
+            coEvery { repo.setRoutinePaused(HOUSEHOLD_ID, original, true) } answers {
+                changed = true
+                original.copy(status = "PAUSED", version = 2)
+            }
+        })
+        try {
+            fixture.signIn(this)
+            val filter = CareHistoryFilter("2026-08-01", "2026-08-31", "EXPIRED")
+            fixture.viewModel.queryCareHistory(CareHistoryKind.OCCURRENCES, filter); advanceUntilIdle()
+            fixture.viewModel.setRoutinePaused(original, true); advanceUntilIdle()
+            assertEquals(listOf(authoritative), fixture.viewModel.uiState.value.routines)
+            assertEquals(filter, fixture.viewModel.uiState.value.occurrenceHistory.filter)
+            assertNull(fixture.viewModel.uiState.value.routineCommandPendingId)
+        } finally { fixture.close() }
+    }
+
+    @Test
+    fun latePauseCannotChangeRecipientBOrReopenItsDialog() = runTest(mainDispatcher) {
+        val original = RoutineView("routine", HOUSEHOLD_ID, RECIPIENT_A, "OTHER", null, "散步", "慢慢走", "完成了吗", "FAMILY", "ACTIVE", emptyList(), "2026-08-01T00:00:00Z", 1)
+        val pending = CompletableDeferred<RoutineView>()
+        val fixture = fixture(CompletableDeferred(), configureRepository = { repo ->
+            coEvery { repo.setRoutinePaused(HOUSEHOLD_ID, original, true) } coAnswers { pending.await() }
+        })
+        try {
+            fixture.signIn(this)
+            fixture.viewModel.setRoutinePaused(original, true); runCurrent()
+            fixture.viewModel.selectRecipient(RECIPIENT_B); advanceUntilIdle()
+            val revision = fixture.viewModel.uiState.value.routineCommandRevision
+            pending.complete(original.copy(status = "PAUSED", version = 2)); advanceUntilIdle()
+            assertEquals(RECIPIENT_B, fixture.viewModel.uiState.value.selectedRecipientId)
+            assertEquals(revision, fixture.viewModel.uiState.value.routineCommandRevision)
+            assertNull(fixture.viewModel.uiState.value.routineCommandPendingId)
+            assertTrue(fixture.viewModel.uiState.value.routines.isEmpty())
+        } finally { fixture.close() }
+    }
+
+    @Test
     fun initialCareHistoryUsesPagedRepositoryInsteadOfLegacyArray() = runTest(mainDispatcher) {
         val event = CareEventView("history-1", "ROUTINE_CONFIRMED", "INFO", "FAMILY", "历史动态", "原文", "2026-08-01T00:00:00Z")
         val fixture = fixture(CompletableDeferred(), configureRepository = { repository ->

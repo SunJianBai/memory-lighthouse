@@ -17,6 +17,7 @@ export interface ScheduleDefinition {
   endDate: Date | null;
   graceMinutes: number;
   familyNoticeMinutes: number;
+  effectiveFromUtc?: Date | null;
 }
 
 export interface OccurrenceCandidate {
@@ -226,6 +227,8 @@ export function generateOccurrenceCandidates(
       );
       if (
         scheduledAtUtc &&
+        (!schedule.effectiveFromUtc ||
+          scheduledAtUtc > schedule.effectiveFromUtc) &&
         scheduledAtUtc >= windowStartUtc &&
         scheduledAtUtc < windowEndUtc
       ) {
@@ -251,6 +254,33 @@ export function generateOccurrenceCandidates(
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return result;
+}
+
+/** Jump directly to a future start date, then inspect at most 32 days. Weekly
+ * rules recur within seven days; the extra weeks cover skipped IANA/DST dates
+ * and minutes without searching an unbounded end-date range. */
+export function hasFutureOccurrence(
+  schedule: ScheduleDefinition,
+  effectiveFromUtc: Date,
+): boolean {
+  if (
+    schedule.endDate &&
+    schedule.endDate.getTime() + 36 * 3_600_000 < effectiveFromUtc.getTime()
+  )
+    return false;
+  const start = new Date(
+    Math.max(
+      effectiveFromUtc.getTime(),
+      schedule.startDate.getTime() - 36 * 3_600_000,
+    ),
+  );
+  return (
+    generateOccurrenceCandidates(
+      { ...schedule, effectiveFromUtc },
+      start,
+      new Date(start.getTime() + 32 * 86_400_000),
+    ).length > 0
+  );
 }
 
 export function parseIsoDate(value: string): Date {

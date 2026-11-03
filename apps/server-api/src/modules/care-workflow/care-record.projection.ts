@@ -23,6 +23,7 @@ export interface OccurrenceRecord {
   confirmationDeadlineAt: Date | null;
   escalationAt: Date | null;
   completedAt: Date | null;
+  closureReason?: string | null;
   version: number;
   routine: ProtectedCarePair & { title: string; type: string };
 }
@@ -88,6 +89,7 @@ export function occurrenceView(
       record.confirmationDeadlineAt?.toISOString() ?? null,
     escalationAt: record.escalationAt?.toISOString() ?? null,
     completedAt: record.completedAt?.toISOString() ?? null,
+    closureReason: record.closureReason ?? null,
     version: record.version,
   };
 }

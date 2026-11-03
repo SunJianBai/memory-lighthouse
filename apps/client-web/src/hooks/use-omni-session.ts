@@ -39,6 +39,7 @@ export type OmniSessionStartOverrides = {
   onAssistantFinal?: (text: string) => void;
   onUserTranscriptFinal?: (text: string) => void;
   onRuntimeError?: (message: string) => void;
+  beforeModelAction?: () => Promise<boolean>;
 };
 
 const initialSignals: SessionSignals = {
@@ -74,6 +75,7 @@ const loadBundledReferenceAudio = () => {
 
 export const useOmniSession = (appState: AppState, activeRoutine?: Routine) => {
   const runtimeRef = useRef<SessionRuntime | null>(null);
+  const modelActionGuardRef = useRef<OmniSessionStartOverrides['beforeModelAction']>(undefined);
   const previewStreamRef = useRef<MediaStream | null>(null);
   const assistantDraftRef = useRef("");
   const userDraftRef = useRef("");
@@ -136,6 +138,7 @@ export const useOmniSession = (appState: AppState, activeRoutine?: Routine) => {
     (reason = "user_stop") => {
       runtimeRef.current?.stop(reason);
       runtimeRef.current = null;
+      modelActionGuardRef.current = undefined;
       stopPreview();
       window.speechSynthesis?.cancel();
       localActionSpeechRef.current = false;
@@ -330,6 +333,7 @@ export const useOmniSession = (appState: AppState, activeRoutine?: Routine) => {
         onEnded: () => undefined,
       });
       runtimeRef.current = runtime;
+      modelActionGuardRef.current = overrides?.beforeModelAction;
       const isLocal = provider === "local";
       setSession((current) => ({
         ...current,
@@ -386,8 +390,11 @@ export const useOmniSession = (appState: AppState, activeRoutine?: Routine) => {
       ) {
         return false;
       }
-      localActionSpeechRef.current = appState.provider.provider === "local";
+      const guard = modelActionGuardRef.current;
       try {
+        if (guard && !(await guard())) return false;
+        if (runtimeRef.current !== runtime) return false;
+        localActionSpeechRef.current = appState.provider.provider === "local";
         await runtime.sendTurn({
           messages: [
             {
@@ -405,8 +412,9 @@ export const useOmniSession = (appState: AppState, activeRoutine?: Routine) => {
               ? appState.provider.referenceAudio
               : undefined,
         });
-        return true;
+        return runtimeRef.current === runtime;
       } catch (error) {
+        if (runtimeRef.current !== runtime) return false;
         localActionSpeechRef.current = false;
         setSession((current) => ({
           ...current,

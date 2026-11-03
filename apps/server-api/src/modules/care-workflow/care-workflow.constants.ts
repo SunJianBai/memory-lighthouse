@@ -6,6 +6,7 @@ export const OCCURRENCE_SCHEDULER = Symbol('OCCURRENCE_SCHEDULER');
 
 export const ROUTINE_STATUS = {
   active: 'ACTIVE',
+  paused: 'PAUSED',
   deleted: 'DELETED',
 } as const;
 

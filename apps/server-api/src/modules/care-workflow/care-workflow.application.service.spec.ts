@@ -112,6 +112,7 @@ function harness(options?: {
   const taskActions: Record<string, unknown>[] = [];
   const commandReceipts: Record<string, unknown>[] = [];
   const transaction = {
+    $queryRaw: jest.fn().mockResolvedValue([{ id: 'routine-1' }]),
     companionBinding: {
       findFirst: jest.fn().mockResolvedValue({ id: devicePrincipal.bindingId }),
     },
@@ -207,6 +208,7 @@ function harness(options?: {
     },
     routineOccurrence: {
       findMany: jest.fn().mockResolvedValue([]),
+      findFirst: jest.fn().mockResolvedValue({ routineId: 'routine-1' }),
     },
     $transaction: jest
       .fn()

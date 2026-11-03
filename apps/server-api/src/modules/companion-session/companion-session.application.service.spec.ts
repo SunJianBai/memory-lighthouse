@@ -422,6 +422,11 @@ function lifecycleHarness(
       ),
     },
     routineOccurrence: { findMany: jest.fn(async () => occurrenceRows) },
+    routine: {
+      findMany: jest.fn<
+        () => Promise<Array<{ id: string; version: number; status: string }>>
+      >(async () => []),
+    },
     device: { updateMany: jest.fn(async () => ({ count: 1 })) },
     modelSession,
     modelSessionEvent: { create: jest.fn(async ({ data }) => data) },
@@ -543,6 +548,7 @@ function lifecycleHarness(
     modelLock: prisma.$queryRaw,
     transaction: prisma.$transaction,
     outboxEvent: prisma.outboxEvent,
+    routine: prisma.routine,
     companionSession,
     session: () => storedSession,
     storedModelSession: () => storedModelSession,
@@ -743,6 +749,39 @@ describe('CompanionSessionApplicationService consent boundary', () => {
 });
 
 describe('CompanionSessionApplicationService media lifecycle', () => {
+  it('stops the active model when this recipient routine configuration changed', async () => {
+    const test = lifecycleHarness();
+    const started = await test.start();
+    await test.startModel(started.session.id);
+    test.routine.findMany.mockResolvedValue([
+      { id: 'changed-routine', version: 2, status: 'PAUSED' },
+    ]);
+    await expect(
+      test.service.recordHeartbeat(principal, {
+        activeCompanionSessionId: started.session.id,
+      }),
+    ).resolves.toMatchObject({
+      mediaDirective: 'STOP',
+      reason: 'ROUTINES_CHANGED',
+    });
+    expect(test.routine.findMany).toHaveBeenCalledWith({
+      where: {
+        householdId: principal.householdId,
+        recipientId: principal.recipientId,
+      },
+      select: { id: true, version: true, status: true },
+      orderBy: { id: 'asc' },
+    });
+    expect(test.session()).toMatchObject({
+      status: 'ENDED',
+      endReason: 'ROUTINES_CHANGED',
+    });
+    expect(test.leases.release).toHaveBeenCalledWith(
+      principal.bindingId,
+      expect.objectContaining({ ownerId: started.session.id }),
+    );
+  });
+
   it('blocks a new AI session when a durable remote-media barrier exists', async () => {
     const test = lifecycleHarness();
     test.mediaSecurity.hasRemoteMediaBarrier.mockResolvedValue(true);

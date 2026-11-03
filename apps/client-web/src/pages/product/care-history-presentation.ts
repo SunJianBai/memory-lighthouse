@@ -28,6 +28,10 @@ function label(
 
 export const occurrenceStatusLabel = (value: string) =>
   label(occurrenceLabels, value, "状态未知");
+export const occurrenceClosureLabel = (
+  status: string,
+  reason?: string | null,
+) => (status === "EXPIRED" && reason === "ROUTINE_PAUSED" ? "日程已暂停" : "");
 export const careEventSourceLabel = (value: string) =>
   label(sourceLabels, value, "来源待确认");
 export const careEventTypeLabel = (value: string) =>

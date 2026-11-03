@@ -27,7 +27,7 @@ export async function createTodayCareHarness() {
   if (
     url.protocol !== 'mysql:' ||
     url.hostname !== '127.0.0.1' ||
-    url.port !== '13306' ||
+    !['13306', '23306'].includes(url.port) ||
     url.pathname !== '/lighthouse_iteration_test'
   ) {
     throw new Error('Only the isolated loopback iteration database is allowed');

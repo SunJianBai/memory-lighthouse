@@ -33,6 +33,7 @@ import {
 } from "../../api/family-task-board";
 import { FamilyTaskPanel } from "../../components/FamilyTaskPanel";
 import { CareHistoryPanel } from "../../components/CareHistoryPanel";
+import { RoutineLifecycleDialog } from "./RoutinesApiPage.dialog";
 
 type RoutinePageData = {
   routines: RoutineView[];
@@ -48,6 +49,17 @@ const EMPTY_ROUTINE_PAGE_DATA: RoutinePageData = {
 type HistoryAccessError = { sequence: number; message: string };
 
 export const RoutinesApiPage = () => {
+  const { user } = useAuth();
+  const workspace = useWorkspace();
+  // A new account, binding or epoch must not paint the previous page for one frame.
+  return (
+    <RoutinePageBody
+      key={`${user?.id}:${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}`}
+    />
+  );
+};
+
+const RoutinePageBody = () => {
   const { user } = useAuth();
   const workspace = useWorkspace();
   const [pageState, setPageState] = useState<ScopedPageState<RoutinePageData>>(
@@ -70,6 +82,25 @@ export const RoutinesApiPage = () => {
   const [editingRoutine, setEditingRoutine] = useState<RoutineView | null>(
     null,
   );
+  const [lifecycle, setLifecycle] = useState<{
+    owner: ScopedMutationOwner;
+    routine: RoutineView;
+    action: "pause" | "resume";
+    error: string;
+  } | null>(null);
+  const [notice, setNotice] = useState("");
+  const [needsRoutineRefresh, setNeedsRoutineRefresh] = useState(false);
+  const mutationPending = useRef(false);
+  const lifecycleFocusRoutineId = useRef<string | null>(null);
+  const lifecycleFocusTarget = useRef<HTMLButtonElement | null>(null);
+  const refreshButton = useRef<HTMLButtonElement | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const currentScopeKey = useRef(workspace.workspaceScopeKey);
   currentScopeKey.current = workspace.workspaceScopeKey;
   const scopeIdentity = {
@@ -90,6 +121,14 @@ export const RoutinesApiPage = () => {
     (Boolean(workspace.householdId && workspace.recipientId) &&
       pageState.scopeKey !== workspace.workspaceScopeKey);
   const busyId = pageValueForScope(busyState, workspace.workspaceScopeKey, "");
+  useEffect(() => {
+    if (!lifecycle && !busyId && !loading && lifecycleFocusRoutineId.current) {
+      const target = lifecycleFocusTarget.current;
+      if (target?.isConnected && !target.disabled) target.focus();
+      else refreshButton.current?.focus();
+      lifecycleFocusRoutineId.current = null;
+    }
+  }, [lifecycle, busyId, loading]);
   const error = pageValueForScope(errorState, workspace.workspaceScopeKey, "");
   const historyAccessError = pageValueForScope(
     historyAccessState,
@@ -97,6 +136,9 @@ export const RoutinesApiPage = () => {
     null,
   );
   const formIsCurrent = isScopedMutationOwnerCurrent(formOwner, scopeIdentity);
+  const ownerIsCurrent = (owner: ScopedMutationOwner) =>
+    mounted.current &&
+    isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current);
   const careCommands = useMemo(
     () =>
       new IdempotentCommandRegistry(undefined, {
@@ -110,6 +152,7 @@ export const RoutinesApiPage = () => {
   const denyHistoryAccess = useCallback(
     (owner: { key: string; epoch: number }, message: string) => {
       if (
+        !mounted.current ||
         owner.key !== currentScopeIdentity.current.key ||
         owner.epoch !== currentScopeIdentity.current.epoch
       )
@@ -136,6 +179,7 @@ export const RoutinesApiPage = () => {
 
   const load = useCallback(
     async (refreshHistory = true) => {
+      if (!mounted.current) return false;
       if (!workspace.householdId || !workspace.recipientId) {
         loadRequests.current.invalidate();
         setPageState(
@@ -162,6 +206,7 @@ export const RoutinesApiPage = () => {
       const ownerEpoch = workspace.workspaceScopeEpoch;
       const ownerAccessSequence = accessSequence.current;
       const requestIsCurrent = () =>
+        mounted.current &&
         loadRequests.current.isCurrent(request) &&
         currentScopeKey.current === owner.scopeKey &&
         currentScopeIdentity.current.epoch === ownerEpoch;
@@ -169,9 +214,41 @@ export const RoutinesApiPage = () => {
       setErrorState(createScopedPageState(owner.scopeKey, ""));
       try {
         const [nextRoutines, nextTasks] = await Promise.allSettled([
-          apiClient.request<RoutineView[]>(
-            `/households/${owner.householdId}/care-recipients/${owner.recipientId}/routines`,
-          ),
+          apiClient
+            .request<RoutineView[]>(
+              `/households/${owner.householdId}/care-recipients/${owner.recipientId}/routines?includePaused=true`,
+            )
+            .catch((failure: unknown) => {
+              if (
+                requestIsCurrent() &&
+                failure instanceof ApiError &&
+                [401, 403, 404].includes(failure.status)
+              ) {
+                setLifecycle(null);
+                setFormOpen(false);
+                setFormOwner(null);
+                setEditingRoutine(null);
+                setPageState((current) =>
+                  createScopedPageState(owner.scopeKey, {
+                    ...current.value,
+                    routines: [],
+                    errors: {
+                      ...current.value.errors,
+                      routines: readableError(failure),
+                    },
+                  }),
+                );
+                setErrorState(
+                  createScopedPageState(owner.scopeKey, readableError(failure)),
+                );
+                if (failure.status === 401)
+                  denyHistoryAccess(
+                    { key: owner.scopeKey, epoch: ownerEpoch },
+                    readableError(failure),
+                  );
+              }
+              throw failure;
+            }),
           apiClient
             .request<unknown>(
               `/households/${owner.householdId}/care-recipients/${owner.recipientId}/family-task-board`,
@@ -227,15 +304,33 @@ export const RoutinesApiPage = () => {
               .join("；"),
           ),
         );
-        setPageState(
+        const routineAccessDenied =
+          nextRoutines.status === "rejected" &&
+          nextRoutines.reason instanceof ApiError &&
+          [401, 403, 404].includes(nextRoutines.reason.status);
+        if (routineAccessDenied) {
+          setLifecycle(null);
+          setFormOpen(false);
+          setFormOwner(null);
+          setEditingRoutine(null);
+        }
+        if (nextRoutines.status === "fulfilled") setNeedsRoutineRefresh(false);
+        setPageState((current) =>
           createScopedPageState(owner.scopeKey, {
             routines:
-              nextRoutines.status === "fulfilled" ? nextRoutines.value : [],
+              nextRoutines.status === "fulfilled"
+                ? nextRoutines.value
+                : routineAccessDenied
+                  ? []
+                  : current.scopeKey === owner.scopeKey
+                    ? current.value.routines
+                    : [],
             tasks:
               guardedTasks.status === "fulfilled" ? guardedTasks.value : [],
             errors,
           }),
         );
+        return nextRoutines.status === "fulfilled";
       } catch (loadError) {
         if (requestIsCurrent()) {
           setErrorState(
@@ -248,6 +343,7 @@ export const RoutinesApiPage = () => {
             }),
           );
         }
+        return false;
       } finally {
         if (requestIsCurrent()) {
           setLoadingScopeKey("");
@@ -288,7 +384,8 @@ export const RoutinesApiPage = () => {
   }, [load]);
 
   const saveRoutine = async (input: RoutineFormInput) => {
-    if (busyId) return;
+    if (busyId || loading || mutationPending.current || needsRoutineRefresh)
+      return;
     if (!formIsCurrent) {
       setErrorState(
         createScopedPageState(
@@ -301,62 +398,81 @@ export const RoutinesApiPage = () => {
       return;
     }
     const owner = formOwner;
+    mutationPending.current = true;
     setBusyState(createScopedPageState(owner.scopeKey, "save-routine"));
     setErrorState(createScopedPageState(owner.scopeKey, ""));
+    setNotice("");
+    let accepted = false;
     try {
-      const created = editingRoutine
-        ? await careCommands.execute(
-            JSON.stringify([
-              "routine-update",
-              owner.householdId,
-              editingRoutine.id,
-              editingRoutine.version,
-              input,
-            ]),
-            (idempotencyKey) =>
-              apiClient.request<RoutineView>(
-                `/households/${owner.householdId}/routines/${editingRoutine.id}`,
-                {
-                  method: "PATCH",
-                  headers: { "Idempotency-Key": idempotencyKey },
-                  body: { ...input, version: editingRoutine.version },
-                },
-              ),
-          )
-        : await apiClient.request<RoutineView>(
-            `/households/${owner.householdId}/care-recipients/${owner.recipientId}/routines`,
-            { method: "POST", body: input },
-          );
-      if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
-        return;
-      setPageState((current) => {
-        if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
-          return current;
-        const currentValue =
-          current.scopeKey === owner.scopeKey
-            ? current.value
-            : EMPTY_ROUTINE_PAGE_DATA;
-        return createScopedPageState(owner.scopeKey, {
-          ...currentValue,
-          routines: editingRoutine
-            ? currentValue.routines.map((item) =>
-                item.id === created.id ? created : item,
-              )
-            : [...currentValue.routines, created],
-        });
-      });
+      try {
+        await (editingRoutine
+          ? await careCommands.execute(
+              JSON.stringify([
+                "routine-update",
+                owner.householdId,
+                editingRoutine.id,
+                editingRoutine.version,
+                input,
+              ]),
+              async (idempotencyKey) => {
+                if (!ownerIsCurrent(owner)) throw new Error("工作区已切换");
+                const receipt = await apiClient.request<RoutineView>(
+                  `/households/${owner.householdId}/routines/${editingRoutine.id}`,
+                  {
+                    method: "PATCH",
+                    headers: { "Idempotency-Key": idempotencyKey },
+                    body: { ...input, version: editingRoutine.version },
+                  },
+                );
+                accepted = true;
+                return receipt;
+              },
+            )
+          : await apiClient.request<RoutineView>(
+              `/households/${owner.householdId}/care-recipients/${owner.recipientId}/routines`,
+              { method: "POST", body: input },
+            ));
+      } catch (failure) {
+        if (!accepted) throw failure;
+      }
+      if (!ownerIsCurrent(owner)) return;
       setFormOpen(false);
       setFormOwner(null);
       setEditingRoutine(null);
-      await load();
+      const refreshed = await load();
+      if (ownerIsCurrent(owner)) {
+        setNeedsRoutineRefresh(!refreshed);
+        setNotice(
+          refreshed
+            ? "日程已保存。"
+            : "操作已受理，状态暂未刷新，请刷新后再操作。",
+        );
+      }
     } catch (createError) {
-      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
+      if (ownerIsCurrent(owner)) {
+        if (isRoutineAccessError(createError))
+          clearRoutineAccess(owner, createError);
+        else if (
+          createError instanceof ApiError &&
+          createError.status === 409
+        ) {
+          closeForm();
+          const refreshed = await load(false);
+          if (ownerIsCurrent(owner)) setNeedsRoutineRefresh(!refreshed);
+        }
+        if (!ownerIsCurrent(owner)) return;
         setErrorState(
-          createScopedPageState(owner.scopeKey, readableError(createError)),
+          createScopedPageState(
+            owner.scopeKey,
+            createError instanceof ApiError && createError.status === 409
+              ? "日程已被其他家属更新，请刷新后重试"
+              : readableError(createError),
+          ),
         );
       }
     } finally {
-      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
+      mutationPending.current = false;
+      if (ownerIsCurrent(owner)) {
         setBusyState((current) =>
           current.scopeKey === owner.scopeKey &&
           current.value === "save-routine"
@@ -364,6 +480,144 @@ export const RoutinesApiPage = () => {
             : current,
         );
       }
+    }
+  };
+
+  function isRoutineAccessError(error: unknown): error is ApiError {
+    return error instanceof ApiError && [401, 403, 404].includes(error.status);
+  }
+
+  function clearRoutineAccess(owner: ScopedMutationOwner, failure: ApiError) {
+    if (!ownerIsCurrent(owner)) return;
+    loadRequests.current.invalidate();
+    setLoadingScopeKey("");
+    setLifecycle(null);
+    closeForm();
+    setPageState((current) =>
+      createScopedPageState(owner.scopeKey, {
+        ...current.value,
+        routines: [],
+        errors: { ...current.value.errors, routines: readableError(failure) },
+      }),
+    );
+    if (failure.status === 401)
+      denyHistoryAccess(
+        { key: owner.scopeKey, epoch: owner.scopeEpoch },
+        readableError(failure),
+      );
+    setErrorState(
+      createScopedPageState(owner.scopeKey, readableError(failure)),
+    );
+  }
+
+  const startLifecycle = (routine: RoutineView) => {
+    if (
+      busyId ||
+      loading ||
+      mutationPending.current ||
+      needsRoutineRefresh ||
+      !workspace.householdId ||
+      !workspace.recipientId ||
+      !["ACTIVE", "PAUSED"].includes(routine.status)
+    )
+      return;
+    closeForm();
+    setNotice("");
+    setErrorState(createScopedPageState(workspace.workspaceScopeKey, ""));
+    setLifecycle({
+      owner: createScopedMutationOwner(
+        scopeIdentity,
+        workspace.householdId,
+        workspace.recipientId,
+      ),
+      routine,
+      action: routine.status === "ACTIVE" ? "pause" : "resume",
+      error: "",
+    });
+  };
+
+  const submitLifecycle = async () => {
+    if (
+      !lifecycle ||
+      busyId ||
+      mutationPending.current ||
+      !ownerIsCurrent(lifecycle.owner)
+    )
+      return;
+    const { owner, routine, action } = lifecycle;
+    mutationPending.current = true;
+    setBusyState(createScopedPageState(owner.scopeKey, routine.id));
+    setLifecycle({ ...lifecycle, error: "" });
+    let accepted = false;
+    try {
+      try {
+        await careCommands.execute(
+          JSON.stringify([
+            "routine-lifecycle",
+            user?.id,
+            owner.householdId,
+            owner.recipientId,
+            routine.id,
+            action,
+            routine.version,
+          ]),
+          async (idempotencyKey) => {
+            // The registry may await storage or retry a lost response: recheck the owner each time.
+            if (!ownerIsCurrent(owner)) throw new Error("工作区已切换");
+            const receipt = await apiClient.request<RoutineView>(
+              `/households/${owner.householdId}/routines/${routine.id}/${action}`,
+              {
+                method: "POST",
+                headers: { "Idempotency-Key": idempotencyKey },
+                body: { version: routine.version },
+              },
+            );
+            accepted = true;
+            return receipt;
+          },
+        );
+      } catch (failure) {
+        // Receipt cleanup can fail after a successful server response; do not describe that as a failed mutation.
+        if (!accepted) throw failure;
+      }
+      if (!ownerIsCurrent(owner)) return;
+      setLifecycle(null);
+      setNotice("操作已受理，正在刷新状态…");
+      // A replay receipt describes the original command, not necessarily the current version.
+      const refreshed = await load();
+      if (!ownerIsCurrent(owner)) return;
+      setNeedsRoutineRefresh(!refreshed);
+      setNotice(
+        refreshed
+          ? action === "pause"
+            ? "暂停操作已受理，已刷新当前日程。"
+            : "恢复操作已受理，已刷新当前日程。"
+          : "操作已受理，状态暂未刷新，请刷新后再操作。",
+      );
+    } catch (failure) {
+      if (!ownerIsCurrent(owner)) return;
+      if (isRoutineAccessError(failure)) clearRoutineAccess(owner, failure);
+      else if (
+        failure instanceof ApiError &&
+        failure.code === "ROUTINE_NO_FUTURE_OCCURRENCE"
+      ) {
+        setLifecycle({ ...lifecycle, error: readableError(failure) });
+      } else if (failure instanceof ApiError && failure.status === 409) {
+        setLifecycle(null);
+        const refreshed = await load(false);
+        if (!ownerIsCurrent(owner)) return;
+        setNeedsRoutineRefresh(!refreshed);
+        setErrorState(
+          createScopedPageState(
+            owner.scopeKey,
+            "日程已被其他家属更新，请刷新后重试",
+          ),
+        );
+      } else setLifecycle({ ...lifecycle, error: readableError(failure) });
+    } finally {
+      mutationPending.current = false;
+      if (ownerIsCurrent(owner))
+        setBusyState(createScopedPageState(owner.scopeKey, ""));
     }
   };
 
@@ -406,14 +660,12 @@ export const RoutinesApiPage = () => {
             },
           ),
       );
-      if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
-        return;
+      if (!ownerIsCurrent(owner)) return;
       await load();
     } catch (actionError) {
-      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
+      if (ownerIsCurrent(owner)) {
         await load();
-        if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
-          return;
+        if (!ownerIsCurrent(owner)) return;
         setErrorState(
           createScopedPageState(
             owner.scopeKey,
@@ -422,7 +674,7 @@ export const RoutinesApiPage = () => {
         );
       }
     } finally {
-      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
+      if (ownerIsCurrent(owner)) {
         setBusyState((current) =>
           current.scopeKey === owner.scopeKey && current.value === task.id
             ? createScopedPageState(owner.scopeKey, "")
@@ -472,17 +724,24 @@ export const RoutinesApiPage = () => {
           },
         ),
       );
-      if (!isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current))
-        return;
+      if (!ownerIsCurrent(owner)) return;
       await load();
     } catch (verifyError) {
-      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
+      if (ownerIsCurrent(owner)) {
+        if (
+          verifyError instanceof ApiError &&
+          [401, 403, 404].includes(verifyError.status)
+        )
+          denyHistoryAccess(
+            { key: owner.scopeKey, epoch: owner.scopeEpoch },
+            readableError(verifyError),
+          );
         setErrorState(
           createScopedPageState(owner.scopeKey, readableError(verifyError)),
         );
       }
     } finally {
-      if (isScopedMutationOwnerCurrent(owner, currentScopeIdentity.current)) {
+      if (ownerIsCurrent(owner)) {
         setBusyState((current) =>
           current.scopeKey === owner.scopeKey && current.value === occurrence.id
             ? createScopedPageState(owner.scopeKey, "")
@@ -493,6 +752,8 @@ export const RoutinesApiPage = () => {
   };
 
   const toggleForm = () => {
+    if (busyId || loading || mutationPending.current || needsRoutineRefresh)
+      return;
     if (formOpen && formIsCurrent) {
       setFormOpen(false);
       setFormOwner(null);
@@ -518,7 +779,15 @@ export const RoutinesApiPage = () => {
   };
 
   const editRoutine = (routine: RoutineView) => {
-    if (busyId || !workspace.householdId || !workspace.recipientId) return;
+    if (
+      busyId ||
+      loading ||
+      mutationPending.current ||
+      needsRoutineRefresh ||
+      !workspace.householdId ||
+      !workspace.recipientId
+    )
+      return;
     setFormOwner(
       createScopedMutationOwner(
         scopeIdentity,
@@ -542,146 +811,222 @@ export const RoutinesApiPage = () => {
   }
 
   return (
-    <div className="resource-page">
-      <section className="resource-toolbar">
-        <div>
-          <strong>日程与家庭待办</strong>
-          <p>安排提醒并处理待办事项。</p>
-        </div>
-        <div>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={loading || Boolean(busyId)}
-            onClick={() => void load()}
-          >
-            <RefreshCw aria-hidden="true" size={18} /> 刷新
-          </button>
-          <button
-            className="primary-button"
-            type="button"
-            onClick={toggleForm}
-            disabled={Boolean(busyId)}
-            aria-expanded={formOpen && formIsCurrent}
-          >
-            <Plus aria-hidden="true" size={18} /> 新建日程
-          </button>
-        </div>
-      </section>
-
-      {formOpen && formIsCurrent && (
-        <RoutineEditor
-          key={`${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}:${editingRoutine?.id ?? "new"}`}
-          routine={editingRoutine}
-          timezone={workspace.recipient?.timezone ?? "Asia/Shanghai"}
-          busy={Boolean(busyId)}
-          error={error}
-          onSave={(input) => void saveRoutine(input)}
-          onCancel={closeForm}
-        />
-      )}
-
-      {error && !(formOpen && formIsCurrent) && (
-        <div className="inline-alert danger" role="alert">
-          <span>{error}</span>
-          <button type="button" onClick={() => void load()}>
-            重试
-          </button>
-        </div>
-      )}
-
-      <div className="routine-task-columns">
-        <section className="panel-card">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">日程</p>
-              <h2>已启用规则</h2>
-            </div>
-            <span className="count-badge">
-              {resourceErrors.routines ? "—" : routines.length}
-            </span>
+    <>
+      <div className="resource-page" inert={Boolean(lifecycle)}>
+        <section className="resource-toolbar">
+          <div>
+            <strong>日程与家庭待办</strong>
+            <p>安排提醒并处理待办事项。</p>
           </div>
-          {loading ? (
-            <div className="list-loading">正在加载日程…</div>
-          ) : resourceErrors.routines ? (
-            <div className="compact-empty" role="status">
-              日程未能加载，请核对权限或刷新重试。
-            </div>
-          ) : routines.length === 0 ? (
-            <div className="compact-empty">
-              <CalendarClock aria-hidden="true" size={28} />
-              <strong>暂无日程</strong>
-              <p>新建日程后，提醒将按设定时间生成。</p>
-            </div>
-          ) : (
-            <div className="api-routine-list">
-              {routines.map((routine) => (
-                <article key={routine.id}>
-                  <time>
-                    {showTime(routine.schedules[0]?.localTimeMinutes ?? 0)}
-                  </time>
-                  <div>
-                    <strong>{routine.title}</strong>
-                    <p>{routine.instructions}</p>
-                    <p className="routine-rule-summary">
-                      {scheduleSummary(routine.schedules[0])}
-                    </p>
-                    <small>
-                      {routine.contentProvenance === "FAMILY_ENTERED_VERBATIM"
-                        ? "家属录入"
-                        : routine.contentProvenance}
-                    </small>
-                  </div>
-                  <div className="routine-card-actions">
-                    <span className="status-pill success">
-                      {routine.status === "ACTIVE" ? "已启用" : "已停用"}
-                    </span>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      disabled={Boolean(busyId)}
-                      aria-label={`编辑日程：${routine.title}`}
-                      onClick={() => editRoutine(routine)}
-                    >
-                      编辑
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          )}
+          <div>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={loading || Boolean(busyId)}
+              ref={refreshButton}
+              onClick={() => void load()}
+            >
+              <RefreshCw aria-hidden="true" size={18} /> 刷新
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={toggleForm}
+              disabled={Boolean(busyId) || loading || needsRoutineRefresh}
+              aria-expanded={formOpen && formIsCurrent}
+            >
+              <Plus aria-hidden="true" size={18} /> 新建日程
+            </button>
+          </div>
         </section>
 
-        <FamilyTaskPanel
-          key={`${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}`}
-          tasks={tasks}
-          loading={loading}
-          error={resourceErrors.tasks ?? ""}
-          busyId={busyId}
-          timezone={workspace.recipient?.timezone ?? "Asia/Shanghai"}
-          onAction={(task, action) => void taskAction(task, action)}
-        />
-      </div>
+        {notice && (
+          <div className="inline-alert routine-operation-notice" role="status">
+            <span>{notice}</span>
+            {needsRoutineRefresh && (
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={loading || Boolean(busyId)}
+                onClick={async () => {
+                  if (await load()) setNotice("已刷新当前日程。");
+                }}
+              >
+                刷新状态
+              </button>
+            )}
+          </div>
+        )}
 
-      <div className="routine-task-columns">
-        {(["occurrences", "events"] as const).map((kind) => (
-          <CareHistoryPanel
-            key={`${user?.id}:${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}:${workspace.recipient?.timezone}:${kind}`}
-            kind={kind}
-            householdId={workspace.householdId!}
-            recipientId={workspace.recipientId!}
-            timezone={workspace.recipient?.timezone}
-            revision={historyRevision}
-            busyId={busyId}
-            onVerify={(item, verified) => void verifyOccurrence(item, verified)}
-            accessError={historyAccessError}
-            onRetryAccess={() => void load()}
-            onAccessDenied={(message) =>
-              denyHistoryAccess(scopeIdentity, message)
-            }
+        {formOpen && formIsCurrent && (
+          <RoutineEditor
+            key={`${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}:${editingRoutine?.id ?? "new"}`}
+            routine={editingRoutine}
+            timezone={workspace.recipient?.timezone ?? "Asia/Shanghai"}
+            busy={Boolean(busyId) || loading || needsRoutineRefresh}
+            error={error}
+            onSave={(input) => void saveRoutine(input)}
+            onCancel={closeForm}
           />
-        ))}
+        )}
+
+        {error && !(formOpen && formIsCurrent) && (
+          <div className="inline-alert danger" role="alert">
+            <span>{error}</span>
+            <button
+              type="button"
+              disabled={Boolean(busyId) || loading}
+              onClick={() => void load()}
+            >
+              重试
+            </button>
+          </div>
+        )}
+
+        <div className="routine-task-columns">
+          <section className="panel-card">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">日程</p>
+                <h2>日程安排</h2>
+              </div>
+              <span className="count-badge">
+                {resourceErrors.routines ? "—" : routines.length}
+              </span>
+            </div>
+            {loading ? (
+              <div className="list-loading">正在加载日程…</div>
+            ) : resourceErrors.routines && routines.length === 0 ? (
+              <div className="compact-empty" role="status">
+                日程未能加载，请核对权限或刷新重试。
+              </div>
+            ) : routines.length === 0 ? (
+              <div className="compact-empty">
+                <CalendarClock aria-hidden="true" size={28} />
+                <strong>暂无日程</strong>
+                <p>新建日程后，提醒将按设定时间生成。</p>
+              </div>
+            ) : (
+              <div className="api-routine-list">
+                {routines.map((routine) => (
+                  <article key={routine.id}>
+                    <time>
+                      {showTime(routine.schedules[0]?.localTimeMinutes ?? 0)}
+                    </time>
+                    <div>
+                      <strong>{routine.title}</strong>
+                      <p>{routine.instructions}</p>
+                      <p className="routine-rule-summary">
+                        {scheduleSummary(routine.schedules[0])}
+                      </p>
+                      <small>
+                        {routine.contentProvenance === "FAMILY_ENTERED_VERBATIM"
+                          ? "家属录入"
+                          : routine.contentProvenance}
+                      </small>
+                    </div>
+                    <div className="routine-card-actions">
+                      <span
+                        className={`status-pill ${routine.status === "ACTIVE" ? "success" : "neutral"}`}
+                      >
+                        {routine.status === "ACTIVE"
+                          ? "已启用"
+                          : routine.status === "PAUSED"
+                            ? "已暂停"
+                            : routine.status === "DELETED"
+                              ? "已删除"
+                              : "状态未知"}
+                      </span>
+                      {needsRoutineRefresh && <small>状态待刷新</small>}
+                      {["ACTIVE", "PAUSED"].includes(routine.status) && (
+                        <>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            disabled={Boolean(busyId) || needsRoutineRefresh}
+                            aria-label={`编辑日程：${routine.title}`}
+                            onClick={() => editRoutine(routine)}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            disabled={Boolean(busyId) || needsRoutineRefresh}
+                            ref={(node) => {
+                              if (
+                                lifecycleFocusRoutineId.current === routine.id
+                              )
+                                lifecycleFocusTarget.current = node;
+                            }}
+                            aria-label={`${routine.status === "ACTIVE" ? "暂停" : "恢复"}日程：${routine.title}`}
+                            onClick={(event) => {
+                              lifecycleFocusRoutineId.current = routine.id;
+                              lifecycleFocusTarget.current =
+                                event.currentTarget;
+                              startLifecycle(routine);
+                            }}
+                          >
+                            {routine.status === "ACTIVE" ? "暂停" : "恢复"}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <FamilyTaskPanel
+            key={`${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}`}
+            tasks={tasks}
+            loading={loading}
+            error={resourceErrors.tasks ?? ""}
+            busyId={busyId}
+            timezone={workspace.recipient?.timezone ?? "Asia/Shanghai"}
+            onAction={(task, action) => void taskAction(task, action)}
+          />
+        </div>
+
+        <div className="routine-task-columns">
+          {(["occurrences", "events"] as const).map((kind) => (
+            <CareHistoryPanel
+              key={`${user?.id}:${workspace.workspaceScopeKey}:${workspace.workspaceScopeEpoch}:${workspace.recipient?.timezone}:${kind}`}
+              kind={kind}
+              householdId={workspace.householdId!}
+              recipientId={workspace.recipientId!}
+              timezone={workspace.recipient?.timezone}
+              revision={historyRevision}
+              busyId={busyId}
+              onVerify={(item, verified) =>
+                void verifyOccurrence(item, verified)
+              }
+              accessError={historyAccessError}
+              onRetryAccess={() => void load()}
+              onAccessDenied={(message) =>
+                denyHistoryAccess(scopeIdentity, message)
+              }
+            />
+          ))}
+        </div>
       </div>
-    </div>
+      {lifecycle && ownerIsCurrent(lifecycle.owner) && (
+        <RoutineLifecycleDialog
+          routine={lifecycle.routine}
+          action={lifecycle.action}
+          busy={Boolean(busyId)}
+          error={lifecycle.error}
+          onConfirm={() => void submitLifecycle()}
+          onCancel={() => setLifecycle(null)}
+          onEdit={() => {
+            const routine = lifecycle.routine;
+            lifecycleFocusRoutineId.current = null;
+            setLifecycle(null);
+            editRoutine(routine);
+          }}
+        />
+      )}
+    </>
   );
 };

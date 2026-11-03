@@ -187,6 +187,7 @@ fun LighthouseRoute(
             createRoutine = viewModel::createRoutine,
             updateRoutine = viewModel::updateRoutine,
             deleteRoutine = viewModel::deleteRoutine,
+            setRoutinePaused = viewModel::setRoutinePaused,
             verifyOccurrence = viewModel::verifyOccurrence,
             queryCareHistory = viewModel::queryCareHistory,
             loadMoreCareHistory = viewModel::loadMoreCareHistory,
@@ -291,9 +292,9 @@ fun LighthouseRoute(
             }
             CompanionMediaStopReason.SERVER_DIRECTIVE -> {
                 try {
-                    val stoppedCurrent = miniCpmViewModel.stopForServerDirective(stopping.sessionId)
+                    val stoppedCurrent = miniCpmViewModel.stopForServerDirective(stopping.sessionId, stopping.directiveReason)
                     if (stoppedCurrent) {
-                        viewModel.closeAiCompanion()
+                        viewModel.closeAiCompanionForServerDirective(stopping.directiveReason)
                     }
                     viewModel.completeLocalCompanionStop(stopping.requestId)
                 } catch (error: Throwable) {

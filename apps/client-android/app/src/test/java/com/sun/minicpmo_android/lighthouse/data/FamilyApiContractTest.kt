@@ -15,6 +15,17 @@ import org.junit.Test
 
 class FamilyApiContractTest {
     @Test
+    fun routineManagementOptsIntoPausedAndLifecycleCarriesOnlyVersion() {
+        assertEquals("households/h/care-recipients/r/routines?includePaused=true", FamilyApiContract.routinesPath("h", "r", includePaused = true))
+        assertEquals("households/h/care-recipients/r/routines", FamilyApiContract.routinesPath("h", "r"))
+        assertEquals("households/h/routines/rule/pause", FamilyApiContract.routineLifecyclePath("h", "rule", pause = true))
+        assertEquals("households/h/routines/rule/resume", FamilyApiContract.routineLifecyclePath("h", "rule", pause = false))
+        val body = FamilyApiContract.routineLifecycleBody(7)
+        assertEquals(7, body.getInt("version"))
+        assertEquals(1, body.length())
+    }
+
+    @Test
     fun householdAndRecipientCreationTrimInputAndOmitBlankOptionalFields() {
         val household = FamilyApiContract.createHouseholdBody("  向阳之家  ", " Asia/Shanghai ")
         assertEquals("向阳之家", household.getString("name"))

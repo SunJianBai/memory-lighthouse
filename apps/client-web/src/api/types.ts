@@ -137,6 +137,7 @@ export type RoutineScheduleView = {
   graceMinutes: number;
   familyNoticeMinutes: number;
   scheduleVersion: number;
+  effectiveFromUtc?: string | null;
 };
 
 export type RoutineView = {
@@ -172,6 +173,7 @@ export type OccurrenceView = {
   confirmationDeadlineAt: string | null;
   escalationAt: string | null;
   completedAt: string | null;
+  closureReason?: string | null;
   version: number;
 };
 

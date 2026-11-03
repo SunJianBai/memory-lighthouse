@@ -160,8 +160,8 @@ export type AgentAction =
   | { type: "SESSION_STARTED"; at: string }
   | { type: "ROUTINE_DUE"; routineId: string; at: string }
   | { type: "REMINDER_DELIVERED"; at: string }
-  | { type: "USER_CONFIRMED"; at: string }
-  | { type: "CONFIRMATION_TIMEOUT"; at: string }
-  | { type: "FAMILY_REQUESTED"; at: string }
+  | { type: "USER_CONFIRMED"; routineId: string; at: string }
+  | { type: "CONFIRMATION_TIMEOUT"; routineId: string; at: string }
+  | { type: "FAMILY_REQUESTED"; routineId: string | undefined; at: string }
   | { type: "FAMILY_ACKNOWLEDGED"; at: string }
   | { type: "SESSION_ENDED"; at: string };

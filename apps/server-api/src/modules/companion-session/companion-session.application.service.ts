@@ -216,7 +216,7 @@ export class CompanionSessionApplicationService {
         bindingId: binding.id,
         status: COMPANION_SESSION_STATUS.active,
       },
-      select: { id: true, mode: true },
+      select: { id: true, mode: true, routineConfigurationHash: true },
     });
 
     if (details.activeCompanionSessionId) {
@@ -261,6 +261,15 @@ export class CompanionSessionApplicationService {
       const reason = `CONSENT_REVOKED_${missingScope}`;
       await this.endCompanionSession(principal, active.id, reason);
       return this.stopHeartbeat(now, reason);
+    }
+
+    const currentRoutines = await this.routineConfigurationHash(binding);
+    if (
+      !active.routineConfigurationHash ||
+      !Buffer.from(active.routineConfigurationHash).equals(currentRoutines)
+    ) {
+      await this.endCompanionSession(principal, active.id, 'ROUTINES_CHANGED');
+      return this.stopHeartbeat(now, 'ROUTINES_CHANGED');
     }
 
     const activeOwner = this.aiLeaseOwner(active.id);
@@ -314,6 +323,10 @@ export class CompanionSessionApplicationService {
       this.requireConsent(consent, scope);
     }
 
+    // Capture before the care snapshot. A concurrent configuration change can
+    // invalidate this session, never bless an already-stale model context.
+    const routineConfigurationHash =
+      await this.routineConfigurationHash(binding);
     const careSnapshot = await this.buildCareSnapshot(binding, consent);
     const careSnapshotHash = this.snapshotHash(careSnapshot);
     const sessionId = deterministicUlid(
@@ -425,6 +438,7 @@ export class CompanionSessionApplicationService {
             mode: command.mode,
             status: COMPANION_SESSION_STATUS.active,
             careSnapshotHash: Uint8Array.from(careSnapshotHash),
+            routineConfigurationHash: Uint8Array.from(routineConfigurationHash),
             consentSnapshotJson:
               currentConsent as unknown as Prisma.InputJsonValue,
             startedAt: now,
@@ -512,6 +526,19 @@ export class CompanionSessionApplicationService {
       throw new CompanionConsentRequiredException(missingScope);
     }
     const binding = await this.requireBindingContext(command.principal);
+    if (
+      !companion.routineConfigurationHash ||
+      !Buffer.from(companion.routineConfigurationHash).equals(
+        await this.routineConfigurationHash(binding),
+      )
+    ) {
+      await this.endCompanionSession(
+        command.principal,
+        companion.id,
+        'ROUTINES_CHANGED',
+      );
+      throw new CareSnapshotChangedException();
+    }
     const careSnapshot = await this.buildCareSnapshot(binding, consent);
     if (
       !Buffer.from(companion.careSnapshotHash).equals(
@@ -1638,6 +1665,21 @@ export class CompanionSessionApplicationService {
       throw new InvalidIdempotencyKeyException();
     }
     return normalized;
+  }
+
+  private async routineConfigurationHash(binding: {
+    householdId: string;
+    recipientId: string;
+  }): Promise<Buffer> {
+    const routines = await this.prisma.routine.findMany({
+      where: {
+        householdId: binding.householdId,
+        recipientId: binding.recipientId,
+      },
+      select: { id: true, version: true, status: true },
+      orderBy: { id: 'asc' },
+    });
+    return createHash('sha256').update(JSON.stringify(routines)).digest();
   }
 
   private snapshotHash(snapshot: CareSnapshot): Buffer {

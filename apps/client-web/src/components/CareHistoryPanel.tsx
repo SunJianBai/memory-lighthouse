@@ -15,6 +15,7 @@ import {
   careHistoryTimezoneLabel,
   formatCareHistoryTime,
   occurrenceStatusLabel,
+  occurrenceClosureLabel,
 } from "../pages/product/care-history-presentation";
 
 function HistoryTime({
@@ -268,6 +269,9 @@ export function CareHistoryPanel({
                           {occurrenceStatusLabel(occurrence.status)}
                         </span>
                         <strong>{occurrence.routineTitle}</strong>
+                        {occurrenceClosureLabel(occurrence.status, occurrence.closureReason) && (
+                          <p>{occurrenceClosureLabel(occurrence.status, occurrence.closureReason)}</p>
+                        )}
                         <p>
                           <HistoryTime
                             value={occurrence.scheduledAtUtc}

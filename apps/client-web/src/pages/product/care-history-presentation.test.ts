@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   occurrenceStatusLabel,
+  occurrenceClosureLabel,
   careEventSourceLabel,
   careEventTypeLabel,
   careEventSeverityLabel,
@@ -9,6 +10,15 @@ import {
 } from "./care-history-presentation";
 
 describe("care history presentation", () => {
+  it("adds a pause reason only to explicitly pause-closed occurrences", () => {
+    expect(occurrenceClosureLabel("EXPIRED", "ROUTINE_PAUSED")).toBe(
+      "日程已暂停",
+    );
+    for (const reason of [undefined, null, "", "NEW_REASON", "constructor"])
+      expect(occurrenceClosureLabel("EXPIRED", reason)).toBe("");
+    expect(occurrenceClosureLabel("CONFIRMED", "ROUTINE_PAUSED")).toBe("");
+    expect(occurrenceStatusLabel("EXPIRED")).toBe("已关闭");
+  });
   it("labels known states without treating closure as completion", () => {
     expect(
       [

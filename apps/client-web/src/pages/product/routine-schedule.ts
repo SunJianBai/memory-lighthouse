@@ -19,7 +19,7 @@ export const repeatOptions = [
 export type RepeatMode = (typeof repeatOptions)[number]["value"];
 export type RoutineScheduleInput = Omit<
   RoutineScheduleView,
-  "id" | "scheduleVersion"
+  "id" | "scheduleVersion" | "effectiveFromUtc"
 >;
 export type RoutineFormInput = {
   type: string;

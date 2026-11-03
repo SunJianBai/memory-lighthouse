@@ -162,15 +162,19 @@ class MainViewModel(
     }
 
     /** A STOP heartbeat only owns the exact model session that sent it. */
-    fun stopForServerDirective(expectedCompanionSessionId: String?): Boolean {
+    fun stopForServerDirective(expectedCompanionSessionId: String?, reason: String? = null): Boolean {
         val expected = expectedCompanionSessionId ?: return false
-        val connection = stopLocalCompanionForHandoff(expected) ?: return false
+        val connection = stopLocalCompanionForHandoff(
+            expected,
+            if (reason == "ROUTINES_CHANGED") "日程已更新，请重新开始陪伴" else "陪伴已停止，请重新开始",
+        ) ?: return false
         companionBridge?.acknowledgeServerStop(connection)
         return true
     }
 
     private fun stopLocalCompanionForHandoff(
         expectedCompanionSessionId: String? = null,
+        statusText: String = "正在切换到家属通话",
     ): CompanionModelConnection? {
         val connection = synchronized(mediaStateLock) {
             val current = companionConnection
@@ -189,7 +193,7 @@ class MainViewModel(
                 current.copy(
                     phase = SessionPhase.STOPPED,
                     duplexActivity = DuplexActivity.READY,
-                    statusText = "正在切换到家属通话",
+                    statusText = statusText,
                     queuePosition = null,
                     queueWaitSeconds = null,
                     sessionId = null,

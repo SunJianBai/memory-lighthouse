@@ -10,9 +10,10 @@ const fixture = vi.hoisted(() => ({
   recipientId: "elder",
   epoch: 1,
   timezone: "Asia/Shanghai",
+  userId: "user",
 }));
 vi.mock("../../auth/auth-context", () => ({
-  useAuth: () => ({ user: { id: "user" } }),
+  useAuth: () => ({ user: { id: fixture.userId } }),
 }));
 vi.mock("../../workspace/workspace-context", () => ({
   useWorkspace: () => ({
@@ -37,6 +38,7 @@ describe("independent routine and task loading", () => {
     fixture.recipientId = "elder";
     fixture.epoch = 1;
     fixture.timezone = "Asia/Shanghai";
+    fixture.userId = "user";
     localStorage.clear();
     container = document.createElement("div");
     document.body.append(container);
@@ -114,6 +116,447 @@ describe("independent routine and task loading", () => {
     from: null,
     to: null,
   });
+  function routineApi(
+    command: (
+      path: string,
+      options: {
+        method?: string;
+        body?: Record<string, unknown>;
+        headers?: Record<string, string>;
+      },
+    ) => Promise<unknown>,
+    read = () => [original],
+  ) {
+    fixture.request.mockImplementation(async (path: string, options = {}) => {
+      if (options.method) return command(path, options);
+      if (path.split("?")[0].endsWith("/routines")) return read();
+      if (path.endsWith("/family-task-board"))
+        return {
+          householdId: "home",
+          recipientId: fixture.recipientId,
+          tasks: [],
+        };
+      return history([]);
+    });
+  }
+  it("loads paused rules, confirms lifecycle changes and preserves paused editing", async () => {
+    let stored = original;
+    routineApi(
+      async (path, options) => {
+        stored = {
+          ...stored,
+          version: stored.version + 1,
+          ...(options.method === "PATCH" ? options.body : {}),
+          status: path.endsWith("/pause")
+            ? "PAUSED"
+            : path.endsWith("/resume")
+              ? "ACTIVE"
+              : stored.status,
+        };
+        return stored;
+      },
+      () => [stored],
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    expect(fixture.request).toHaveBeenCalledWith(
+      "/households/home/care-recipients/elder/routines?includePaused=true",
+    );
+    expect(container.textContent).toContain("日程安排");
+    await click("暂停");
+    const dialog = container.querySelector("[role='dialog']")!;
+    expect(dialog.textContent).toContain("暂停这个日程？");
+    expect(dialog.textContent).toContain("待家属核验记录和已有待办会保留");
+    expect(dialog.textContent).toContain("设备同步日程更新后");
+    await click("暂停日程");
+    await settle(() => expect(container.textContent).toContain("已暂停"));
+    expect(fixture.request).toHaveBeenCalledWith(
+      "/households/home/routines/routine/pause",
+      expect.objectContaining({
+        method: "POST",
+        body: { version: 3 },
+        headers: { "Idempotency-Key": expect.any(String) },
+      }),
+    );
+    expect(
+      container.querySelector(".api-routine-list .status-pill")?.className,
+    ).toContain("neutral");
+    await click("编辑");
+    expect(container.textContent).toContain("保存后仍保持暂停");
+    await field("标题", "暂停中修改的散步");
+    await click("保存日程");
+    await settle(() => expect(container.querySelector("form")).toBeNull());
+    expect(container.textContent).toContain("已暂停");
+    await click("恢复");
+    expect(container.querySelector("[role='dialog']")?.textContent).toContain(
+      "不补发暂停期间的提醒",
+    );
+    await click("恢复日程");
+    await settle(() => expect(container.textContent).toContain("已启用"));
+  });
+  it("cancels by Escape and returns focus without sending a command", async () => {
+    routineApi(async () => original);
+    await act(async () => root.render(<RoutinesApiPage />));
+    const trigger = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "暂停",
+    )!;
+    trigger.focus();
+    await click("暂停");
+    expect(
+      container
+        .querySelector("[role='dialog']")
+        ?.contains(document.activeElement),
+    ).toBe(true);
+    await act(async () =>
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+    expect(container.querySelector("[role='dialog']")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(
+      fixture.request.mock.calls.some(([, options]) => options?.method),
+    ).toBe(false);
+  });
+  it("keeps the history date and status filter after pausing", async () => {
+    let stored = original;
+    routineApi(
+      async () => {
+        stored = { ...original, status: "PAUSED" };
+        return stored;
+      },
+      () => [stored],
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("查询历史");
+    await field("开始日期", "2026-08-01");
+    await field("结束日期", "2026-08-02");
+    await field("状态", "EXPIRED");
+    await click("查询");
+    await click("暂停");
+    await click("暂停日程");
+    await settle(() => expect(container.textContent).toContain("已暂停"));
+    expect(
+      fixture.request.mock.calls
+        .filter(([path]) => path.includes("/occurrences/history?"))
+        .at(-1)?.[0],
+    ).toContain("startDate=2026-08-01&endDate=2026-08-02&status=EXPIRED");
+    expect(container.textContent).toContain("2026-08-01 至 2026-08-02");
+  });
+  it("discards an old successful receipt and shows the authoritative current version", async () => {
+    let replayed = false;
+    routineApi(
+      async () => {
+        replayed = true;
+        return { ...original, status: "PAUSED", version: 4 };
+      },
+      () => [
+        replayed
+          ? { ...original, title: "另一家属已经恢复", version: 6 }
+          : original,
+      ],
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("暂停");
+    await click("暂停日程");
+    await settle(() =>
+      expect(container.textContent).toContain("另一家属已经恢复"),
+    );
+    expect(container.textContent).toContain("已启用");
+    expect(container.textContent).not.toContain("已暂停");
+  });
+  it("does not send an automatic retry after the original workspace unmounts", async () => {
+    let reject!: (reason: unknown) => void;
+    const response = new Promise((_, rejectResponse) => {
+      reject = rejectResponse;
+    });
+    routineApi(async () => response);
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("暂停");
+    await click("暂停日程");
+    await settle(() =>
+      expect(
+        fixture.request.mock.calls.some(
+          ([, options]) => options?.method === "POST",
+        ),
+      ).toBe(true),
+    );
+    fixture.epoch++;
+    await act(async () => root.render(<RoutinesApiPage />));
+    await act(async () => reject(new NetworkError()));
+    await settle(() =>
+      expect(
+        fixture.request.mock.calls.filter(
+          ([, options]) => options?.method === "POST",
+        ),
+      ).toHaveLength(1),
+    );
+    expect(container.textContent).not.toContain("无法连接服务器");
+  });
+  it("uses neutral unknown state and offers no edit, pause or resume", async () => {
+    routineApi(
+      async () => original,
+      () => [{ ...original, status: "SOMETHING_NEW" }],
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    const card = container.querySelector(".api-routine-list")!;
+    expect(card.textContent).toContain("状态未知");
+    expect(card.querySelectorAll("button")).toHaveLength(0);
+  });
+  it("keeps the same durable key for manual retries and retains the authorized view", async () => {
+    const keys: string[] = [];
+    let fail = true;
+    let stored = original;
+    routineApi(
+      async (_, options) => {
+        keys.push(options.headers!["Idempotency-Key"]);
+        if (fail) throw new NetworkError();
+        stored = { ...original, status: "PAUSED", version: 4 };
+        return stored;
+      },
+      () => [stored],
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("暂停");
+    await click("暂停日程");
+    await settle(() =>
+      expect(container.querySelector("[role='dialog']")?.textContent).toContain(
+        "无法连接服务器",
+      ),
+    );
+    expect(container.textContent).toContain(original.title);
+    fail = false;
+    await click("暂停日程");
+    await settle(() => expect(container.textContent).toContain("已暂停"));
+    expect(keys).toHaveLength(3);
+    expect(new Set(keys).size).toBe(1);
+    expect(keys[0]).not.toBe("");
+  });
+  it("does not replay a successful command when the authority refresh fails", async () => {
+    let accepted = false;
+    routineApi(
+      async () => {
+        accepted = true;
+        return { ...original, status: "PAUSED" };
+      },
+      () => {
+        if (accepted) throw new NetworkError();
+        return [original];
+      },
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("暂停");
+    await click("暂停日程");
+    await settle(() =>
+      expect(container.textContent).toContain("操作已受理，状态暂未刷新"),
+    );
+    expect(container.querySelector("[role='dialog']")).toBeNull();
+    expect(container.textContent).toContain(original.title);
+    expect(
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "暂停",
+      )?.disabled,
+    ).toBe(true);
+    await click("刷新状态");
+    expect(
+      fixture.request.mock.calls.filter(([, options]) => options?.method),
+    ).toHaveLength(1);
+  });
+  it("clears an open editor immediately on read denial without waiting for task loading", async () => {
+    let fail = false;
+    let completeTasks!: (value: unknown) => void;
+    const pendingTasks = new Promise((resolve) => {
+      completeTasks = resolve;
+    });
+    fixture.request.mockImplementation(async (path: string) => {
+      if (path.includes("/routines?")) {
+        if (fail) throw new ApiError(403, { message: "管理权限撤销" });
+        return [original];
+      }
+      if (path.endsWith("/family-task-board"))
+        return fail
+          ? pendingTasks
+          : { householdId: "home", recipientId: "elder", tasks: [] };
+      return history([]);
+    });
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("编辑");
+    fail = true;
+    await click("刷新");
+    expect(container.querySelector("form")).toBeNull();
+    expect(container.textContent).not.toContain(original.title);
+    expect(container.textContent).toContain("管理权限撤销");
+    await act(async () =>
+      completeTasks({ householdId: "home", recipientId: "elder", tasks: [] }),
+    );
+  });
+  it("treats local receipt cleanup failure as accepted and refreshes authority", async () => {
+    let stored = original;
+    routineApi(
+      async () => {
+        stored = { ...original, status: "PAUSED", version: 4 };
+        return stored;
+      },
+      () => [stored],
+    );
+    const cleanup = vi
+      .spyOn(Storage.prototype, "removeItem")
+      .mockImplementation(() => {
+        throw new Error("storage unavailable");
+      });
+    try {
+      await act(async () => root.render(<RoutinesApiPage />));
+      await click("暂停");
+      await click("暂停日程");
+      await settle(() => expect(container.textContent).toContain("已暂停"));
+      expect(container.querySelector("[role='dialog']")).toBeNull();
+      expect(container.textContent).toContain("暂停操作已受理");
+      expect(
+        fixture.request.mock.calls.filter(([, options]) => options?.method),
+      ).toHaveLength(1);
+    } finally {
+      cleanup.mockRestore();
+    }
+  });
+  it("traps Tab within the confirmation and disables duplicate/conflicting actions", async () => {
+    let complete!: (value: unknown) => void;
+    const pending = new Promise((resolve) => {
+      complete = resolve;
+    });
+    routineApi(async () => pending);
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("暂停");
+    const buttons = container
+      .querySelector("[role='dialog']")!
+      .querySelectorAll("button");
+    buttons[buttons.length - 1].focus();
+    await act(async () =>
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+      ),
+    );
+    expect(document.activeElement).toBe(buttons[0]);
+    await click("暂停日程");
+    await settle(() =>
+      expect(
+        fixture.request.mock.calls.filter(([, options]) => options?.method),
+      ).toHaveLength(1),
+    );
+    expect(
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "正在暂停…",
+      )?.disabled,
+    ).toBe(true);
+    expect(
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "编辑",
+      )?.disabled,
+    ).toBe(true);
+    await act(async () => complete({ ...original, status: "PAUSED" }));
+  });
+  it.each([401, 403, 404])(
+    "clears protected routine details after command denial %s",
+    async (status) => {
+      routineApi(async () => {
+        throw new ApiError(status, { message: "日程管理权限已失效" });
+      });
+      await act(async () => root.render(<RoutinesApiPage />));
+      await click("暂停");
+      await click("暂停日程");
+      await settle(() =>
+        expect(container.textContent).toContain("日程管理权限已失效"),
+      );
+      expect(container.textContent).not.toContain(original.title);
+      expect(container.textContent).not.toContain(original.instructions);
+      expect(container.querySelector("[role='dialog']")).toBeNull();
+    },
+  );
+  it("refreshes conflict state without applying the old receipt", async () => {
+    let conflicted = false;
+    routineApi(
+      async () => {
+        conflicted = true;
+        throw new ApiError(409, { message: "conflict" });
+      },
+      () => [
+        conflicted ? { ...original, status: "PAUSED", version: 9 } : original,
+      ],
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("暂停");
+    await click("暂停日程");
+    await settle(() =>
+      expect(container.textContent).toContain("日程已被其他家属更新"),
+    );
+    expect(container.textContent).toContain("已暂停");
+    expect(container.querySelector("[role='dialog']")).toBeNull();
+  });
+  it("offers paused editing after a resume has no future matching time", async () => {
+    routineApi(
+      async () => {
+        throw new ApiError(409, {
+          code: "ROUTINE_NO_FUTURE_OCCURRENCE",
+          message: "原安排没有后续提醒时间，请先修改日期或重复规则",
+        });
+      },
+      () => [{ ...original, status: "PAUSED" }],
+    );
+    await act(async () => root.render(<RoutinesApiPage />));
+    await click("恢复");
+    await click("恢复日程");
+    await settle(() =>
+      expect(container.querySelector("[role='dialog']")?.textContent).toContain(
+        "原安排没有后续提醒时间",
+      ),
+    );
+    expect(container.textContent).not.toContain("日程已被其他家属更新");
+    expect(
+      fixture.request.mock.calls.filter(([path]) =>
+        (path as string).split("?")[0].endsWith("/routines"),
+      ),
+    ).toHaveLength(1);
+    await click("修改日程");
+    expect(container.querySelector("[role='dialog']")).toBeNull();
+    expect(container.querySelector("form")?.textContent).toContain(
+      "保存后仍保持暂停",
+    );
+  });
+  it.each(["recipient", "epoch", "account"])(
+    "isolates a delayed pause after changing %s",
+    async (change) => {
+      let complete!: (value: unknown) => void;
+      const pending = new Promise((resolve) => {
+        complete = resolve;
+      });
+      routineApi(async () => pending);
+      await act(async () => root.render(<RoutinesApiPage />));
+      await click("暂停");
+      await click("暂停日程");
+      await settle(() =>
+        expect(
+          fixture.request.mock.calls.some(
+            ([, options]) => options?.method === "POST",
+          ),
+        ).toBe(true),
+      );
+      expect(
+        Array.from(container.querySelectorAll("button")).find(
+          (button) => button.textContent === "编辑",
+        )?.disabled,
+      ).toBe(true);
+      if (change === "recipient") fixture.recipientId = "other";
+      if (change === "epoch") fixture.epoch++;
+      if (change === "account") fixture.userId = "other-user";
+      await act(async () => root.render(<RoutinesApiPage />));
+      const reads = fixture.request.mock.calls.length;
+      await act(async () =>
+        complete({ ...original, status: "PAUSED", title: "旧暂停响应" }),
+      );
+      expect(container.querySelector("[role='dialog']")).toBeNull();
+      expect(container.textContent).not.toContain("旧暂停响应");
+      expect(container.textContent).not.toContain("操作已受理");
+      expect(fixture.request.mock.calls).toHaveLength(reads);
+    },
+  );
   it("renders history labels and switches recipient timezone without stale records", async () => {
     fixture.request.mockImplementation(async (path: string) => {
       if (path.endsWith("/family-task-board"))
@@ -262,7 +705,7 @@ describe("independent routine and task loading", () => {
       complete = resolve;
     });
     fixture.request.mockImplementation(async (path: string) => {
-      if (path.endsWith("/routines")) return pending;
+      if (path.split("?")[0].endsWith("/routines")) return pending;
       if (path.endsWith("/family-task-board"))
         return { householdId: "home", recipientId: "elder", tasks: [] };
       if (path.includes("/history?"))
@@ -275,6 +718,107 @@ describe("independent routine and task loading", () => {
     expect(container.textContent).toContain("每周散步");
     expect(container.textContent).not.toContain("暂无日程");
   });
+  it.each([401, 403, 404])(
+    "clears loaded history, events and tasks after verification denial %s",
+    async (status) => {
+      let completeMore!: (value: unknown) => void;
+      const pendingMore = new Promise((resolve) => {
+        completeMore = resolve;
+      });
+      fixture.request.mockImplementation(
+        async (path: string, options?: { method?: string }) => {
+          if (path.endsWith("/family-verify") && options?.method === "POST")
+            throw new ApiError(status, { message: "核验时照护查看权限已失效" });
+          if (path.split("?")[0].endsWith("/routines")) return [original];
+          if (path.endsWith("/family-task-board"))
+            return {
+              householdId: "home",
+              recipientId: "elder",
+              tasks: [
+                {
+                  id: "protected-task",
+                  householdId: "home",
+                  recipientId: "elder",
+                  sourceEventId: "protected-event",
+                  status: "OPEN",
+                  priority: "NORMAL",
+                  version: 0,
+                  assigneeMemberId: null,
+                  assigneeDisplayName: null,
+                  assignedToMe: false,
+                  canClaim: true,
+                  canFinish: true,
+                  sourceTitle: "核验失权前的待办正文",
+                  sourceSummary: "受保护待办详情",
+                  dueAt: null,
+                  resolvedAt: null,
+                  resolutionCode: null,
+                  resolutionNote: null,
+                  createdAt: "2026-09-20T00:00:00Z",
+                  updatedAt: "2026-09-20T00:00:00Z",
+                },
+              ],
+            };
+          if (path.includes("/occurrences/history?"))
+            return history([
+              {
+                id: "review",
+                status: "NEEDS_FAMILY_REVIEW",
+                version: 2,
+                routineTitle: "核验失权前的提醒正文",
+                scheduledAtUtc: "2026-09-20T00:00:00Z",
+              },
+            ]);
+          if (path.includes("/events/history?")) {
+            if (path.includes("cursor=")) return pendingMore;
+            return {
+              ...history([
+                {
+                  id: "protected-event",
+                  title: "核验失权前的动态正文",
+                  occurredAt: "2026-09-20T00:00:00Z",
+                },
+              ]),
+              nextCursor: "next",
+            };
+          }
+          return [];
+        },
+      );
+      await act(async () => root.render(<RoutinesApiPage />));
+      const protectedTitles = [
+        "核验失权前的提醒正文",
+        "核验失权前的动态正文",
+        "核验失权前的待办正文",
+        "受保护待办详情",
+      ];
+      for (const title of protectedTitles)
+        expect(container.textContent).toContain(title);
+      await click("加载更多");
+      await click("核验已完成");
+      await settle(() =>
+        expect(container.textContent).toContain("核验时照护查看权限已失效"),
+      );
+      for (const title of protectedTitles)
+        expect(container.textContent).not.toContain(title);
+      expect(container.textContent).toContain("待办需要刷新");
+      expect(container.textContent).toContain(original.title);
+      await act(async () =>
+        completeMore(
+          history([
+            {
+              id: "late-protected-event",
+              title: "核验失权后迟到正文",
+              occurredAt: "2026-09-19T00:00:00Z",
+            },
+          ]),
+        ),
+      );
+      expect(container.textContent).not.toContain("核验失权后迟到正文");
+      for (const title of protectedTitles)
+        expect(container.textContent).not.toContain(title);
+    },
+  );
   it.each([401, 403, 404])(
     "clears shared history immediately on task-board %s without dropping slow routines",
     async (status) => {
@@ -291,7 +835,7 @@ describe("independent routine and task loading", () => {
         completeMore = resolve;
       });
       fixture.request.mockImplementation(async (path: string) => {
-        if (path.endsWith("/routines")) return pendingRoutines;
+        if (path.split("?")[0].endsWith("/routines")) return pendingRoutines;
         if (path.endsWith("/family-task-board")) return pendingTasks;
         if (path.includes("/occurrences/history?"))
           return history([
@@ -544,7 +1088,7 @@ describe("independent routine and task loading", () => {
           };
           return stored;
         }
-        if (path.endsWith("/routines")) return [stored];
+        if (path.split("?")[0].endsWith("/routines")) return [stored];
         if (path.endsWith("/family-task-board"))
           return {
             householdId: "home",
@@ -583,7 +1127,7 @@ describe("independent routine and task loading", () => {
     fixture.request.mockImplementation(
       async (path: string, options?: { method?: string }) => {
         if (options?.method) throw new Error("版本已变更，请刷新后重新编辑");
-        if (path.endsWith("/routines")) return [original];
+        if (path.split("?")[0].endsWith("/routines")) return [original];
         if (path.endsWith("/family-task-board"))
           return { householdId: "home", recipientId: "elder", tasks: [] };
         return [];
@@ -625,7 +1169,7 @@ describe("independent routine and task loading", () => {
     fixture.request.mockImplementation(
       async (path: string, options?: { method?: string }) => {
         if (options?.method === "PATCH") return sameDay;
-        if (path.endsWith("/routines")) return [sameDay];
+        if (path.split("?")[0].endsWith("/routines")) return [sameDay];
         if (path.endsWith("/family-task-board"))
           return { householdId: "home", recipientId: "elder", tasks: [] };
         return [];
@@ -654,7 +1198,7 @@ describe("independent routine and task loading", () => {
     fixture.request.mockImplementation(
       async (path: string, options?: { method?: string }) => {
         if (options?.method === "PATCH") return pending;
-        if (path.endsWith("/routines"))
+        if (path.split("?")[0].endsWith("/routines"))
           return fixture.recipientId === "elder" ? [original] : [];
         if (path.endsWith("/family-task-board"))
           return {
@@ -694,7 +1238,7 @@ describe("independent routine and task loading", () => {
           if (keys.length === 1) throw new NetworkError();
           return original;
         }
-        if (path.endsWith("/routines")) return [original];
+        if (path.split("?")[0].endsWith("/routines")) return [original];
         if (path.endsWith("/family-task-board"))
           return { householdId: "home", recipientId: "elder", tasks: [] };
         return [];
@@ -710,7 +1254,8 @@ describe("independent routine and task loading", () => {
   });
   it("shows authorized tasks even when routine management is denied", async () => {
     fixture.request.mockImplementation(async (path: string) => {
-      if (path.endsWith("/routines")) throw new Error("没有日程管理权限");
+      if (path.split("?")[0].endsWith("/routines"))
+        throw new Error("没有日程管理权限");
       if (path.endsWith("/family-task-board"))
         return {
           householdId: "home",
@@ -752,7 +1297,7 @@ describe("independent routine and task loading", () => {
   it("shows a task error, not an empty board, without hiding loaded routines", async () => {
     fixture.request.mockImplementation(async (path: string) => {
       if (path.endsWith("/family-task-board")) throw new Error("待办请求失败");
-      if (path.endsWith("/routines"))
+      if (path.split("?")[0].endsWith("/routines"))
         return [
           {
             id: "routine",

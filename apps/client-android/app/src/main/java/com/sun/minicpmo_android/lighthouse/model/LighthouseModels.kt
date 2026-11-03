@@ -208,6 +208,7 @@ data class OccurrenceView(
     val escalationAt: String?,
     val completedAt: String?,
     val version: Int,
+    val closureReason: String? = null,
 )
 
 data class CareEventView(
@@ -504,6 +505,9 @@ data class LighthouseUiState(
     val memoryLoadError: String? = null,
     val routines: List<RoutineView> = emptyList(),
     val routineSaveRevision: Long = 0,
+    val routineCommandPendingId: String? = null,
+    val routineCommandError: String? = null,
+    val routineCommandRevision: Long = 0,
     val routineLoadError: String? = null,
     val occurrenceHistory: CareHistoryState<OccurrenceView> = CareHistoryState(),
     val eventHistory: CareHistoryState<CareEventView> = CareHistoryState(),

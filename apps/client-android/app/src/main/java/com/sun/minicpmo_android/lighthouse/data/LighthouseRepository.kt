@@ -329,7 +329,7 @@ class LighthouseRepository(
 
     suspend fun listRoutines(householdId: String, recipientId: String): List<RoutineView> =
         FamilyJsonMapper.parseArray(
-            userRequest("GET", FamilyApiContract.routinesPath(householdId, recipientId)),
+            userRequest("GET", FamilyApiContract.routinesPath(householdId, recipientId, includePaused = true)),
         ).mapObjects(FamilyJsonMapper::parseRoutine)
 
     suspend fun createRoutine(
@@ -357,6 +357,17 @@ class LighthouseRepository(
             FamilyJsonMapper.parseRoutine(requireNotNull(userRequest(
                 "PATCH", FamilyApiContract.routinePath(householdId, routine.id), body,
                 headers = mapOf("Idempotency-Key" to idempotencyKey),
+            )))
+        }
+    }
+
+    suspend fun setRoutinePaused(householdId: String, routine: RoutineView, pause: Boolean): RoutineView {
+        val body = FamilyApiContract.routineLifecycleBody(routine.version)
+        val path = FamilyApiContract.routineLifecyclePath(householdId, routine.id, pause)
+        val command = JSONArray().put("routine-lifecycle").put(path).put(body).toString()
+        return careCommands.execute(command) { idempotencyKey ->
+            FamilyJsonMapper.parseRoutine(requireNotNull(userRequest(
+                "POST", path, body, headers = mapOf("Idempotency-Key" to idempotencyKey),
             )))
         }
     }
@@ -745,6 +756,7 @@ class LighthouseRepository(
     internal suspend fun recordCompanionHeartbeat(
         applyDirective: suspend (DeviceMediaDirective, String?) -> Unit,
         applyActiveFailure: suspend (String) -> Unit,
+        applyDirectiveWithReason: (suspend (DeviceMediaDirective, String?, String?) -> Unit)? = null,
     ): DeviceHeartbeatView {
         val outcome = companionSessionOperationMutex.withLock {
             val ticket = companionSessions.snapshot()
@@ -788,16 +800,21 @@ class LighthouseRepository(
             is CompanionHeartbeatOutcome.Success -> {
                 if (outcome.shouldApplyDirective) {
                     val stop = outcome.heartbeat.mediaDirective == DeviceMediaDirective.STOP
+                    val deliver: suspend (DeviceMediaDirective, String?) -> Unit = { directive, sessionId ->
+                        if (applyDirectiveWithReason != null) {
+                            applyDirectiveWithReason(directive, sessionId, outcome.heartbeat.reason)
+                        } else applyDirective(directive, sessionId)
+                    }
                     try {
                         if (stop) {
                             withContext(NonCancellable) {
-                                applyDirective(
+                                deliver(
                                     outcome.heartbeat.mediaDirective,
                                     outcome.ticket.sessionId,
                                 )
                             }
                         } else {
-                            applyDirective(
+                            deliver(
                                 outcome.heartbeat.mediaDirective,
                                 outcome.ticket.sessionId,
                             )

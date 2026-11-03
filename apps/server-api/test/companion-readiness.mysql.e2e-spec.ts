@@ -21,6 +21,9 @@ describeMySql(
     const credentialId = ulid();
     const credentialFamilyId = ulid();
     let token: string;
+    const companionIds: string[] = [];
+    const receiptKeys: string[] = [];
+    const routineIds: string[] = [];
     const endpoint = '/openBMB/api/v1/device/readiness';
 
     beforeAll(async () => {
@@ -78,6 +81,25 @@ describeMySql(
     afterAll(async () => {
       if (!fixture) return;
       try {
+        await fixture.db.careCommandReceipt.deleteMany({
+          where: { idempotencyKey: { in: receiptKeys } },
+        });
+        await fixture.db.outboxEvent.deleteMany({
+          where: { aggregateId: { in: companionIds } },
+        });
+        await fixture.db.companionSession.deleteMany({ where: { bindingId } });
+        await fixture.db.routineOccurrence.deleteMany({
+          where: { routineId: { in: routineIds } },
+        });
+        await fixture.db.routineSchedule.deleteMany({
+          where: { routineId: { in: routineIds } },
+        });
+        await fixture.db.outboxEvent.deleteMany({
+          where: { aggregateType: 'ROUTINE', aggregateId: { in: routineIds } },
+        });
+        await fixture.db.routine.deleteMany({
+          where: { id: { in: routineIds } },
+        });
         await fixture.db.recipientConsentState.deleteMany({
           where: { recipientId: fixture.emptyRecipientId },
         });
@@ -152,6 +174,72 @@ describeMySql(
         }),
       ).toBe(0);
     });
+    it('stops an existing authenticated device session after a real pause command', async () => {
+      await fixture.db.recipientConsentState.updateMany({
+        where: { recipientId: fixture.emptyRecipientId },
+        data: { decision: 'GRANTED' },
+      });
+      const http = fixture.app.getHttpServer();
+      const collection = `/openBMB/api/v1/households/${fixture.householdId}/care-recipients/${fixture.emptyRecipientId}/routines`;
+      const routine = (
+        await request(http)
+          .post(collection)
+          .auth(fixture.owner.session.accessToken, { type: 'bearer' })
+          .send({
+            type: 'OTHER',
+            title: '暂停会话同步验证',
+            instructions: '仅隔离测试',
+            confirmationQuestion: '完成了吗？',
+            schedule: {
+              timezone: 'Asia/Shanghai',
+              localTimeMinutes: 540,
+              weekdayMask: 127,
+              startDate: '2026-09-20',
+              graceMinutes: 5,
+              familyNoticeMinutes: 15,
+            },
+          })
+          .expect(201)
+      ).body.data;
+      routineIds.push(routine.id);
+      const started = (
+        await request(http)
+          .post('/openBMB/api/v1/device/companion-sessions')
+          .auth(token, { type: 'bearer' })
+          .set('Idempotency-Key', `start-${ulid()}`)
+          .send({ mode: 'AUDIO' })
+          .expect(201)
+      ).body.data.session;
+      companionIds.push(started.id);
+      const heartbeat = () =>
+        request(http)
+          .post('/openBMB/api/v1/device/heartbeats')
+          .auth(token, { type: 'bearer' })
+          .send({ activeCompanionSessionId: started.id });
+      expect((await heartbeat().expect(201)).body.data.mediaDirective).toBe(
+        'CONTINUE',
+      );
+      const key = `pause-${ulid()}`;
+      receiptKeys.push(key);
+      await request(http)
+        .post(
+          `/openBMB/api/v1/households/${fixture.householdId}/routines/${routine.id}/pause`,
+        )
+        .auth(fixture.owner.session.accessToken, { type: 'bearer' })
+        .set('Idempotency-Key', key)
+        .send({ version: routine.version })
+        .expect(200);
+      expect((await heartbeat().expect(201)).body.data).toMatchObject({
+        mediaDirective: 'STOP',
+        reason: 'ROUTINES_CHANGED',
+      });
+      expect(
+        await fixture.db.companionSession.findUnique({
+          where: { id: started.id },
+        }),
+      ).toMatchObject({ status: 'ENDED', endReason: 'ROUTINES_CHANGED' });
+    });
+
     it('rejects a revoked binding even with a signed unexpired token', async () => {
       await fixture.db.companionBinding.update({
         where: { id: bindingId },

@@ -199,7 +199,7 @@ const runtimeStateFromContext = (
     trustedPeople: [],
     medications: [],
     routines: (snapshot?.occurrences ?? []).map((occurrence) => ({
-      id: occurrence.routineId,
+      id: occurrence.id,
       title: occurrence.routineTitle,
       category: routineCategory(occurrence.routineType),
       scheduledTime: occurrenceClock(
@@ -286,6 +286,7 @@ export const CompanionPage = () => {
   const scannerStream = useRef<MediaStream | null>(null);
   const careExperience = useRef<CareExperienceHandle | null>(null);
   const activeCompanionId = useRef("");
+  const runtimeOwner = useRef<(() => boolean) | null>(null);
   const companionStartLifecycle = useRef(new CompanionStartLifecycle());
   const endingCompanionSessions = useRef(new Map<string, Promise<void>>());
   const heartbeatPolling = useRef(new CompanionPollingGate());
@@ -309,6 +310,7 @@ export const CompanionPage = () => {
   const stopLocalCompanionRuntime = useCallback(
     (commitStopped: () => void, reason: string) => {
       companionStartLifecycle.current.invalidate();
+      runtimeOwner.current = null;
       heartbeatPolling.current.invalidate();
       try {
         careExperience.current?.stopLocalRuntime(reason);
@@ -332,7 +334,9 @@ export const CompanionPage = () => {
       stopLocalCompanionRuntime(() => {
         setServerMediaStopped(true);
         setNotice(
-          heartbeat.reason
+          heartbeat.reason === 'ROUTINES_CHANGED'
+            ? '日程已更新，请重新开始陪伴。'
+            : heartbeat.reason
             ? `陪伴媒体已由服务端停止：${heartbeat.reason}`
             : "陪伴媒体授权或会话已失效，摄像头、麦克风和模型连接已停止。",
         );
@@ -361,6 +365,24 @@ export const CompanionPage = () => {
       );
       if (isHeartbeatOwner()) applyHeartbeat(heartbeat);
     });
+  }, [applyHeartbeat, stopLocalCompanionRuntime]);
+
+  const validateCurrentRuntime = useCallback(async () => {
+    const isOwner = runtimeOwner.current;
+    const sessionId = activeCompanionId.current;
+    if (!isOwner?.() || !sessionId) return false;
+    try {
+      const heartbeat = await deviceSession.heartbeat(sessionId);
+      if (runtimeOwner.current !== isOwner || !isOwner()) return false;
+      applyHeartbeat(heartbeat);
+      return heartbeat.mediaDirective === 'CONTINUE' &&
+        heartbeat.activeCompanionSessionId === sessionId && isOwner();
+    } catch (error) {
+      if (runtimeOwner.current === isOwner && isOwner()) {
+        stopLocalCompanionRuntime(() => setError(readableError(error)), 'routine_validation_failed');
+      }
+      return false;
+    }
   }, [applyHeartbeat, stopLocalCompanionRuntime]);
 
   const commitRemoteSession = useCallback(
@@ -621,6 +643,9 @@ export const CompanionPage = () => {
             setRuntimeState(
               runtimeStateFromContext(demoState, context, started.careSnapshot),
             );
+          const isOwner = () => companionStartLifecycle.current.isCurrent(generation) &&
+            activeCompanionId.current === started.session.id;
+          runtimeOwner.current = isOwner;
           const configuration = resolveCompanionSessionConfiguration(model);
           setEffectiveConfiguration(configuration.summary);
           let sequenceNo = 0;
@@ -652,6 +677,7 @@ export const CompanionPage = () => {
           };
           return {
             ...configuration.runtime,
+            beforeModelAction: async () => isOwner() && await validateCurrentRuntime() && isOwner(),
             onRuntimeStatus: (status: string) => {
               if (status === "connecting" || status === "initializing")
                 recordEvent("CONNECTING");
@@ -705,11 +731,26 @@ export const CompanionPage = () => {
         }
       },
       stop: stopCompanionServerSession,
+      readCurrentRoutines: async () => {
+        const isOwner = runtimeOwner.current;
+        if (!context || !isOwner?.() || !(await validateCurrentRuntime())) {
+          throw new Error('陪伴会话已变化，请重新开始。');
+        }
+        const occurrences = await deviceSession.currentOccurrences();
+        if (runtimeOwner.current !== isOwner || !isOwner()) throw new Error('陪伴会话已变化');
+        return runtimeStateFromContext(demoState, context, {
+          ...context.careSnapshot,
+          occurrences: occurrences.map(item => ({ ...item, confirmationQuestion: '完成后请明确告诉我，好吗？' })),
+        }).routines;
+      },
       confirmOccurrence: async (
         occurrenceId: string,
         source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE",
       ) => {
+        const isOwner = runtimeOwner.current;
+        if (!isOwner?.()) throw new Error('请重新开始陪伴。');
         const current = await deviceSession.currentOccurrences();
+        if (runtimeOwner.current !== isOwner || !isOwner()) throw new Error('陪伴会话已变化');
         const occurrence = current.find((item) => item.id === occurrenceId);
         if (!occurrence) {
           throw new Error("本次日程已更新，请刷新后重试。");
@@ -733,6 +774,7 @@ export const CompanionPage = () => {
       endCompanionServerSessionById,
       failClosedCompanionWrite,
       stopCompanionServerSession,
+      validateCurrentRuntime,
     ],
   );
 

@@ -100,6 +100,11 @@ export function RoutineEditor({
         {routine ? "编辑日程" : "新建日程"}
       </h2>
       {routine && <p>修改整条日程规则；已确认及已产生的家庭待办会保留。</p>}
+      {routine?.status === "PAUSED" && (
+        <p>
+          此日程已暂停，保存后仍保持暂停。修改日期或重复规则后，可再单独恢复日程。
+        </p>
+      )}
       <fieldset disabled={busy}>
         <div className="form-grid two-columns">
           <label>

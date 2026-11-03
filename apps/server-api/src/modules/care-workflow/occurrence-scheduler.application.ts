@@ -22,6 +22,7 @@ import {
   type ScheduleDefinition,
 } from './domain/schedule-time';
 import type { CareWorkflowContentCipher } from './ports/content-cipher.port';
+import { lockRoutine, routineTransaction } from './routine-transaction';
 
 type TransactionClient = Prisma.TransactionClient;
 
@@ -38,6 +39,7 @@ interface SchedulerSchedule extends ScheduleDefinition {
 
 interface AdvanceRecord {
   id: string;
+  routineId: string;
   householdId: string;
   recipientId: string;
   status: string;
@@ -83,31 +85,60 @@ export class PrismaOccurrenceScheduler implements OccurrenceSchedulerApplication
         },
       },
     })) as SchedulerSchedule[];
-    const rows = schedules.flatMap((schedule) =>
-      generateOccurrenceCandidates(
-        schedule,
-        command.windowStartUtc,
-        command.windowEndUtc,
-      ).map((candidate) => ({
-        id: candidate.id,
-        householdId: schedule.routine.householdId,
-        recipientId: schedule.routine.recipientId,
-        routineId: schedule.routineId,
-        scheduleId: schedule.id,
-        scheduledAtUtc: candidate.scheduledAtUtc,
-        scheduledLocalDate: candidate.scheduledLocalDate,
-        status: OCCURRENCE_STATUS.due,
-        confirmationDeadlineAt: candidate.confirmationDeadlineAt,
-        escalationAt: candidate.escalationAt,
-      })),
-    );
-    if (rows.length === 0) return { attempted: 0, created: 0 };
-    const created = await this.prisma.routineOccurrence.createMany({
-      data: rows,
-      // UNIQUE(schedule_id, scheduled_at_utc) is the final idempotency guard.
-      skipDuplicates: true,
-    });
-    return { attempted: rows.length, created: created.count };
+    const result = { attempted: 0, created: 0 };
+    // Discovery can race with a lifecycle command. Lock then re-read each
+    // candidate, using a short per-routine transaction (never the cached rule).
+    for (const candidateSchedule of schedules) {
+      const generated = await routineTransaction(
+        this.prisma,
+        async (transaction) => {
+          await lockRoutine(transaction, candidateSchedule.routineId);
+          const schedule = (await transaction.routineSchedule.findFirst({
+            where: {
+              id: candidateSchedule.id,
+              active: true,
+              routine: { status: ROUTINE_STATUS.active, deletedAt: null },
+            },
+            include: {
+              routine: {
+                select: {
+                  householdId: true,
+                  recipientId: true,
+                  status: true,
+                  deletedAt: true,
+                },
+              },
+            },
+          })) as SchedulerSchedule | null;
+          if (!schedule) return { attempted: 0, created: 0 };
+          const rows = generateOccurrenceCandidates(
+            schedule,
+            command.windowStartUtc,
+            command.windowEndUtc,
+          ).map((candidate) => ({
+            id: candidate.id,
+            householdId: schedule.routine.householdId,
+            recipientId: schedule.routine.recipientId,
+            routineId: schedule.routineId,
+            scheduleId: schedule.id,
+            scheduledAtUtc: candidate.scheduledAtUtc,
+            scheduledLocalDate: candidate.scheduledLocalDate,
+            status: OCCURRENCE_STATUS.due,
+            confirmationDeadlineAt: candidate.confirmationDeadlineAt,
+            escalationAt: candidate.escalationAt,
+          }));
+          if (!rows.length) return { attempted: 0, created: 0 };
+          const created = await transaction.routineOccurrence.createMany({
+            data: rows,
+            skipDuplicates: true,
+          });
+          return { attempted: rows.length, created: created.count };
+        },
+      );
+      result.attempted += generated.attempted;
+      result.created += generated.created;
+    }
+    return result;
   }
 
   async advanceOccurrences(
@@ -139,7 +170,7 @@ export class PrismaOccurrenceScheduler implements OccurrenceSchedulerApplication
           },
         ],
       },
-      select: { id: true },
+      select: { id: true, routineId: true },
       orderBy: { scheduledAtUtc: 'asc' },
       take: batchSize,
     });
@@ -149,7 +180,11 @@ export class PrismaOccurrenceScheduler implements OccurrenceSchedulerApplication
       expired: 0,
     };
     for (const candidate of candidates) {
-      const changed = await this.advanceOne(candidate.id, command.now);
+      const changed = await this.advanceOne(
+        candidate.id,
+        candidate.routineId,
+        command.now,
+      );
       if (changed) result[changed] += 1;
     }
     return result;
@@ -157,148 +192,147 @@ export class PrismaOccurrenceScheduler implements OccurrenceSchedulerApplication
 
   private async advanceOne(
     occurrenceId: string,
+    routineId: string,
     now: Date,
   ): Promise<keyof AdvanceOccurrencesResult | null> {
-    return this.prisma.$transaction(
-      async (transaction) => {
-        const occurrence = (await transaction.routineOccurrence.findUnique({
-          where: { id: occurrenceId },
-          include: {
-            routine: { select: { status: true, deletedAt: true } },
-            schedule: { select: { active: true } },
-          },
-        })) as AdvanceRecord | null;
-        if (!occurrence) return null;
-        const active =
-          occurrence.routine.status === ROUTINE_STATUS.active &&
-          !occurrence.routine.deletedAt &&
-          occurrence.schedule.active;
-        if (!active) {
-          if (
-            occurrence.status !== OCCURRENCE_STATUS.due &&
-            occurrence.status !== OCCURRENCE_STATUS.awaitingConfirmation
-          ) {
-            return null;
-          }
-          const changed = await this.changeStatus(
-            transaction,
-            occurrence,
-            OCCURRENCE_STATUS.expired,
-          );
-          if (!changed) return null;
-          await this.writeOutbox(
-            transaction,
-            occurrence,
-            now,
-            'routine-occurrence.expired',
-          );
-          return 'expired';
-        }
-        if (occurrence.status === OCCURRENCE_STATUS.due) {
-          const changed = await this.changeStatus(
-            transaction,
-            occurrence,
-            OCCURRENCE_STATUS.awaitingConfirmation,
-          );
-          if (!changed) return null;
-          await this.writeOutbox(
-            transaction,
-            occurrence,
-            now,
-            'routine-occurrence.awaiting-confirmation',
-          );
-          return 'awaitingConfirmation';
-        }
+    return routineTransaction(this.prisma, async (transaction) => {
+      await lockRoutine(transaction, routineId);
+      const occurrence = (await transaction.routineOccurrence.findUnique({
+        where: { id: occurrenceId },
+        include: {
+          routine: { select: { status: true, deletedAt: true } },
+          schedule: { select: { active: true } },
+        },
+      })) as AdvanceRecord | null;
+      if (!occurrence) return null;
+      const active =
+        occurrence.routine.status === ROUTINE_STATUS.active &&
+        !occurrence.routine.deletedAt &&
+        occurrence.schedule.active;
+      if (!active) {
         if (
-          occurrence.status === OCCURRENCE_STATUS.awaitingConfirmation &&
-          occurrence.escalationAt &&
-          occurrence.escalationAt <= now
+          occurrence.status !== OCCURRENCE_STATUS.due &&
+          occurrence.status !== OCCURRENCE_STATUS.awaitingConfirmation
         ) {
-          const changed = await this.changeStatus(
-            transaction,
-            occurrence,
-            OCCURRENCE_STATUS.needsFamilyReview,
-          );
-          if (!changed) return null;
-          const eventId = newUlid(now.getTime());
-          const protectedContent = this.encryptPair(
-            '日程需要家属核验',
-            '在家属设定的确认时限内没有收到明确确认，请家属核验。此事件不推断服药或其他行为是否完成。',
-          );
-          await transaction.careEvent.create({
-            data: {
-              id: eventId,
-              householdId: occurrence.householdId,
-              recipientId: occurrence.recipientId,
-              type: 'ROUTINE_CONFIRMATION_MISSING',
-              severity: 'ATTENTION',
-              sourceType: 'ROUTINE_SCHEDULER',
-              sourceId: occurrence.id,
-              routineOccurrenceId: occurrence.id,
-              titleCiphertext: protectedContent.first,
-              summaryCiphertext: protectedContent.second,
-              contentNonce: protectedContent.nonce,
-              encryptionKeyId: protectedContent.encryptionKeyId,
-              dedupeKey: `occurrence:${occurrence.id}:needs-family-review`,
+          return null;
+        }
+        const changed = await this.changeStatus(
+          transaction,
+          occurrence,
+          OCCURRENCE_STATUS.expired,
+        );
+        if (!changed) return null;
+        await this.writeOutbox(
+          transaction,
+          occurrence,
+          now,
+          'routine-occurrence.expired',
+        );
+        return 'expired';
+      }
+      if (occurrence.status === OCCURRENCE_STATUS.due) {
+        const changed = await this.changeStatus(
+          transaction,
+          occurrence,
+          OCCURRENCE_STATUS.awaitingConfirmation,
+        );
+        if (!changed) return null;
+        await this.writeOutbox(
+          transaction,
+          occurrence,
+          now,
+          'routine-occurrence.awaiting-confirmation',
+        );
+        return 'awaitingConfirmation';
+      }
+      if (
+        occurrence.status === OCCURRENCE_STATUS.awaitingConfirmation &&
+        occurrence.escalationAt &&
+        occurrence.escalationAt <= now
+      ) {
+        const changed = await this.changeStatus(
+          transaction,
+          occurrence,
+          OCCURRENCE_STATUS.needsFamilyReview,
+        );
+        if (!changed) return null;
+        const eventId = newUlid(now.getTime());
+        const protectedContent = this.encryptPair(
+          '日程需要家属核验',
+          '在家属设定的确认时限内没有收到明确确认，请家属核验。此事件不推断服药或其他行为是否完成。',
+        );
+        await transaction.careEvent.create({
+          data: {
+            id: eventId,
+            householdId: occurrence.householdId,
+            recipientId: occurrence.recipientId,
+            type: 'ROUTINE_CONFIRMATION_MISSING',
+            severity: 'ATTENTION',
+            sourceType: 'ROUTINE_SCHEDULER',
+            sourceId: occurrence.id,
+            routineOccurrenceId: occurrence.id,
+            titleCiphertext: protectedContent.first,
+            summaryCiphertext: protectedContent.second,
+            contentNonce: protectedContent.nonce,
+            encryptionKeyId: protectedContent.encryptionKeyId,
+            dedupeKey: `occurrence:${occurrence.id}:needs-family-review`,
+            payloadJson: {
+              occurrenceId: occurrence.id,
+              inferenceMade: false,
+            },
+            occurredAt: now,
+          },
+        });
+        const taskId = newUlid(now.getTime());
+        await transaction.familyTask.create({
+          data: {
+            id: taskId,
+            householdId: occurrence.householdId,
+            recipientId: occurrence.recipientId,
+            sourceEventId: eventId,
+            status: FAMILY_TASK_STATUS.open,
+            priority: 'NORMAL',
+            dueAt: now,
+          },
+        });
+        await transaction.outboxEvent.createMany({
+          data: [
+            {
+              id: newUlid(now.getTime()),
+              aggregateType: 'ROUTINE_OCCURRENCE',
+              aggregateId: occurrence.id,
+              eventType: 'routine-occurrence.needs-family-review',
               payloadJson: {
+                householdId: occurrence.householdId,
+                recipientId: occurrence.recipientId,
                 occurrenceId: occurrence.id,
-                inferenceMade: false,
+                careEventId: eventId,
+                familyTaskId: taskId,
               },
               occurredAt: now,
+              availableAt: now,
             },
-          });
-          const taskId = newUlid(now.getTime());
-          await transaction.familyTask.create({
-            data: {
-              id: taskId,
-              householdId: occurrence.householdId,
-              recipientId: occurrence.recipientId,
-              sourceEventId: eventId,
-              status: FAMILY_TASK_STATUS.open,
-              priority: 'NORMAL',
-              dueAt: now,
+            {
+              id: newUlid(now.getTime()),
+              aggregateType: 'FAMILY_TASK',
+              aggregateId: taskId,
+              eventType: 'family-task.opened',
+              payloadJson: {
+                householdId: occurrence.householdId,
+                recipientId: occurrence.recipientId,
+                occurrenceId: occurrence.id,
+                careEventId: eventId,
+                familyTaskId: taskId,
+              },
+              occurredAt: now,
+              availableAt: now,
             },
-          });
-          await transaction.outboxEvent.createMany({
-            data: [
-              {
-                id: newUlid(now.getTime()),
-                aggregateType: 'ROUTINE_OCCURRENCE',
-                aggregateId: occurrence.id,
-                eventType: 'routine-occurrence.needs-family-review',
-                payloadJson: {
-                  householdId: occurrence.householdId,
-                  recipientId: occurrence.recipientId,
-                  occurrenceId: occurrence.id,
-                  careEventId: eventId,
-                  familyTaskId: taskId,
-                },
-                occurredAt: now,
-                availableAt: now,
-              },
-              {
-                id: newUlid(now.getTime()),
-                aggregateType: 'FAMILY_TASK',
-                aggregateId: taskId,
-                eventType: 'family-task.opened',
-                payloadJson: {
-                  householdId: occurrence.householdId,
-                  recipientId: occurrence.recipientId,
-                  occurrenceId: occurrence.id,
-                  careEventId: eventId,
-                  familyTaskId: taskId,
-                },
-                occurredAt: now,
-                availableAt: now,
-              },
-            ],
-          });
-          return 'needsFamilyReview';
-        }
-        return null;
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    );
+          ],
+        });
+        return 'needsFamilyReview';
+      }
+      return null;
+    });
   }
 
   private async changeStatus(

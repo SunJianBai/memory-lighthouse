@@ -122,8 +122,14 @@ internal object FamilyApiContract {
         .put("sensitivity", input.sensitivity)
         .put("verificationStatus", input.verificationStatus)
 
-    fun routinesPath(householdId: String, recipientId: String) =
-        "households/$householdId/care-recipients/$recipientId/routines"
+    fun routinesPath(householdId: String, recipientId: String, includePaused: Boolean = false) =
+        "households/$householdId/care-recipients/$recipientId/routines" +
+            if (includePaused) "?includePaused=true" else ""
+
+    fun routineLifecyclePath(householdId: String, routineId: String, pause: Boolean) =
+        "${routinePath(householdId, routineId)}/${if (pause) "pause" else "resume"}"
+
+    fun routineLifecycleBody(version: Int) = JSONObject().put("version", version)
 
     fun routinePath(householdId: String, routineId: String) =
         "households/$householdId/routines/$routineId"
@@ -332,6 +338,7 @@ internal object FamilyJsonMapper {
         confirmationDeadlineAt = json.nullableString("confirmationDeadlineAt"),
         escalationAt = json.nullableString("escalationAt"),
         completedAt = json.nullableString("completedAt"),
+        closureReason = json.nullableString("closureReason"),
         version = json.getInt("version"),
     )
 

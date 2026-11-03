@@ -25,6 +25,27 @@ import java.util.concurrent.atomic.AtomicInteger
 @OptIn(ExperimentalCoroutinesApi::class)
 class LighthouseRepositoryCompanionHeartbeatOwnershipTest {
     @Test
+    fun routineChangeReasonIsDeliveredWithTheExactOwnedSessionBeforeClearingIt() = runTest {
+        val http = mockk<LighthouseHttpClient>()
+        stubSuccessfulCompanionStart(http, "session-a")
+        coEvery { http.request("POST", "device/heartbeats", any(), DEVICE_ACCESS_TOKEN, emptyMap()) } returns
+            heartbeatJson(DeviceMediaDirective.STOP).put("reason", "ROUTINES_CHANGED")
+        val repository = repository(http)
+        repository.startCompanionModel("AUDIO")
+        var delivered: Triple<DeviceMediaDirective, String?, String?>? = null
+        repository.recordCompanionHeartbeat(
+            applyDirective = { _, _ -> error("reason-aware consumer must own this directive") },
+            applyActiveFailure = { error("heartbeat succeeded") },
+            applyDirectiveWithReason = { directive, sessionId, reason ->
+                assertTrue(repository.hasActiveCompanionSession())
+                delivered = Triple(directive, sessionId, reason)
+            },
+        )
+        assertEquals(Triple(DeviceMediaDirective.STOP, "session-a", "ROUTINES_CHANGED"), delivered)
+        assertFalse(repository.hasActiveCompanionSession())
+    }
+
+    @Test
     fun anIdleHeartbeatMustFinishBeforeANewCompanionSessionStarts() = runTest {
         val heartbeatStarted = CompletableDeferred<Unit>()
         val heartbeatResponse = CompletableDeferred<JSONObject>()

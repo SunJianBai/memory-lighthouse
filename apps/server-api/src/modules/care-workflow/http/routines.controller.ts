@@ -23,6 +23,8 @@ import {
   CreateRoutineDto,
   UpdateRoutineDto,
   VersionQueryDto,
+  RoutineListQueryDto,
+  RoutineLifecycleDto,
 } from './care-workflow.dto';
 
 @Controller('households/:householdId')
@@ -35,8 +37,14 @@ export class RoutinesController {
     @CurrentUser() principal: UserPrincipal,
     @Param('householdId') householdId: string,
     @Param('recipientId') recipientId: string,
+    @Query() query: RoutineListQueryDto,
   ): Promise<RoutineView[]> {
-    return this.workflow.listRoutines(principal, householdId, recipientId);
+    return this.workflow.listRoutines(
+      principal,
+      householdId,
+      recipientId,
+      query.includePaused === 'true',
+    );
   }
 
   @Post('care-recipients/:recipientId/routines')
@@ -68,6 +76,36 @@ export class RoutinesController {
       ...(idempotencyKey === undefined
         ? {}
         : { idempotencyKey: requireMatchingIdempotencyKey(idempotencyKey) }),
+    });
+  }
+
+  @Post('routines/:routineId/pause')
+  @HttpCode(HttpStatus.OK)
+  pause(
+    @CurrentUser() principal: UserPrincipal,
+    @Param('householdId') householdId: string,
+    @Param('routineId') routineId: string,
+    @Body() body: RoutineLifecycleDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<RoutineView> {
+    return this.workflow.pauseRoutine(principal, householdId, routineId, {
+      ...body,
+      idempotencyKey: requireMatchingIdempotencyKey(idempotencyKey),
+    });
+  }
+
+  @Post('routines/:routineId/resume')
+  @HttpCode(HttpStatus.OK)
+  resume(
+    @CurrentUser() principal: UserPrincipal,
+    @Param('householdId') householdId: string,
+    @Param('routineId') routineId: string,
+    @Body() body: RoutineLifecycleDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<RoutineView> {
+    return this.workflow.resumeRoutine(principal, householdId, routineId, {
+      ...body,
+      idempotencyKey: requireMatchingIdempotencyKey(idempotencyKey),
     });
   }
 

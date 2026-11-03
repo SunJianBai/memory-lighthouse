@@ -3,6 +3,7 @@ import { PrismaService } from '../../infrastructure/database/prisma.service';
 import { HouseholdAccessPolicy } from '../household/domain/household-access.policy';
 import { HouseholdApplicationService } from '../household/household.application.service';
 import type { UserPrincipal } from '../identity/identity.types';
+import { decryptCarePair } from './care-record.projection';
 import { CARE_WORKFLOW_CONTENT_CIPHER } from './care-workflow.constants';
 import type { CareWorkflowContentCipher } from './ports/content-cipher.port';
 
@@ -71,23 +72,7 @@ export class FamilyTaskBoardService {
             ) {
               throw new Error('Task source scope does not match');
             }
-            const content: unknown = JSON.parse(
-              this.cipher.decrypt({
-                ciphertext: Buffer.concat([
-                  Buffer.from(source.titleCiphertext),
-                  Buffer.from(source.summaryCiphertext),
-                ]),
-                nonce: Buffer.from(source.contentNonce),
-                encryptionKeyId: source.encryptionKeyId,
-              }),
-            );
-            if (
-              !Array.isArray(content) ||
-              content.length !== 2 ||
-              !content.every((part) => typeof part === 'string')
-            ) {
-              throw new Error('Protected task source content is invalid');
-            }
+            const content = decryptCarePair(this.cipher, source);
             const assignedToMe = task.assigneeMemberId === viewer.id;
             const unfinished =
               task.status === 'OPEN' || task.status === 'CLAIMED';
@@ -116,8 +101,8 @@ export class FamilyTaskBoardService {
               createdAt: task.createdAt.toISOString(),
               updatedAt: task.updatedAt.toISOString(),
               version: task.version,
-              sourceTitle: content[0],
-              sourceSummary: content[1],
+              sourceTitle: content.first,
+              sourceSummary: content.second,
               assigneeDisplayName: task.assigneeMemberId
                 ? names.get(task.assigneeMemberId)?.trim() || '原家庭成员'
                 : null,

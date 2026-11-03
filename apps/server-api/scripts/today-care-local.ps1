@@ -2,14 +2,14 @@ param([ValidateSet('Check', 'Preview')][string]$Mode = 'Check')
 $ErrorActionPreference = 'Stop'
 if (-not $env:TODAY_CARE_MYSQL_TEST_URL) { throw 'Set TODAY_CARE_MYSQL_TEST_URL for the isolated MySQL fixture first.' }
 $testDb = [Uri]$env:TODAY_CARE_MYSQL_TEST_URL
-if ($testDb.Scheme -ne 'mysql' -or $testDb.Host -ne '127.0.0.1' -or $testDb.Port -ne 13306 -or $testDb.AbsolutePath -ne '/lighthouse_iteration_test') {
-    throw 'Only mysql://127.0.0.1:13306/lighthouse_iteration_test is allowed.'
+if ($testDb.Scheme -ne 'mysql' -or $testDb.Host -ne '127.0.0.1' -or $testDb.Port -notin @(13306, 23306) -or $testDb.AbsolutePath -ne '/lighthouse_iteration_test') {
+    throw 'Only mysql://127.0.0.1 on isolated port 13306 or 23306 with lighthouse_iteration_test is allowed.'
 }
 $env:NODE_ENV = 'test'
 $env:DATABASE_URL = $env:TODAY_CARE_MYSQL_TEST_URL
 $env:MAIL_DELIVERY_MODE = 'memory'
 $env:PUBLIC_APP_URL = 'http://127.0.0.1:4310/openBMB'
-$env:CORS_ORIGINS = 'http://127.0.0.1:4310,http://localhost:4310'
+$env:CORS_ORIGINS = 'http://127.0.0.1:4310,http://localhost:4310,http://127.0.0.1:4311'
 $env:CARE_WORKFLOW_SCHEDULER_ENABLED = 'false'
 $env:TRANSCRIPT_PURGE_ENABLED = 'false'
 $env:REMOTE_SESSION_EXPIRY_ENABLED = 'false'

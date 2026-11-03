@@ -1,0 +1,30 @@
+.routine-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgb(16 34 49 / 45%);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+.routine-lifecycle-dialog {
+  width: min(100%, 560px);
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.routine-lifecycle-dialog .form-actions {
+  flex-wrap: wrap;
+}
+.routine-lifecycle-dialog button {
+  min-height: 44px;
+}
+.api-routine-list strong {
+  overflow-wrap: anywhere;
+}
+.routine-operation-notice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}

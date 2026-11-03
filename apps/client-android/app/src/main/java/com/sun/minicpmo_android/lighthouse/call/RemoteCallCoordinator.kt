@@ -263,8 +263,9 @@ class RemoteCallCoordinator(
 
     suspend fun recordDeviceHeartbeat() {
         repository.recordCompanionHeartbeat(
-            applyDirective = mediaHandoff::applyMediaDirective,
+            applyDirective = { directive, sessionId -> mediaHandoff.applyMediaDirective(directive, sessionId) },
             applyActiveFailure = mediaHandoff::applyHeartbeatFailure,
+            applyDirectiveWithReason = mediaHandoff::applyMediaDirective,
         )
     }
 

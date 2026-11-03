@@ -11,6 +11,15 @@ export class RoutineNotFoundException extends NotFoundException {
   }
 }
 
+export class RoutineNoFutureOccurrenceException extends ConflictException {
+  constructor() {
+    super({
+      code: 'ROUTINE_NO_FUTURE_OCCURRENCE',
+      message: '原安排没有后续提醒时间，请先修改日期或重复规则',
+    });
+  }
+}
+
 export class OccurrenceNotFoundException extends NotFoundException {
   constructor() {
     super({ code: 'OCCURRENCE_NOT_FOUND', message: '日程实例不存在' });

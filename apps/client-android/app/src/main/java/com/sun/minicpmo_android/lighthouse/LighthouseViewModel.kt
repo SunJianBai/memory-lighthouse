@@ -539,6 +539,66 @@ class LighthouseViewModel internal constructor(
         },
     )
 
+    fun setRoutinePaused(routine: RoutineView, pause: Boolean) = familyAction(
+        scope = FamilyOperationScope.RECIPIENT,
+        lane = "routine:${routine.id}",
+        request = {
+            require(routine.householdId == householdId && routine.recipientId == recipientId) { "日程不属于当前陪伴对象" }
+            require(routine.status == if (pause) "ACTIVE" else "PAUSED") { "日程状态已变化，请刷新后重试" }
+            _uiState.value = _uiState.value.copy(routineCommandPendingId = routine.id, routineCommandError = null)
+            try {
+                repository.setRoutinePaused(checkNotNull(householdId), routine, pause)
+                this
+            } catch (error: Throwable) {
+                if (familyOperations.isResultOwner(this)) {
+                    val denied = error is LighthouseApiException && error.status in setOf(401, 403, 404)
+                    if (denied) familyWorkspaceLoads.invalidate()
+                    val text = when {
+                        error is LighthouseApiException && error.code == "ROUTINE_NO_FUTURE_OCCURRENCE" -> "原安排没有后续提醒时间，请先修改日期或重复规则"
+                        error is LighthouseApiException && error.status == 409 -> "日程已被其他家属更新，请刷新后重试"
+                        error is java.io.IOException -> "网络连接失败，可安全重试此操作"
+                        else -> error.message ?: "操作失败，请重试"
+                    }
+                    _uiState.value = _uiState.value.copy(
+                        routineCommandPendingId = null, routineCommandError = text,
+                        routines = if (denied) emptyList() else _uiState.value.routines,
+                        routineLoadError = if (denied) "日程权限已变化，请刷新" else _uiState.value.routineLoadError,
+                    )
+                }
+                throw error
+            }
+        },
+        apply = { ticket ->
+            _uiState.value = _uiState.value.copy(
+                routineCommandRevision = _uiState.value.routineCommandRevision + 1,
+                routineCommandError = null,
+                message = "操作已受理，正在刷新日程",
+            )
+            // Receipts may be replays: never replace current state with an old receipt.
+            val loadScope = familyWorkspaceLoads.begin()
+            viewModelScope.launch {
+                try {
+                    val routines = repository.listRoutines(checkNotNull(ticket.householdId), checkNotNull(ticket.recipientId))
+                    if (!familyOperations.isResultOwner(ticket) || !familyWorkspaceLoads.isCurrent(loadScope)) return@launch
+                    _uiState.value = _uiState.value.copy(routines = routines, routineLoadError = null, message = "日程状态已刷新")
+                    ensureCareHistory()?.refresh(viewModelScope)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    if (!familyOperations.isResultOwner(ticket) || !familyWorkspaceLoads.isCurrent(loadScope)) return@launch
+                    if (error is LighthouseApiException && error.status in setOf(401, 403, 404)) {
+                        _uiState.value = _uiState.value.copy(routines = emptyList(), routineLoadError = "日程权限已变化，请刷新")
+                        if (error.code == "SIGNED_OUT") handleActionFailure(error)
+                    } else {
+                        _uiState.value = _uiState.value.copy(message = "操作已受理，状态暂未刷新，请使用顶部刷新；无需再次提交")
+                    }
+                } finally {
+                    if (familyOperations.isResultOwner(ticket)) _uiState.value = _uiState.value.copy(routineCommandPendingId = null)
+                }
+            }
+        },
+    )
+
     fun deleteRoutine(routine: RoutineView) = familyAction(
         scope = FamilyOperationScope.RECIPIENT,
         lane = "routine:${routine.id}",
@@ -935,6 +995,13 @@ class LighthouseViewModel internal constructor(
 
     fun closeAiCompanion() {
         _uiState.value = _uiState.value.copy(aiScreenVisible = false)
+    }
+
+    fun closeAiCompanionForServerDirective(reason: String?) {
+        _uiState.value = _uiState.value.copy(
+            aiScreenVisible = false,
+            message = if (reason == "ROUTINES_CHANGED") "日程已更新，请重新开始陪伴" else "陪伴已停止，请重新开始",
+        )
     }
 
     fun requestRemoteCall(bindingId: String) = action {
@@ -1384,6 +1451,7 @@ class LighthouseViewModel internal constructor(
             occurrenceHistory = CareHistoryState(), eventHistory = CareHistoryState(),
             familyTasks = emptyList(), familyTaskError = null,
             careHistoryScopeRevision = _uiState.value.careHistoryScopeRevision + 1,
+            routineCommandPendingId = null, routineCommandError = null,
         )
     }
 

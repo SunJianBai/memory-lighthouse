@@ -19,6 +19,7 @@ sealed interface CompanionMediaHandoffState {
         val requestId: Long,
         val sessionId: String?,
         val reason: CompanionMediaStopReason,
+        val directiveReason: String? = null,
     ) : CompanionMediaHandoffState
 
     data class AcceptingRemote(val sessionId: String) : CompanionMediaHandoffState
@@ -73,6 +74,7 @@ class CompanionMediaHandoffOrchestrator {
     suspend fun applyMediaDirective(
         directive: DeviceMediaDirective,
         companionSessionId: String?,
+        directiveReason: String? = null,
     ) = operationMutex.withLock {
         if (directive != DeviceMediaDirective.STOP) {
             if (serverStopLatchedSessionId == companionSessionId) {
@@ -84,7 +86,7 @@ class CompanionMediaHandoffOrchestrator {
             return@withLock
         }
         try {
-            awaitLocalStop(companionSessionId, CompanionMediaStopReason.SERVER_DIRECTIVE)
+            awaitLocalStop(companionSessionId, CompanionMediaStopReason.SERVER_DIRECTIVE, directiveReason)
             serverStopLatchedSessionId = companionSessionId
         } finally {
             clearPendingStop()
@@ -109,6 +111,7 @@ class CompanionMediaHandoffOrchestrator {
     private suspend fun awaitLocalStop(
         sessionId: String?,
         reason: CompanionMediaStopReason,
+        directiveReason: String? = null,
     ) {
         val requestId = requestIds.incrementAndGet()
         val completion = synchronized(consumerLock) {
@@ -124,6 +127,7 @@ class CompanionMediaHandoffOrchestrator {
             requestId = requestId,
             sessionId = sessionId,
             reason = reason,
+            directiveReason = directiveReason,
         )
         completion?.let {
             withTimeout(LOCAL_STOP_ACK_TIMEOUT_MILLIS) { it.await() }

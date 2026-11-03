@@ -40,6 +40,8 @@ import {
   type OmniSessionStartOverrides,
 } from "../hooks/use-omni-session";
 import { isCompanionStartCancelledError } from "../realtime/companion-start-lifecycle";
+import { CompanionPollingGate } from '../realtime/companion-polling-gate';
+import { verifiedRoutineAction } from '../realtime/verified-routine-action';
 import { useAppState } from "../state/app-state";
 import { formatClock, formatLongDate } from "../utils/format";
 
@@ -59,6 +61,7 @@ type CareExperienceProps = {
       mode: "AUDIO" | "AUDIO_VIDEO",
     ) => Promise<OmniSessionStartOverrides>;
     stop: (reason: string) => Promise<void>;
+    readCurrentRoutines?: () => Promise<Routine[]>;
     confirmOccurrence?: (
       occurrenceId: string,
       source: "RECIPIENT_BUTTON" | "RECIPIENT_VOICE",
@@ -69,6 +72,11 @@ type CareExperienceProps = {
     ) => Promise<void>;
   };
   serverBackedMode?: boolean;
+};
+
+type FamilyRequestOwner = {
+  epoch: number;
+  routineId: string | undefined;
 };
 
 export type CareExperienceHandle = {
@@ -85,15 +93,23 @@ export const CareExperience = forwardRef<
   const { state: demoState, updateState, addEvent } = useAppState();
   const state = runtimeState ?? demoState;
   const [coordinatorError, setCoordinatorError] = useState("");
-  const [familyRequestPending, setFamilyRequestPending] = useState(false);
+  const [pendingFamilyRequest, setPendingFamilyRequest] =
+    useState<FamilyRequestOwner | null>(null);
+  const familyRequestOwner = useRef<FamilyRequestOwner | null>(null);
   const [agent, dispatch] = useReducer(transitionAgent, undefined, () =>
     createInitialAgentState(),
   );
   const [clock, setClock] = useState(new Date());
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const lastAutomaticRoutineRef = useRef("");
+  const lastServerRoutinePollSlot = useRef<number | null>(null);
   const lastVoiceCommandRef = useRef("");
-  const enabledRoutines = useMemo(() => permittedRoutines(state), [state]);
+  const routineActions = useRef(new CompanionPollingGate());
+  const routineEpoch = useRef(0);
+  const [freshRoutines, setFreshRoutines] = useState<Routine[] | null>(null);
+  const enabledRoutines = useMemo(() => permittedRoutines(
+    freshRoutines ? { ...state, routines: freshRoutines } : state,
+  ), [state, freshRoutines]);
   const activeRoutine: Routine | undefined = useMemo(
     () => findNextRoutine(enabledRoutines, clock),
     [clock, enabledRoutines],
@@ -104,14 +120,20 @@ export const CareExperience = forwardRef<
   useImperativeHandle(
     ref,
     () => ({
-      stopLocalRuntime: (reason: string) => stop(reason),
+      stopLocalRuntime: (reason: string) => {
+        routineActions.current.invalidate();
+        routineEpoch.current += 1;
+        setFreshRoutines(null);
+        dispatch({ type: 'SESSION_ENDED', at: new Date().toISOString() });
+        stop(reason);
+      },
     }),
     [stop],
   );
 
   useEffect(() => {
     const timer = window.setInterval(() => setClock(new Date()), 1000);
-    return () => window.clearInterval(timer);
+    return () => { routineEpoch.current += 1; routineActions.current.invalidate(); window.clearInterval(timer); };
   }, []);
 
   useEffect(() => {
@@ -122,7 +144,13 @@ export const CareExperience = forwardRef<
   const nextRoutine = activeRoutine ?? enabledRoutines[0];
   const currentRoutine =
     enabledRoutines.find((routine) => routine.id === agent.activeRoutineId) ??
-    nextRoutine;
+    (serverBackedMode && agent.activeRoutineId ? undefined : nextRoutine);
+  const currentRoutineId = useRef<string | undefined>(undefined);
+  currentRoutineId.current = currentRoutine?.id;
+  const familyRequestPending =
+    pendingFamilyRequest !== null &&
+    pendingFamilyRequest.epoch === routineEpoch.current &&
+    pendingFamilyRequest.routineId === currentRoutine?.id;
 
   const record = (
     title: string,
@@ -147,6 +175,11 @@ export const CareExperience = forwardRef<
   };
 
   const beginSession = async () => {
+    routineEpoch.current += 1;
+    routineActions.current.invalidate();
+    setFreshRoutines(null);
+    lastAutomaticRoutineRef.current = '';
+    lastServerRoutinePollSlot.current = null;
     const realProvider = state.provider.provider !== "replay";
     if (
       (realProvider && !state.consent.microphoneApproved) ||
@@ -200,6 +233,9 @@ export const CareExperience = forwardRef<
   };
 
   const endSession = () => {
+    routineEpoch.current += 1;
+    routineActions.current.invalidate();
+    setFreshRoutines(null);
     stop("user_stop");
     if (sessionCoordinator) {
       void sessionCoordinator.stop("DEVICE_ENDED").catch((error) => {
@@ -266,7 +302,60 @@ export const CareExperience = forwardRef<
     }
   };
 
+  const runServerRoutine = async (repeat = false) => {
+    const read = sessionCoordinator?.readCurrentRoutines;
+    if (!read) return;
+    const occurrenceId = repeat ? currentRoutine?.occurrenceId : undefined;
+    if (repeat && (!occurrenceId || agent.phase !== 'awaiting_confirmation')) {
+      setCoordinatorError('当前没有可重复的日程提醒。');
+      return;
+    }
+    try {
+      await routineActions.current.run(async isCurrent => {
+        await verifiedRoutineAction({
+          read, isCurrent, now: () => new Date(), occurrenceId,
+          publish: routines => {
+            setFreshRoutines(routines);
+            setCoordinatorError('');
+            if (agent.activeRoutineId && !routines.some(item => item.id === agent.activeRoutineId && item.enabled)) {
+              dispatch({ type: 'SESSION_STARTED', at: new Date().toISOString() });
+            }
+          },
+          send: async routine => {
+            const key = routine.occurrenceId!;
+            if (!repeat && lastAutomaticRoutineRef.current === key) return false;
+            // The send may reach the model even if its response is lost. Do not
+            // automatically retry an uncertain send; manual repeat revalidates.
+            if (!repeat) lastAutomaticRoutineRef.current = key;
+            const accepted = await requestModelAction(
+              repeat ? `长者请求慢一点重复当前步骤：${routine.instructions}` :
+                `日程“${routine.title}”已到期，请提醒：${routine.instructions}`,
+            );
+            if (!isCurrent()) return false;
+            if (accepted) {
+              dispatch({ type: 'ROUTINE_DUE', routineId: routine.id, at: new Date().toISOString() });
+              dispatch({ type: 'REMINDER_DELIVERED', at: new Date().toISOString() });
+            }
+            return accepted;
+          },
+        });
+      });
+    } catch (error) {
+      setCoordinatorError(error instanceof Error ? error.message : '日程暂时无法同步，请稍后重试。');
+    }
+  };
+
   useEffect(() => {
+    if (serverBackedMode) {
+      const slot = Math.floor(clock.getTime() / 5_000);
+      if (session.status === 'live' && lastServerRoutinePollSlot.current !== slot) {
+        // Publish/send may render again in the same slot. Poll cadence is
+        // independent of those renders; the gate still owns slow requests.
+        lastServerRoutinePollSlot.current = slot;
+        void runServerRoutine();
+      }
+      return;
+    }
     if (session.status !== "live" || agent.phase !== "observing") {
       return;
     }
@@ -280,6 +369,11 @@ export const CareExperience = forwardRef<
 
   const confirmRoutine = async (source: "button" | "voice" = "button") => {
     if (agent.phase !== "awaiting_confirmation") return;
+    const routineId = currentRoutine?.id;
+    if (!routineId || routineId !== agent.activeRoutineId) return;
+    const epoch = routineEpoch.current;
+    const ownsConfirmation = () =>
+      routineEpoch.current === epoch && currentRoutineId.current === routineId;
     if (serverBackedMode && currentRoutine?.occurrenceId) {
       if (!sessionCoordinator?.confirmOccurrence) {
         setCoordinatorError("设备端日程确认接口尚未就绪，请刷新后重试。");
@@ -291,14 +385,18 @@ export const CareExperience = forwardRef<
           currentRoutine.occurrenceId,
           source === "voice" ? "RECIPIENT_VOICE" : "RECIPIENT_BUTTON",
         );
+        if (!ownsConfirmation()) return;
       } catch (error) {
+        if (!ownsConfirmation()) return;
         setCoordinatorError(
           error instanceof Error ? error.message : "日程确认失败，请重试。",
         );
         return;
       }
     }
-    dispatch({ type: "USER_CONFIRMED", at: new Date().toISOString() });
+    // The reducer also checks identity: a queued B transition may not have
+    // rendered yet when A's receipt resolves in the same React batch.
+    dispatch({ type: "USER_CONFIRMED", routineId, at: new Date().toISOString() });
     updateState((current) => ({
       ...current,
       events: resolveOpenTaskEvents(current.events, currentRoutine?.id),
@@ -316,6 +414,7 @@ export const CareExperience = forwardRef<
   };
 
   const repeatReminder = () => {
+    if (serverBackedMode) { void runServerRoutine(true); return; }
     const text = currentRoutine
       ? `好的，我慢一点再说一次。现在只需要先看看${currentRoutine.instructions}`
       : "好的，我会慢一点再说一次。";
@@ -330,34 +429,55 @@ export const CareExperience = forwardRef<
 
   const requestFamily = async (source: "user" | "agent" = "user") => {
     if (agent.phase === "idle" || agent.phase === "completed") return;
+    const routineId = currentRoutine?.id;
+    if (
+      agent.phase === "awaiting_confirmation" &&
+      (!routineId || routineId !== agent.activeRoutineId)
+    ) return;
+    const epoch = routineEpoch.current;
+    const ownsContext = () =>
+      routineEpoch.current === epoch && currentRoutineId.current === routineId;
     if (serverBackedMode) {
+      const pending = familyRequestOwner.current;
+      if (pending?.epoch === epoch && pending.routineId === routineId) return;
       if (!sessionCoordinator?.requestFamily) {
         setCoordinatorError("设备端家庭联系接口尚未就绪，请刷新后重试。");
         return;
       }
+      // A replaced occurrence or session may start a new request while its
+      // predecessor's transport is still pending. Only this owner can publish.
+      const owner = { epoch, routineId };
+      familyRequestOwner.current = owner;
+      const ownsRequest = () =>
+        familyRequestOwner.current === owner && ownsContext();
       setCoordinatorError("");
-      setFamilyRequestPending(true);
+      setPendingFamilyRequest(owner);
       try {
         await sessionCoordinator.requestFamily(
           source === "agent" ? "COMPANION_TIMEOUT" : "RECIPIENT_BUTTON",
           currentRoutine?.occurrenceId,
         );
+        if (!ownsRequest()) return;
       } catch (error) {
+        if (!ownsRequest()) return;
         setCoordinatorError(
           error instanceof Error ? error.message : "联系家人请求失败，请重试。",
         );
         return;
       } finally {
-        setFamilyRequestPending(false);
+        if (ownsRequest()) {
+          familyRequestOwner.current = null;
+          setPendingFamilyRequest(current => current === owner ? null : current);
+        }
       }
     }
-    dispatch({
-      type:
-        agent.phase === "awaiting_confirmation"
-          ? "CONFIRMATION_TIMEOUT"
-          : "FAMILY_REQUESTED",
-      at: new Date().toISOString(),
-    });
+    if (!ownsContext()) return;
+    const at = new Date().toISOString();
+    if (agent.phase === "awaiting_confirmation" && routineId) {
+      dispatch({ type: "CONFIRMATION_TIMEOUT", routineId, at });
+    } else {
+      dispatch({ type: "FAMILY_REQUESTED", routineId: agent.activeRoutineId, at });
+    }
     const person = state.trustedPeople[0];
     sayIfReplay(
       `好的，我不会猜测。已经把这件事标记为待${person?.relationship ?? "家属"}查看。`,

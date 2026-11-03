@@ -170,6 +170,7 @@ describeMySql(
               }),
           },
           routineOccurrence: fixture.db.routineOccurrence,
+          $transaction: fixture.db.$transaction.bind(fixture.db),
         } as never,
         fixture.app.get(CARE_WORKFLOW_CONTENT_CIPHER),
       );

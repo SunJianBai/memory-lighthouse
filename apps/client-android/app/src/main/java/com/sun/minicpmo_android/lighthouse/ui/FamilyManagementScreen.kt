@@ -142,6 +142,7 @@ internal class FamilyUiActions(
     val removeHouseholdMember: (HouseholdMemberView, String) -> Unit,
     val putCareAuthority: (String, CareAuthorityInput, String) -> Unit,
     val revokeBinding: (CompanionBindingView, String?, String) -> Unit,
+    val setRoutinePaused: (RoutineView, Boolean) -> Unit = { _, _ -> },
 )
 
 private enum class FamilySection(
@@ -186,6 +187,9 @@ internal fun FamilyManagementContent(
     var routineEditorVisible by remember { mutableStateOf(false) }
     var routineSaveSubmitted by remember { mutableStateOf(false) }
     var routineDelete by remember { mutableStateOf<RoutineView?>(null) }
+    val routineScope = "${state.user?.id}/${state.selectedHouseholdId}/${state.selectedRecipientId}/${state.careHistoryScopeRevision}/${state.signedIn}"
+    var routineLifecycle by remember(routineScope) { mutableStateOf<RoutineView?>(null) }
+    var routineLifecycleSubmitted by remember(routineScope) { mutableStateOf(false) }
     var taskDecision by remember { mutableStateOf<TaskDecision?>(null) }
     var occurrenceDecision by remember { mutableStateOf<OccurrenceDecision?>(null) }
     var consentDecision by remember { mutableStateOf<ConsentDecision?>(null) }
@@ -278,6 +282,7 @@ internal fun FamilyManagementContent(
                         routineEditorVisible = true
                     },
                     onDeleteRoutine = { routineDelete = it },
+                    onRoutineLifecycle = { routineLifecycle = it; routineLifecycleSubmitted = false },
                     onVerifyOccurrence = { occurrence, verified ->
                         occurrenceDecision = OccurrenceDecision(occurrence, verified)
                     },
@@ -433,6 +438,25 @@ internal fun FamilyManagementContent(
                 routineEditor?.let { actions.updateRoutine(it, input) }
                     ?: actions.createRoutine(input)
             },
+        )
+    }
+    LaunchedEffect(state.routineCommandRevision, state.routineLoadError) {
+        if (routineLifecycleSubmitted || state.routineLoadError != null) {
+            routineLifecycle = null
+            routineLifecycleSubmitted = false
+        }
+    }
+    routineLifecycle?.let { routine ->
+        RoutineLifecycleDialog(
+            routine = routine,
+            busy = state.busy || state.routineCommandPendingId != null,
+            error = state.routineCommandError.takeIf { routineLifecycleSubmitted },
+            onDismiss = { routineLifecycle = null; routineLifecycleSubmitted = false },
+            onConfirm = {
+                routineLifecycleSubmitted = true
+                actions.setRoutinePaused(routine, routine.status == "ACTIVE")
+            },
+            onEdit = { routineEditor = routine; routineEditorVisible = true; routineLifecycle = null },
         )
     }
     routineDelete?.let { routine ->
@@ -1377,6 +1401,7 @@ internal fun CareSection(
     onClaimTask: (FamilyTaskView) -> Unit,
     onReleaseTask: (FamilyTaskView) -> Unit,
     onFinishTask: (FamilyTaskView, Boolean) -> Unit,
+    onRoutineLifecycle: (RoutineView) -> Unit = {},
 ) {
     var taskFilter by remember(state.selectedHouseholdId, state.selectedRecipientId, state.user?.id) { mutableStateOf(FamilyTaskFilter.UNFINISHED) }
     val visibleTasks = taskFilter.select(state.familyTasks)
@@ -1398,7 +1423,7 @@ internal fun CareSection(
                 onAction = onAddRoutine,
             )
         }
-        item { SectionHeading("日程规则", Icons.Rounded.Schedule) }
+        item { SectionHeading("日程安排", Icons.Rounded.Schedule) }
         if (state.routineLoadError != null) {
             item { InlineEmpty("日程未能加载", state.routineLoadError) }
         } else if (state.busy && state.routines.isEmpty()) {
@@ -1407,7 +1432,7 @@ internal fun CareSection(
             item { InlineEmpty("暂无日程", "点击新增开始安排。") }
         } else {
             items(state.routines, key = { "routine-${it.id}" }) { routine ->
-                RoutineCard(routine, onEditRoutine, onDeleteRoutine)
+                RoutineCard(routine, onEditRoutine, onDeleteRoutine, onRoutineLifecycle, state.busy || state.routineCommandPendingId != null)
             }
         }
         item { SectionHeading("家庭待办", Icons.AutoMirrored.Rounded.Assignment) }
@@ -1543,10 +1568,13 @@ internal fun PrivacySection(
 }
 
 @Composable
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 private fun RoutineCard(
     routine: RoutineView,
     onEdit: (RoutineView) -> Unit,
     onDelete: (RoutineView) -> Unit,
+    onLifecycle: (RoutineView) -> Unit,
+    busy: Boolean,
 ) {
     val schedule = routine.schedules.firstOrNull()
     OutlinedCard(Modifier.fillMaxWidth().testTag("routine-card")) {
@@ -1554,16 +1582,17 @@ private fun RoutineCard(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 StatusLabel(routineTypeLabel(routine.type))
-                Spacer(Modifier.width(8.dp))
                 Text(
                     schedule?.localTimeMinutes?.let(::formatMinutes) ?: "未排期",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                 )
-                Spacer(Modifier.weight(1f))
-                StatusLabel(statusLabel(routine.status))
+                StatusLabel(routineStatusLabel(routine.status))
             }
             Text(routine.title, style = MaterialTheme.typography.titleLarge)
             Text(routine.instructions, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1578,17 +1607,24 @@ private fun RoutineCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            androidx.compose.foundation.layout.FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(
                     onClick = { onEdit(routine) },
+                    enabled = !busy && routine.status in setOf("ACTIVE", "PAUSED"),
                     modifier = Modifier.heightIn(min = 48.dp),
                 ) {
                     Icon(Icons.Rounded.Edit, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
                     Text("编辑")
                 }
+                routineLifecycleActionLabel(routine.status)?.let { label ->
+                    TextButton(onClick = { onLifecycle(routine) }, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text(label)
+                    }
+                }
                 TextButton(
                     onClick = { onDelete(routine) },
+                    enabled = !busy && routine.status in setOf("ACTIVE", "PAUSED"),
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,
                     ),
@@ -1720,6 +1756,9 @@ internal fun OccurrenceCard(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             StatusLabel(occurrenceStatusLabel(occurrence.status))
+            occurrenceClosureLabel(occurrence.status, occurrence.closureReason)?.let {
+                Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Text(formatCareHistoryTime(occurrence.scheduledAtUtc, timezone), style = MaterialTheme.typography.bodyLarge)
             Text(occurrence.routineTitle, style = MaterialTheme.typography.titleMedium)
             Text(occurrence.instructions, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -2188,7 +2227,7 @@ internal fun RoutineEditorDialog(
                 Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (routine != null) Text("修改整条日程规则；已确认及已产生的家庭待办会保留。")
+                if (routine != null) Text(if (routine.status == "PAUSED") "保存后仍保持暂停；需要另行恢复才会安排提醒。" else "修改整条日程规则；已确认及已产生的家庭待办会保留。")
                 Text("日程类型", style = MaterialTheme.typography.labelLarge)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(ROUTINE_TYPES) { item ->

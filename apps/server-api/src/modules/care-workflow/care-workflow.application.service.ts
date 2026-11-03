@@ -18,7 +18,6 @@ import {
   OCCURRENCE_STATUS,
   ROUTINE_STATUS,
   ROUTINE_TYPES,
-  SERIALIZABLE_RETRY_LIMIT,
   type RoutineType,
 } from './care-workflow.constants';
 import {
@@ -33,6 +32,7 @@ import {
   InvalidScheduleException,
   OccurrenceNotFoundException,
   RoutineNotFoundException,
+  RoutineNoFutureOccurrenceException,
 } from './care-workflow.errors';
 import type {
   CareEventView,
@@ -51,6 +51,7 @@ import type {
   RoutineScheduleInput,
   RoutineView,
   UpdateRoutineCommand,
+  RoutineLifecycleCommand,
 } from './care-workflow.types';
 import {
   assertTaskCanClaim,
@@ -77,6 +78,8 @@ import {
   type OccurrenceRecord,
   type ProtectedCarePair,
 } from './care-record.projection';
+import { lockRoutine, routineTransaction } from './routine-transaction';
+import { hasFutureOccurrence } from './domain/schedule-time';
 
 type TransactionClient = Prisma.TransactionClient;
 
@@ -109,6 +112,7 @@ interface ScheduleRecord {
   familyNoticeMinutes: number;
   scheduleVersion: number;
   active?: boolean;
+  effectiveFromUtc?: Date | null;
 }
 
 interface FamilyTaskRecord {
@@ -146,8 +150,8 @@ interface OccurrenceConfirmationActor {
   bindingId: string | null;
 }
 
-const ACTIVE_SCHEDULE_INCLUDE = {
-  schedules: { where: { active: true }, orderBy: { scheduleVersion: 'desc' } },
+const LATEST_SCHEDULE_INCLUDE = {
+  schedules: { orderBy: { scheduleVersion: 'desc' }, take: 1 },
 } as const;
 
 @Injectable()
@@ -164,6 +168,7 @@ export class CareWorkflowApplicationService {
     principal: CareWorkflowPrincipal,
     householdId: string,
     recipientId: string,
+    includePaused = false,
   ): Promise<RoutineView[]> {
     await this.policy.requireRecipientAction(
       this.prisma,
@@ -176,10 +181,12 @@ export class CareWorkflowApplicationService {
       where: {
         householdId,
         recipientId,
-        status: ROUTINE_STATUS.active,
+        status: includePaused
+          ? { in: [ROUTINE_STATUS.active, ROUTINE_STATUS.paused] }
+          : ROUTINE_STATUS.active,
         deletedAt: null,
       },
-      include: ACTIVE_SCHEDULE_INCLUDE,
+      include: LATEST_SCHEDULE_INCLUDE,
       orderBy: { createdAt: 'desc' },
     })) as RoutineRecord[];
     return records.map((record) => this.toRoutineView(record));
@@ -246,7 +253,7 @@ export class CareWorkflowApplicationService {
             },
           },
         },
-        include: ACTIVE_SCHEDULE_INCLUDE,
+        include: LATEST_SCHEDULE_INCLUDE,
       })) as unknown as RoutineRecord;
       await this.writeOutbox(transaction, now, {
         aggregateType: 'ROUTINE',
@@ -257,6 +264,171 @@ export class CareWorkflowApplicationService {
       return record;
     });
     return this.toRoutineView(created);
+  }
+
+  pauseRoutine(
+    principal: CareWorkflowPrincipal,
+    householdId: string,
+    routineId: string,
+    command: RoutineLifecycleCommand,
+  ): Promise<RoutineView> {
+    return this.changeRoutineLifecycle(
+      principal,
+      householdId,
+      routineId,
+      command,
+      'PAUSE',
+    );
+  }
+
+  resumeRoutine(
+    principal: CareWorkflowPrincipal,
+    householdId: string,
+    routineId: string,
+    command: RoutineLifecycleCommand,
+  ): Promise<RoutineView> {
+    return this.changeRoutineLifecycle(
+      principal,
+      householdId,
+      routineId,
+      command,
+      'RESUME',
+    );
+  }
+
+  private async changeRoutineLifecycle(
+    principal: CareWorkflowPrincipal,
+    householdId: string,
+    routineId: string,
+    command: RoutineLifecycleCommand,
+    action: 'PAUSE' | 'RESUME',
+  ): Promise<RoutineView> {
+    const idempotencyKey = this.requiredText(
+      command.idempotencyKey,
+      'idempotencyKey',
+    );
+    const commandType = `ROUTINE_${action}`;
+    const fingerprint = fingerprintCareCommand({
+      actorUserId: principal.userId,
+      householdId,
+      routineId,
+      commandType,
+      version: command.version,
+    });
+    return routineTransaction(this.prisma, async (transaction) => {
+      await lockRoutine(transaction, routineId);
+      const current = (await transaction.routine.findFirst({
+        where: { id: routineId, householdId },
+        include: LATEST_SCHEDULE_INCLUDE,
+      })) as RoutineRecord | null;
+      if (!current) throw new RoutineNotFoundException();
+      const actor = await this.policy.requireRecipientAction(
+        transaction,
+        principal.userId,
+        householdId,
+        current.recipientId,
+        'MANAGE_ROUTINE',
+      );
+      const replay = await replayCareCommand<RoutineView>(
+        transaction,
+        idempotencyKey,
+        commandType,
+        fingerprint,
+        this.cipher,
+      );
+      if (replay) return replay;
+      if (current.status === ROUTINE_STATUS.deleted)
+        throw new RoutineNotFoundException();
+      const expectedStatus =
+        action === 'PAUSE' ? ROUTINE_STATUS.active : ROUTINE_STATUS.paused;
+      if (
+        current.version !== command.version ||
+        current.status !== expectedStatus
+      )
+        throw new CareWorkflowVersionConflictException();
+      const now = this.clock.now();
+      const schedule = current.schedules[0];
+      if (
+        action === 'RESUME' &&
+        (!schedule || !hasFutureOccurrence(schedule, now))
+      )
+        throw new RoutineNoFutureOccurrenceException();
+      await transaction.routineSchedule.updateMany({
+        where: { routineId, active: true },
+        data: { active: false },
+      });
+      if (action === 'PAUSE') {
+        await transaction.routineOccurrence.updateMany({
+          where: {
+            routineId,
+            status: {
+              in: [
+                OCCURRENCE_STATUS.due,
+                OCCURRENCE_STATUS.awaitingConfirmation,
+              ],
+            },
+          },
+          data: {
+            status: OCCURRENCE_STATUS.expired,
+            closureReason: 'ROUTINE_PAUSED',
+            version: { increment: 1 },
+          },
+        });
+      } else {
+        await transaction.routineSchedule.create({
+          data: {
+            id: newUlid(now.getTime()),
+            routineId,
+            timezone: schedule.timezone,
+            localTimeMinutes: schedule.localTimeMinutes,
+            weekdayMask: schedule.weekdayMask,
+            startDate: schedule.startDate,
+            endDate: schedule.endDate,
+            graceMinutes: schedule.graceMinutes,
+            familyNoticeMinutes: schedule.familyNoticeMinutes,
+            scheduleVersion: schedule.scheduleVersion + 1,
+            active: true,
+            effectiveFromUtc: now,
+          },
+        });
+      }
+      const changed = await transaction.routine.updateMany({
+        where: { id: routineId, householdId, version: command.version },
+        data: {
+          status:
+            action === 'PAUSE' ? ROUTINE_STATUS.paused : ROUTINE_STATUS.active,
+          version: { increment: 1 },
+        },
+      });
+      if (changed.count !== 1) throw new CareWorkflowVersionConflictException();
+      await this.writeOutbox(transaction, now, {
+        aggregateType: 'ROUTINE',
+        aggregateId: routineId,
+        eventType: action === 'PAUSE' ? 'routine.paused' : 'routine.resumed',
+        payload: {
+          householdId,
+          recipientId: current.recipientId,
+          routineId,
+          actorMemberId: actor.id,
+          previousVersion: current.version,
+          version: current.version + 1,
+          effectiveAtUtc: now.toISOString(),
+        },
+      });
+      const result = (await transaction.routine.findUniqueOrThrow({
+        where: { id: routineId },
+        include: LATEST_SCHEDULE_INCLUDE,
+      })) as RoutineRecord;
+      return saveCareCommand(
+        transaction,
+        now,
+        idempotencyKey,
+        commandType,
+        fingerprint,
+        this.toRoutineView(result),
+        this.cipher,
+      );
+    });
   }
 
   async updateRoutine(
@@ -275,17 +447,16 @@ export class CareWorkflowApplicationService {
       edit,
     });
     return this.retrySerializable(async (transaction) => {
+      await lockRoutine(transaction, routineId);
       const current = (await transaction.routine.findFirst({
         where: {
           id: routineId,
           householdId,
-          status: ROUTINE_STATUS.active,
-          deletedAt: null,
         },
-        include: ACTIVE_SCHEDULE_INCLUDE,
+        include: LATEST_SCHEDULE_INCLUDE,
       })) as RoutineRecord | null;
       if (!current) throw new RoutineNotFoundException();
-      await this.policy.requireRecipientAction(
+      const actor = await this.policy.requireRecipientAction(
         transaction,
         principal.userId,
         householdId,
@@ -302,6 +473,12 @@ export class CareWorkflowApplicationService {
         );
         if (replay) return replay;
       }
+      if (
+        ![ROUTINE_STATUS.active, ROUTINE_STATUS.paused].includes(
+          current.status as 'ACTIVE' | 'PAUSED',
+        )
+      )
+        throw new RoutineNotFoundException();
       if (current.version !== command.version) {
         throw new CareWorkflowVersionConflictException();
       }
@@ -391,7 +568,8 @@ export class CareWorkflowApplicationService {
             routineId,
             ...schedule,
             scheduleVersion: nextVersion,
-            active: true,
+            active: current.status === ROUTINE_STATUS.active,
+            effectiveFromUtc: currentSchedule?.effectiveFromUtc ?? null,
           },
         });
       }
@@ -399,11 +577,19 @@ export class CareWorkflowApplicationService {
         aggregateType: 'ROUTINE',
         aggregateId: routineId,
         eventType: 'routine.updated',
-        payload: { householdId, recipientId: current.recipientId, routineId },
+        payload: {
+          householdId,
+          recipientId: current.recipientId,
+          routineId,
+          actorMemberId: actor.id,
+          previousVersion: current.version,
+          version: current.version + 1,
+          status: current.status,
+        },
       });
       const result = (await transaction.routine.findUniqueOrThrow({
         where: { id: routineId },
-        include: ACTIVE_SCHEDULE_INCLUDE,
+        include: LATEST_SCHEDULE_INCLUDE,
       })) as RoutineRecord;
       const view = this.toRoutineView(result);
       return idempotencyKey
@@ -428,11 +614,12 @@ export class CareWorkflowApplicationService {
   ): Promise<void> {
     const now = this.clock.now();
     await this.serializable(async (transaction) => {
+      await lockRoutine(transaction, routineId);
       const routine = await transaction.routine.findFirst({
         where: {
           id: routineId,
           householdId,
-          status: ROUTINE_STATUS.active,
+          status: { in: [ROUTINE_STATUS.active, ROUTINE_STATUS.paused] },
           deletedAt: null,
         },
         select: { recipientId: true, version: true },
@@ -933,7 +1120,15 @@ export class CareWorkflowApplicationService {
       authority.kind === 'DEVICE'
         ? authority.principal.householdId
         : authority.householdId;
+    // Only immutable ownership is discovered outside the transaction. Current
+    // state and permission are read again after the common routine lock.
+    const owner = await this.prisma.routineOccurrence.findFirst({
+      where: { id: occurrenceId, householdId },
+      select: { routineId: true },
+    });
+    if (!owner) throw new OccurrenceNotFoundException();
     return this.retrySerializable(async (transaction) => {
+      await lockRoutine(transaction, owner.routineId);
       const occurrence = (await transaction.routineOccurrence.findFirst({
         where: {
           id: occurrenceId,
@@ -1585,35 +1780,13 @@ export class CareWorkflowApplicationService {
   private serializable<T>(
     work: (transaction: TransactionClient) => Promise<T>,
   ): Promise<T> {
-    return this.prisma.$transaction(work, {
-      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-    });
+    return routineTransaction(this.prisma, work);
   }
 
-  private async retrySerializable<T>(
+  private retrySerializable<T>(
     work: (transaction: TransactionClient) => Promise<T>,
   ): Promise<T> {
-    for (let attempt = 1; attempt <= SERIALIZABLE_RETRY_LIMIT; attempt += 1) {
-      try {
-        return await this.serializable(work);
-      } catch (error) {
-        if (
-          this.isRetryableConflict(error) &&
-          attempt < SERIALIZABLE_RETRY_LIMIT
-        ) {
-          continue;
-        }
-        throw error;
-      }
-    }
-    throw new CareWorkflowVersionConflictException();
-  }
-
-  private isRetryableConflict(error: unknown): boolean {
-    return (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      (error.code === 'P2034' || error.code === 'P2002')
-    );
+    return routineTransaction(this.prisma, work);
   }
 
   private toPrismaBytes(value: Uint8Array): Uint8Array<ArrayBuffer> {

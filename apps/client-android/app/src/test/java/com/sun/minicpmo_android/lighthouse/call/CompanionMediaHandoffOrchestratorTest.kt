@@ -50,11 +50,12 @@ class CompanionMediaHandoffOrchestratorTest {
         orchestrator.attachLocalStopConsumer()
 
         val stop = launch(start = CoroutineStart.UNDISPATCHED) {
-            orchestrator.applyMediaDirective(DeviceMediaDirective.STOP, "session-a")
+            orchestrator.applyMediaDirective(DeviceMediaDirective.STOP, "session-a", "ROUTINES_CHANGED")
         }
         val stopping = orchestrator.state.value as CompanionMediaHandoffState.StoppingLocalCompanion
         assertEquals(CompanionMediaStopReason.SERVER_DIRECTIVE, stopping.reason)
         assertEquals("session-a", stopping.sessionId)
+        assertEquals("ROUTINES_CHANGED", stopping.directiveReason)
 
         orchestrator.completeLocalStop(stopping.requestId)
         stop.join()

@@ -62,6 +62,11 @@ export interface UpdateRoutineCommand {
   schedule?: RoutineScheduleInput;
 }
 
+export interface RoutineLifecycleCommand {
+  version: number;
+  idempotencyKey: string;
+}
+
 export interface OccurrenceView {
   id: string;
   householdId: string;
@@ -78,6 +83,7 @@ export interface OccurrenceView {
   confirmationDeadlineAt: string | null;
   escalationAt: string | null;
   completedAt: string | null;
+  closureReason?: string | null;
   version: number;
 }
 

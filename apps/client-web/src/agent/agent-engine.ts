@@ -37,7 +37,10 @@ export const transitionAgent = (
         message: "提醒已送达，等待本人确认",
       };
     case "USER_CONFIRMED":
-      if (state.phase !== "awaiting_confirmation") return state;
+      if (
+        state.phase !== "awaiting_confirmation" ||
+        state.activeRoutineId !== action.routineId
+      ) return state;
       return {
         ...state,
         phase: "completed",
@@ -45,7 +48,10 @@ export const transitionAgent = (
         message: "本人已确认，任务闭环完成",
       };
     case "CONFIRMATION_TIMEOUT":
-      if (state.phase !== "awaiting_confirmation") return state;
+      if (
+        state.phase !== "awaiting_confirmation" ||
+        state.activeRoutineId !== action.routineId
+      ) return state;
       return {
         ...state,
         phase: "needs_attention",
@@ -53,7 +59,10 @@ export const transitionAgent = (
         message: "未获得明确确认，标记为待家属查看",
       };
     case "FAMILY_REQUESTED":
-      if (state.phase === "idle" || state.phase === "completed") return state;
+      if (
+        state.phase === "idle" || state.phase === "completed" ||
+        state.activeRoutineId !== action.routineId
+      ) return state;
       return {
         ...state,
         phase: "needs_attention",

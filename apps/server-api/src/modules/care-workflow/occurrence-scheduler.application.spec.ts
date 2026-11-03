@@ -3,6 +3,33 @@ import type { CareWorkflowContentCipher } from './ports/content-cipher.port';
 import { PrismaOccurrenceScheduler } from './occurrence-scheduler.application';
 
 describe('PrismaOccurrenceScheduler', () => {
+  it('does not generate from an in-flight candidate after pause has invalidated its schedule', async () => {
+    const db = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'routine-1' }]),
+      routineSchedule: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ id: 'old-schedule', routineId: 'routine-1' }]),
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
+      routineOccurrence: { createMany: jest.fn() },
+    };
+    const scheduler = new PrismaOccurrenceScheduler(
+      {
+        ...db,
+        $transaction: async (work: (tx: unknown) => Promise<unknown>) =>
+          work(db),
+      } as unknown as PrismaService,
+      {} as CareWorkflowContentCipher,
+    );
+    expect(
+      await scheduler.generateOccurrences({
+        windowStartUtc: new Date('2026-08-01'),
+        windowEndUtc: new Date('2026-08-02'),
+      }),
+    ).toEqual({ attempted: 0, created: 0 });
+    expect(db.routineOccurrence.createMany).not.toHaveBeenCalled();
+  });
   it('is idempotent when the same schedule window is generated twice', async () => {
     const seen = new Set<string>();
     const prisma = {
@@ -46,6 +73,14 @@ describe('PrismaOccurrenceScheduler', () => {
       },
     };
     const cipher = {} as CareWorkflowContentCipher;
+    Object.assign(prisma, {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'routine-1' }]),
+      $transaction: async (work: (transaction: unknown) => Promise<unknown>) =>
+        work(prisma),
+    });
+    Object.assign(prisma.routineSchedule, {
+      findFirst: async () => (await prisma.routineSchedule.findMany())[0],
+    });
     const scheduler = new PrismaOccurrenceScheduler(
       prisma as unknown as PrismaService,
       cipher,

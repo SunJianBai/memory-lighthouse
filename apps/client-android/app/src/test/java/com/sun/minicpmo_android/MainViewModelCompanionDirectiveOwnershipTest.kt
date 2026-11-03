@@ -62,7 +62,7 @@ class MainViewModelCompanionDirectiveOwnershipTest {
                 viewModel.startDuplex()
                 runCurrent()
                 val deliverLateStopFromA = {
-                    viewModel.stopForServerDirective("session-a")
+                    viewModel.stopForServerDirective("session-a", "ROUTINES_CHANGED")
                 }
 
                 viewModel.stopSession(quiet = true)
@@ -100,9 +100,10 @@ class MainViewModelCompanionDirectiveOwnershipTest {
             runCurrent()
             clearMocks(audio, realtime, bridge, answers = false)
 
-            val stopped = viewModel.stopForServerDirective("session-a")
+            val stopped = viewModel.stopForServerDirective("session-a", "ROUTINES_CHANGED")
 
             assertEquals(SessionPhase.STOPPED, viewModel.uiState.value.phase)
+            assertEquals("日程已更新，请重新开始陪伴", viewModel.uiState.value.statusText)
             verify(exactly = 1) { audio.stop() }
             verify(exactly = 1) { realtime.close("remote_call") }
             verify(exactly = 1) {
