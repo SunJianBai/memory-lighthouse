@@ -690,14 +690,45 @@ describe("independent routine and task loading", () => {
     expect(container.textContent).toContain("状态未知");
     expect(container.textContent).toContain("时间未知");
     expect(container.textContent).not.toContain("FUTURE_STATE");
-    await click("核验已完成");
-    expect(fixture.request).toHaveBeenCalledWith(
-      "/households/home/occurrences/review/family-verify",
-      expect.objectContaining({
-        method: "POST",
-        body: expect.objectContaining({ version: 2, verified: true }),
-      }),
-    );
+    // Web Crypto completes independently of React's click/act boundary.
+    // Hold the real digest so this test also covers a slower CI worker.
+    let completeDigest!: () => void;
+    const digestReady = new Promise<void>((resolve) => {
+      completeDigest = resolve;
+    });
+    const originalDigest = crypto.subtle.digest.bind(crypto.subtle);
+    const digestSpy = vi
+      .spyOn(crypto.subtle, "digest")
+      .mockImplementationOnce(async (algorithm, data) => {
+        await digestReady;
+        return originalDigest(algorithm, data);
+      });
+    try {
+      await click("核验已完成");
+      expect(digestSpy).toHaveBeenCalledTimes(1);
+      expect(fixture.request).not.toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ method: "POST" }),
+      );
+      completeDigest();
+      await settle(() => {
+        expect(fixture.request).toHaveBeenCalledWith(
+          "/households/home/occurrences/review/family-verify",
+          expect.objectContaining({
+            method: "POST",
+            body: expect.objectContaining({ version: 2, verified: true }),
+          }),
+        );
+        // Also let digest cleanup and the follow-up refresh finish before unmount.
+        const verifyButton = Array.from(
+          container.querySelectorAll("button"),
+        ).find((node) => node.textContent?.trim() === "核验已完成");
+        expect(verifyButton?.disabled).toBe(false);
+      });
+    } finally {
+      completeDigest();
+      digestSpy.mockRestore();
+    }
   });
   it("keeps separately authorized routines when a faster history request is denied", async () => {
     let complete!: (value: unknown) => void;
