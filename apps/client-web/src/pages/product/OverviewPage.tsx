@@ -170,7 +170,7 @@ export const OverviewPage = () => {
       <section className="recipient-hero">
         <span className="recipient-monogram" aria-hidden="true">{workspace.recipient?.preferredName.slice(0, 1)}</span>
         <div>
-          <p className="eyebrow">当前陪伴对象</p>
+
           <h2>{workspace.recipient?.preferredName}</h2>
           <p>{workspace.recipient?.homeLabel || "尚未填写家庭位置"} · {workspace.recipient?.timezone}</p>
         </div>
@@ -186,7 +186,7 @@ export const OverviewPage = () => {
       </section>
 
       <section className="quick-action-grid" aria-labelledby="quick-actions-title">
-        <div className="section-heading span-full"><p className="eyebrow">常用功能</p><h2 id="quick-actions-title">快捷操作</h2></div>
+        <div className="section-heading span-full"><h2 id="quick-actions-title">快捷操作</h2></div>
         {quickActions.map((action) => {
           const Icon = action.icon;
           return (
@@ -200,7 +200,7 @@ export const OverviewPage = () => {
       </section>
 
       <section className="panel-card household-members-panel">
-        <div className="panel-heading"><div><p className="eyebrow">成员与角色</p><h2>家庭成员</h2></div><span className="count-badge"><Users aria-hidden="true" size={17} /> {members.length}</span></div>
+        <div className="panel-heading"><div><h2>家庭成员</h2></div><span className="count-badge"><Users aria-hidden="true" size={17} /> {members.length}</span></div>
         <div className="member-invite-layout">
           <div className="member-list">
             {members.map((member) => <article key={member.id}><span>{member.displayName.slice(0, 1)}</span><div><strong>{member.displayName}</strong><p>{member.roleCodes.join(" / ")} · {member.status}</p></div></article>)}

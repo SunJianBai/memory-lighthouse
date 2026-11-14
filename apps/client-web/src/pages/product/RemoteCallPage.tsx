@@ -624,7 +624,7 @@ export const RemoteCallPage = () => {
       <aside className="remote-control-card panel-card">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">现场接听</p>
+            <p className="field-help">需在陪伴设备上接听</p>
             <h2>远程通话</h2>
           </div>
           <PhoneCall aria-hidden="true" size={25} />

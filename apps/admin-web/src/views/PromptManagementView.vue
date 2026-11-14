@@ -116,7 +116,7 @@ onBeforeUnmount(() =>
   <div class="page-stack">
     <header class="page-header">
       <div>
-        <p class="eyebrow">MiniCPM-o 4.5 全双工全模态应用</p>
+
         <h1 id="page-title">提示词</h1>
         <p>查看当前基础提示词并发布不可变修订。</p>
       </div>

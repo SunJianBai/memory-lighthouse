@@ -6,7 +6,6 @@ import {
   HeartHandshake,
   BookOpenText,
   ShieldCheck,
-  Sparkles,
 } from "lucide-react";
 import { hrefFor, navigate } from "../app/navigation";
 import { useAuth } from "../auth/auth-context";
@@ -67,14 +66,11 @@ export const WelcomePage = () => {
 
       <section className="welcome-hero" aria-labelledby="welcome-title">
         <div className="hero-copy">
-          <span className="hero-kicker">
-            <Sparkles aria-hidden="true" size={18} />
-            MiniCPM-o 4.5 全双工全模态应用
-          </span>
           <h1 id="welcome-title">守忆灯塔</h1>
           <p>
             长者陪伴、记忆档案、日程提醒和家庭远程通话。
           </p>
+          <p className="welcome-model-note">MiniCPM-o 4.5 全双工全模态应用</p>
           <div className="hero-actions">
             <button
               className="primary-button large"
@@ -113,31 +109,19 @@ export const WelcomePage = () => {
           </details>
         </div>
 
-        <div className="lighthouse-visual" aria-label="守忆灯塔交互状态示意">
-          <div className="visual-orbit orbit-one" />
-          <div className="visual-orbit orbit-two" />
-          <div className="beacon-card">
-            <div className="beacon-pulse">
-              <BellRing aria-hidden="true" size={36} />
-            </div>
-            <span>陪伴设备</span>
-            <strong>陪伴设备配置</strong>
-            <p>家属端管理设备，陪伴端开始会话</p>
-          </div>
-          <div className="floating-note note-top">
-            <span className="status-dot green" />
-            摄像头仅在会话中开启
-          </div>
-          <div className="floating-note note-bottom">
-            <HeartHandshake aria-hidden="true" size={18} />
-            家属可查看待确认事件
-          </div>
-        </div>
+        <aside className="welcome-start" aria-labelledby="welcome-start-title">
+          <h2 id="welcome-start-title">首次使用</h2>
+          <ol>
+            <li><strong>创建家庭</strong><span>注册账号，验证邮箱并添加陪伴对象。</span></li>
+            <li><strong>整理档案与日程</strong><span>补充生活偏好、家庭记忆和提醒安排。</span></li>
+            <li><strong>连接陪伴设备</strong><span>通过二维码或激活码完成绑定。</span></li>
+          </ol>
+          <a className="guide-text-link" href={hrefFor("guide")}>查看使用指南 <ArrowRight size={18} aria-hidden="true" /></a>
+        </aside>
       </section>
 
       <section className="role-section" aria-labelledby="role-title">
         <div className="section-heading">
-          <p className="eyebrow">产品入口</p>
           <h2 id="role-title">选择使用端</h2>
         </div>
         <div className="role-grid">

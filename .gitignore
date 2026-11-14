@@ -17,3 +17,12 @@ __pycache__/
 /data/
 /uploads/
 /recordings/
+
+# Local design exploration, screenshots, and preview databases are not release assets.
+.hallmark/
+apps/client-web/.impeccable/*
+!apps/client-web/.impeccable/mocks/
+apps/client-web/.impeccable/mocks/*
+!apps/client-web/.impeccable/mocks/decision/
+apps/client-web/.impeccable/mocks/decision/*
+!apps/client-web/.impeccable/mocks/decision/warm.html

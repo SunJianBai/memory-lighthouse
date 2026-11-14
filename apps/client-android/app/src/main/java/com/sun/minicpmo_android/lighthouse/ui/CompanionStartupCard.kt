@@ -58,7 +58,7 @@ internal fun CompanionStartupCard(
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer); check.invalidate() }
     }
-    OutlinedCard(Modifier.fillMaxWidth().testTag("companion-startup-check")) {
+    ArchiveSection(Modifier.fillMaxWidth().testTag("companion-startup-check")) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             TextButton(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                 Text(if (expanded) "收起启动检查" else "启动检查", style = MaterialTheme.typography.titleMedium)

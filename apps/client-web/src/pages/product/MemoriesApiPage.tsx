@@ -265,7 +265,7 @@ export const MemoriesApiPage = () => {
 
       {formOpen && (
         <form className="panel-card resource-form" onSubmit={(event) => void create(event)}>
-          <div className="panel-heading"><div><p className="eyebrow">家属录入</p><h2>{editing ? "编辑记忆" : "新增记忆"}</h2></div></div>
+          <div className="panel-heading"><div><h2>{editing ? "编辑记忆" : "新增记忆"}</h2></div></div>
           <div className="form-grid two-columns">
             <label>类型
               <span className="select-wrap"><select value={kind} onChange={(event) => setKind(event.target.value)}>{Object.entries(kindLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><ChevronDown aria-hidden="true" size={17} /></span>

@@ -218,7 +218,7 @@ export const PrivacyPage = () => {
         <header className="admin-access-heading">
           <span className="admin-access-heading-icon"><Bell aria-hidden="true" size={23} /></span>
           <div>
-            <p className="eyebrow">站内隐私通知</p>
+
             <h2 id="admin-accesses-title">管理员访问记录</h2>
             <p>查看管理员读取本家庭数据的记录。</p>
           </div>

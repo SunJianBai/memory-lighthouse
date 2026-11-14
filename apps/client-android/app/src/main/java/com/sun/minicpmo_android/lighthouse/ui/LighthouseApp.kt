@@ -1010,7 +1010,7 @@ private fun AppHeader(
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                shape = RoundedCornerShape(12.dp),
+                shape = MaterialTheme.shapes.medium,
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -1235,7 +1235,7 @@ private fun CompanionScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(20.dp),
+            .padding(horizontal = 24.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {
@@ -1307,8 +1307,8 @@ private fun CompanionScreen(
         }
         Button(
             onClick = onOpenAi,
-            modifier = Modifier.fillMaxWidth().height(76.dp),
-            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 76.dp),
+            shape = MaterialTheme.shapes.large,
         ) {
             Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(30.dp))
             Spacer(Modifier.width(12.dp))
@@ -1422,7 +1422,7 @@ private fun QrScannerScreen(
         }
         Surface(
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-            shape = RoundedCornerShape(18.dp),
+            shape = MaterialTheme.shapes.large,
             modifier = Modifier.align(Alignment.TopCenter).padding(16.dp),
         ) {
             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1486,7 +1486,7 @@ private fun RemoteCallScreen(
         }
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant,
-            shape = RoundedCornerShape(28.dp),
+            shape = MaterialTheme.shapes.large,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
@@ -1649,7 +1649,7 @@ private fun CallStatusPill(
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-        shape = RoundedCornerShape(24.dp),
+        shape = MaterialTheme.shapes.large,
         modifier = modifier,
     ) {
         Row(

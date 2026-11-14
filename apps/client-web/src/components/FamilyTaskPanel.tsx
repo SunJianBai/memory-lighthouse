@@ -49,7 +49,7 @@ export function FamilyTaskPanel({
     <section className="panel-card">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">待办</p>
+
           <h2>家庭待办</h2>
         </div>
       </div>

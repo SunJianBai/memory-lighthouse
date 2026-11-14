@@ -1318,7 +1318,7 @@ export const CompanionPage = () => {
             <span>
               <ShieldCheck aria-hidden="true" size={32} />
             </span>
-            <p className="eyebrow">首次使用</p>
+
             <h1>陪伴设备激活</h1>
             <p>扫描家属端二维码以激活此设备。</p>
             <ol>
@@ -1331,7 +1331,7 @@ export const CompanionPage = () => {
             <section className="panel-card">
               <div className="panel-heading">
                 <div>
-                  <p className="eyebrow">推荐</p>
+
                   <h2>扫描激活二维码</h2>
                 </div>
                 <QrCode aria-hidden="true" size={24} />
@@ -1379,7 +1379,7 @@ export const CompanionPage = () => {
             <section className="panel-card">
               <div className="panel-heading">
                 <div>
-                  <p className="eyebrow">备用方式</p>
+
                   <h2>输入动态激活码</h2>
                 </div>
                 <Keyboard aria-hidden="true" size={24} />
@@ -1466,7 +1466,7 @@ export const CompanionPage = () => {
               <div className="incoming-pulse">
                 <PhoneCall aria-hidden="true" size={42} />
               </div>
-              <p className="eyebrow">家庭成员来电</p>
+
               <h1>家属来电</h1>
               <p>
                 {context?.recipient.preferredName}

@@ -61,7 +61,7 @@ internal fun TodayCareCard(
                 }
             }
         }
-        OutlinedCard(Modifier.fillMaxWidth()) {
+        ArchiveSection(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("今日照护", modifier = Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge)

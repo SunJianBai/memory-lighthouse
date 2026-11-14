@@ -61,7 +61,7 @@ export const GuidePage = () => {
 
       <section className="guide-hero" aria-labelledby="guide-title">
         <div>
-          <p className="eyebrow">产品文档</p>
+
           <h1 id="guide-title">使用指南</h1>
           <p>了解设备配置、日常使用和主要功能。无需登录即可阅读。</p>
         </div>

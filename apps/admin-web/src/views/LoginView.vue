@@ -45,7 +45,7 @@ async function submit(): Promise<void> {
         <span><strong>守忆灯塔</strong><small>Memory Lighthouse</small></span>
       </div>
       <div>
-        <p class="eyebrow">平台运营</p>
+
         <h1 id="product-title">守忆灯塔管理中心</h1>
       </div>
     </section>
@@ -53,7 +53,7 @@ async function submit(): Promise<void> {
     <section class="login-panel" aria-labelledby="login-title">
       <form class="login-card" @submit.prevent="submit">
         <div class="login-card__heading">
-          <p class="eyebrow">受控入口</p>
+
           <h2 id="login-title">登录管理中心</h2>
           <p>请使用已授予平台角色的邮箱或用户名。</p>
         </div>

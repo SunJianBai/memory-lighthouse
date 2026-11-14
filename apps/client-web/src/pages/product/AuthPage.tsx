@@ -200,7 +200,7 @@ export const AuthPage = ({ mode, token, returnToInvitation }: AuthPageProps) => 
           <BrandMark />
         </button>
         <div>
-          <p className="eyebrow">守忆灯塔</p>
+
           <h1>家属端</h1>
         </div>
         <ul>

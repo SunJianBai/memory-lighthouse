@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="守忆灯塔家庭档案样式展示。人物、记录和安排均为合成示例。">
+<title>家庭档案 · 守忆灯塔</title>
+<style>
+/* Hallmark · shape: app screen · genre: editorial · theme: family archive (by request) · nav: top family sections · footer: style comparison return · signature: dated family record index · states: static disabled examples · axes: warm paper/system sans/pine · posture: restrained · v2.0.0 */
+/* Hallmark · pre-emit critique: P4 H4 E4 S4 R5 V3 · weakest: V, kept familiar navigation but removed dashboard metrics in favour of the family record index */
+:root{--paper:#F5F3E9;--surface:#FCFBF5;--pine:#284B3C;--moss:#5F784F;--ink:#283B30;--muted:#5B6558;--line:#D4D9C9;--wash:#E7EBDC;--white:#FCFBF5;--pine-hover:#365D49;--clear:transparent;--font:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;--brand-font:"Songti SC","SimSun",serif;--radius:6px;--space-0:0;--space-auto:auto;--space-4:4px;--space-8:8px;--space-12:12px;--space-16:16px;--space-20:20px;--space-24:24px;--space-28:28px;--space-32:32px;--space-36:36px;--space-40:40px;--space-48:48px;--space-52:52px}
+*{box-sizing:border-box}html,body{margin:var(--space-0);overflow-x:clip}body{background:var(--paper);color:var(--ink);font:16px/1.65 var(--font);caret-color:var(--pine);scrollbar-color:var(--moss) var(--paper)}
+::selection{background:var(--pine);color:var(--white)}a{color:var(--pine);text-underline-offset:5px}button,input{font:inherit}button,a{-webkit-tap-highlight-color:var(--clear)}a:focus-visible,button:focus-visible{outline:3px solid var(--moss);outline-offset:5px}a[href]:hover{color:var(--moss)}button{cursor:pointer}button:disabled{cursor:not-allowed;opacity:.82}a[aria-disabled="true"]{cursor:not-allowed;text-decoration:none}a[href]:active{color:var(--ink)}
+.skip{position:absolute;top:-100px;left:24px;background:var(--surface);padding:var(--space-12) var(--space-16);z-index:2}.skip:focus{top:12px}.top{border-bottom:1px solid var(--line);background:var(--surface)}.top-inner{min-height:88px;max-width:1320px;margin:var(--space-auto);display:flex;align-items:center;gap:var(--space-52);padding:var(--space-16) var(--space-0)}
+.brand{display:flex;align-items:center;gap:var(--space-12);text-decoration:none;white-space:nowrap;color:var(--pine)}.brand strong{font:700 25px/1.3 var(--brand-font);letter-spacing:.04em}.brand svg{width:24px;height:24px;flex:none}.nav{display:flex;align-items:center;gap:var(--space-32);flex:1;min-width:0}.nav a{padding:var(--space-12) var(--space-0);text-decoration:none;white-space:nowrap}.nav a[aria-current]{border-bottom:2px solid var(--pine);font-weight:600}.account{font-weight:600;white-space:nowrap;text-decoration:none}
+.page{max-width:1320px;margin:var(--space-auto)}.page-head{display:flex;align-items:center;justify-content:space-between;padding:var(--space-28) var(--space-0) var(--space-24);border-bottom:1px solid var(--line);gap:var(--space-20)}.page-head h1{font-size:28px;line-height:1.35;margin:var(--space-0) var(--space-0) var(--space-4);font-weight:600}.page-head p{margin:var(--space-0);color:var(--muted)}.sample{white-space:nowrap;padding:var(--space-4) var(--space-12);border:1px solid var(--line);border-radius:var(--radius);font-size:14px;color:var(--muted)}
+.layout{display:grid;grid-template-columns:230px minmax(0,1fr);gap:var(--space-48);padding-top:var(--space-24)}.person{padding-right:var(--space-24);border-right:1px solid var(--line)}h1,h2,h3{min-width:0;overflow-wrap:break-word;text-wrap:balance}h2,h3,p{margin-top:var(--space-0)}h2{font-size:24px;line-height:1.4;font-weight:600;margin-bottom:var(--space-16)}h3{font-size:19px;line-height:1.5;font-weight:600;margin-bottom:var(--space-8)}.person h2{margin:var(--space-0) var(--space-0) var(--space-4)}.legal-name{color:var(--muted);margin-bottom:var(--space-20)}.person dl{margin:var(--space-0) var(--space-0) var(--space-20)}.person dt{color:var(--muted);margin-top:var(--space-12)}.person dd{margin:var(--space-0)}.text-link{font-weight:600}.family{margin-top:var(--space-24);padding-top:var(--space-20);border-top:1px solid var(--line)}.family h3{margin-bottom:var(--space-16)}.member{display:flex;justify-content:space-between;gap:var(--space-12);margin:var(--space-0) var(--space-0) var(--space-12)}.member span{color:var(--muted)}.family p:last-child{margin-top:var(--space-20)}.privacy{margin-top:var(--space-24);padding-top:var(--space-16);border-top:1px solid var(--line);color:var(--muted)}.privacy p{margin-bottom:var(--space-12)}
+.content{min-width:0}.content-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-20);margin-bottom:var(--space-24)}.content-head h2{margin:var(--space-0)}.actions{display:flex;align-items:center;gap:var(--space-20)}.actions form{margin:var(--space-0)}.button{white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:var(--space-8) var(--space-20);border:1px solid var(--pine);border-radius:var(--radius);background:var(--pine);color:var(--white);font-weight:600;text-decoration:none}.button:not(:disabled):hover{background:var(--pine-hover);color:var(--white)}.button.secondary{background:var(--clear);color:var(--pine)}.button.secondary:not(:disabled):hover{background:var(--wash)}
+.columns{display:grid;grid-template-columns:minmax(0,1fr) 284px;gap:var(--space-40)}.records{min-width:0}.filter{display:flex;gap:var(--space-24);padding-bottom:var(--space-12);border-bottom:1px solid var(--pine);margin-bottom:var(--space-0)}.filter a{text-decoration:none;color:var(--muted)}.filter a[aria-current]{color:var(--pine);font-weight:600}.record{display:grid;grid-template-columns:68px minmax(0,1fr);gap:var(--space-20);border-bottom:1px solid var(--line);padding:var(--space-24) var(--space-0)}.record time{display:block;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1.5}.record time b{display:block;color:var(--pine);font-size:21px;font-weight:600}.record h3{font-size:20px;margin:var(--space-0) var(--space-0) var(--space-8)}.record p{margin:var(--space-0) var(--space-0) var(--space-12);max-width:68ch}.record .source{margin:var(--space-0);color:var(--muted);font-size:14px}.record>div{min-width:0}.record-title{display:flex;align-items:center;justify-content:space-between;gap:var(--space-12)}.record-title a{font-size:14px;white-space:nowrap}.record:last-child{border-bottom:0}.record:nth-child(3){padding-top:var(--space-24);padding-bottom:var(--space-24)}
+.today{padding:var(--space-0) var(--space-0) var(--space-0) var(--space-24);border-left:1px solid var(--line)}.today-head{display:flex;justify-content:space-between;align-items:baseline;padding-bottom:var(--space-12);border-bottom:1px solid var(--pine);gap:var(--space-12)}.today-head h3{font-size:18px;margin:var(--space-0)}.today-head span{font-size:14px;color:var(--muted);white-space:nowrap}.appointment{padding:var(--space-24) var(--space-0) var(--space-24)}.appointment time{font-size:24px;font-weight:600;color:var(--pine);font-variant-numeric:tabular-nums}.appointment h3{margin:var(--space-4) var(--space-0) var(--space-8);font-size:20px}.appointment p{color:var(--muted);margin:var(--space-0) var(--space-0) var(--space-20)}.appointment .button{width:100%}.next{border-top:1px solid var(--line);padding-top:var(--space-20)}.next time{font-variant-numeric:tabular-nums;color:var(--muted)}.next h3{font-size:17px;margin:var(--space-4) var(--space-0)}.next p{color:var(--muted);margin:var(--space-0) var(--space-0) var(--space-20)}.schedule-link{display:block;margin-top:var(--space-24)}.note{margin:var(--space-32) var(--space-0) var(--space-0);padding:var(--space-20) var(--space-0) var(--space-0);border-top:1px solid var(--line);color:var(--muted);font-size:14px}
+.footer{display:flex;justify-content:space-between;gap:var(--space-24);margin-top:var(--space-24);padding:var(--space-16) var(--space-0) var(--space-20);border-top:1px solid var(--line);color:var(--muted);font-size:14px}.footer p{margin:var(--space-0)}.footer a{white-space:nowrap;font-weight:600}
+@media(max-width:1380px){.top-inner,.page{margin-left:var(--space-36);margin-right:var(--space-36)}.top-inner{gap:var(--space-36)}.nav{gap:var(--space-24)}.layout{gap:var(--space-36)}.columns{gap:var(--space-28);grid-template-columns:minmax(0,1fr) 265px}}
+@media(max-width:1080px){.top-inner{flex-wrap:wrap;gap:var(--space-12) var(--space-32)}.nav{order:3;flex-basis:100%;justify-content:space-between}.account{margin-left:var(--space-auto)}.layout{grid-template-columns:205px minmax(0,1fr);gap:var(--space-24)}.columns{grid-template-columns:minmax(0,1fr)}.today{padding:var(--space-24) var(--space-0) var(--space-0);border-left:0;border-top:1px solid var(--line)}.appointment{max-width:420px}.next,.note{max-width:420px}}
+@media(max-width:700px){.top-inner,.page{margin-left:var(--space-20);margin-right:var(--space-20)}.top-inner{padding-top:var(--space-20)}.nav{gap:var(--space-8) var(--space-20);flex-wrap:wrap;justify-content:flex-start}.nav a{font-size:15px}.page-head{align-items:flex-start;padding:var(--space-24) var(--space-0)}.page-head h1{font-size:26px}.sample{font-size:12px;padding:var(--space-4) var(--space-8)}.layout{display:block;padding-top:var(--space-24)}.person{padding:var(--space-0) var(--space-0) var(--space-24);border-right:0;border-bottom:1px solid var(--line)}.person dl{display:flex;gap:var(--space-32);margin:var(--space-0) var(--space-0) var(--space-16)}.person dt{margin-top:var(--space-0)}.legal-name{margin-bottom:var(--space-12)}.family,.privacy{margin-top:var(--space-24);padding-top:var(--space-20)}.content{padding-top:var(--space-28)}.content-head{align-items:flex-start;flex-wrap:wrap;gap:var(--space-16)}.content-head h2{font-size:24px}.actions{width:100%;justify-content:space-between}.record{grid-template-columns:54px minmax(0,1fr);gap:var(--space-12)}.record-title{align-items:flex-start}.record-title a{padding-top:var(--space-4)}.record p{margin-bottom:var(--space-12)}.filter{gap:var(--space-24)}.footer{display:block}.footer a{display:inline-block;margin-top:var(--space-12)}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到家庭档案</a>
+<header class="top">
+ <div class="top-inner">
+  <a class="brand" href="#main" aria-label="守忆灯塔，家庭档案">
+   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18h6m-5 4h4m1.09-8a6 6 0 1 0-6.18 0c.78.58 1.09 1.44 1.09 2.25V18h4v-1.75c0-.81.31-1.67 1.09-2.25Z"/></svg>
+   <strong>守忆灯塔</strong>
+  </a>
+  <nav class="nav" aria-label="家庭工作区">
+   <a role="link" aria-disabled="true" aria-current="page">家庭档案</a>
+   <a role="link" aria-disabled="true">日程提醒</a>
+   <a role="link" aria-disabled="true">陪伴设备</a>
+   <a role="link" aria-disabled="true">隐私授权</a>
+   <a role="link" aria-disabled="true">家庭通话</a>
+  </nav>
+  <a class="account" role="link" aria-disabled="true">陈静的家庭</a>
+ </div>
+</header>
+<main class="page" id="main">
+ <div class="page-head">
+  <div><h1>家庭档案</h1><p>查看陈奶奶的日常记录、生活偏好与今日安排。</p></div>
+  <span class="sample">示例数据</span>
+ </div>
+ <div class="layout">
+  <aside class="person" aria-label="长者与家庭成员">
+   <h2>陈奶奶</h2><p class="legal-name">陈淑芬</p>
+   <dl><div><dt>家人常用称呼</dt><dd>奶奶、妈妈</dd></div><div><dt>陪伴设备</dt><dd>客厅平板</dd></div></dl>
+   <a class="text-link" role="link" aria-disabled="true">查看长者资料</a>
+   <section class="family" aria-labelledby="family-title">
+    <h3 id="family-title">家庭成员</h3>
+    <p class="member"><strong>陈静</strong><span>女儿（我）</span></p>
+    <p class="member"><strong>小雨</strong><span>外孙女</span></p>
+    <p><a role="link" aria-disabled="true">管理家庭成员</a></p>
+   </section>
+   <section class="privacy" aria-label="资料授权入口"><p>家庭资料的使用范围，由家人共同确认。</p><a role="link" aria-disabled="true">查看隐私授权</a></section>
+  </aside>
+  <section class="content" aria-labelledby="records-title">
+   <div class="content-head">
+    <h2 id="records-title">记忆与日常</h2>
+    <div class="actions"><a role="link" aria-disabled="true">查看全部记忆</a><button class="button" type="button" disabled>添加记忆</button></div>
+   </div>
+   <div class="columns">
+    <div class="records">
+     <nav class="filter" aria-label="记录分类"><a role="link" aria-disabled="true" aria-current="true">全部记录</a><a role="link" aria-disabled="true">生活日常</a><a role="link" aria-disabled="true">人物与喜好</a></nav>
+     <article class="record">
+      <time datetime="2026-11-03"><b>11.03</b>星期二</time>
+      <div><div class="record-title"><h3>家人称呼</h3><a role="link" aria-disabled="true" aria-label="查看家人称呼记录">查看</a></div><p>女儿叫陈静，外孙女叫小雨。小雨平时喊她“奶奶”。</p><p class="source">陈静记录，10:20</p></div>
+     </article>
+     <article class="record">
+      <time datetime="2026-11-03"><b>11.03</b>星期二</time>
+      <div><div class="record-title"><h3>上午在小区散步</h3><a role="link" aria-disabled="true" aria-label="查看散步记录">查看</a></div><p>沿着楼下的小路走了一圈，回家后说，明天还想去看看桂花。</p><p class="source">陈静记录，09:40</p></div>
+     </article>
+     <article class="record">
+      <time datetime="2026-11-02"><b>11.02</b>星期一</time>
+      <div><div class="record-title"><h3>喜欢听越剧</h3><a role="link" aria-disabled="true" aria-label="查看越剧喜好记录">查看</a></div><p>吃过午饭后，喜欢坐在窗边听一会儿越剧。家人可以从这个话题聊起。</p><p class="source">小雨记录，16:30</p></div>
+     </article>
+    </div>
+    <aside class="today" aria-labelledby="today-title">
+     <div class="today-head"><h3 id="today-title">今日安排</h3><span>11 月 3 日</span></div>
+     <section class="appointment"><time datetime="2026-11-03T15:00">15:00</time><h3>家庭通话</h3><p>和陈奶奶聊聊今天的散步。</p><button class="button" type="button" disabled>进入家庭通话</button></section>
+     <section class="next"><time datetime="2026-11-03T19:30">19:30</time><h3>晚间听戏</h3><p>提醒陈奶奶听喜欢的越剧。</p><a role="link" aria-disabled="true">查看提醒</a></section>
+     <a class="schedule-link" role="link" aria-disabled="true">管理全部日程</a>
+    </aside>
+   </div>
+  </section>
+ </div>
+ <footer class="footer"><p>仅展示样式。人物、记录与安排均为合成示例。</p><a href="./index.html">返回风格展示</a></footer>
+</main>
+</body>
+</html>

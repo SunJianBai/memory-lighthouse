@@ -3,6 +3,7 @@ package com.sun.minicpmo_android.lighthouse.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -55,6 +56,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
@@ -231,7 +234,22 @@ internal fun FamilyManagementContent(
         section = FamilySection.OVERVIEW
     }
 
-    Column(Modifier.fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+      val expanded = maxWidth >= 720.dp
+      Row(Modifier.fillMaxSize()) {
+        if (expanded) {
+            NavigationRail(containerColor = MaterialTheme.colorScheme.background) {
+                FamilySection.entries.forEach { item ->
+                    NavigationRailItem(
+                        selected = section == item,
+                        onClick = { selectSection(item) },
+                        icon = { Icon(item.icon, contentDescription = null) },
+                        label = { Text(item.label) },
+                    )
+                }
+            }
+        }
+        Column(Modifier.weight(1f).fillMaxSize()) {
         WorkspaceSelector(
             state = state,
             onSelectHousehold = actions.selectHousehold,
@@ -307,8 +325,9 @@ internal fun FamilyManagementContent(
                 )
             }
         }
-        HorizontalDivider()
-        NavigationBar(Modifier.fillMaxWidth()) {
+        if (!expanded) {
+          HorizontalDivider()
+          NavigationBar(Modifier.fillMaxWidth(), containerColor = MaterialTheme.colorScheme.background, tonalElevation = 0.dp) {
             FamilySection.entries.forEach { item ->
                 NavigationBarItem(
                     selected = section == item,
@@ -323,6 +342,9 @@ internal fun FamilyManagementContent(
                 )
             }
         }
+        }
+      }
+      }
     }
 
     memberRoleEditor?.let { member ->
@@ -717,7 +739,7 @@ private fun OverviewSection(
                         val binding = state.bindings.firstOrNull {
                             it.recipientId == recipient.id && it.status == "ACTIVE"
                         }
-                        OutlinedCard(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                        ArchiveSection(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                             Column(
                                 Modifier.fillMaxWidth().padding(18.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -853,7 +875,7 @@ private fun AuthoritySection(
         } else {
             items(state.householdMembers, key = { it.id }) { member ->
                 val authority = state.careAuthorities.firstOrNull { it.memberId == member.id }
-                OutlinedCard(Modifier.fillMaxWidth()) {
+                ArchiveSection(Modifier.fillMaxWidth()) {
                     Column(
                         Modifier.fillMaxWidth().padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1332,7 +1354,7 @@ internal fun MemoriesSection(
             }
         } else {
             items(state.memories, key = { it.id }) { memory ->
-                OutlinedCard(Modifier.fillMaxWidth()) {
+                ArchiveSection(Modifier.fillMaxWidth()) {
                     Column(
                         Modifier.fillMaxWidth().padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1510,7 +1532,7 @@ internal fun PrivacySection(
         items(ConsentCatalog.entries, key = { it.scope }) { definition ->
             val consent = state.consents.firstOrNull { it.scope == definition.scope }
             val granted = consent?.granted == true
-            OutlinedCard(Modifier.fillMaxWidth()) {
+            ArchiveSection(Modifier.fillMaxWidth()) {
                 Column(
                     Modifier.fillMaxWidth().padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1577,7 +1599,7 @@ private fun RoutineCard(
     busy: Boolean,
 ) {
     val schedule = routine.schedules.firstOrNull()
-    OutlinedCard(Modifier.fillMaxWidth().testTag("routine-card")) {
+    ArchiveSection(Modifier.fillMaxWidth().testTag("routine-card")) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1651,7 +1673,7 @@ internal fun FamilyTaskCard(
     var confirmRelease by remember(task.id, task.version, task.canRelease) { mutableStateOf(false) }
     val releaseFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(busy) { if (busy) confirmRelease = false }
-    OutlinedCard(Modifier.fillMaxWidth().testTag("family-task-card")) {
+    ArchiveSection(Modifier.fillMaxWidth().testTag("family-task-card")) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1750,7 +1772,7 @@ internal fun OccurrenceCard(
     timezone: String?,
     onVerify: (OccurrenceView, Boolean) -> Unit,
 ) {
-    OutlinedCard(Modifier.fillMaxWidth().testTag("care-occurrence-card")) {
+    ArchiveSection(Modifier.fillMaxWidth().testTag("care-occurrence-card")) {
         Column(
             Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1787,7 +1809,7 @@ internal fun OccurrenceCard(
 
 @Composable
 internal fun CareEventCard(event: CareEventView, timezone: String?) {
-    OutlinedCard(Modifier.fillMaxWidth().testTag("care-event-card")) {
+    ArchiveSection(Modifier.fillMaxWidth().testTag("care-event-card")) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusLabel(careEventSeverityLabel(event.severity))
             Text(event.title, style = MaterialTheme.typography.titleMedium)
@@ -1871,7 +1893,7 @@ private fun SetupCard(
     actionLabel: String,
     onAction: () -> Unit,
 ) {
-    OutlinedCard(Modifier.fillMaxWidth()) {
+    ArchiveSection(Modifier.fillMaxWidth()) {
         Column(
             Modifier.fillMaxWidth().padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -1898,10 +1920,10 @@ private fun SetupCard(
 
 @Composable
 private fun MetricCard(label: String, value: String, modifier: Modifier = Modifier) {
-    Card(modifier) {
+    ArchiveSection(modifier) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(label, style = MaterialTheme.typography.labelLarge)
-            Text(value, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
         }
     }
 }
@@ -1935,7 +1957,7 @@ private fun StatusLabel(label: String) {
 
 @Composable
 private fun InlineEmpty(title: String, body: String) {
-    OutlinedCard(Modifier.fillMaxWidth()) {
+    ArchiveSection(Modifier.fillMaxWidth()) {
         Column(
             Modifier.fillMaxWidth().padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),

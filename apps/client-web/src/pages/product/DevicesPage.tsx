@@ -404,7 +404,7 @@ export const DevicesPage = () => {
       <section className="panel-card activation-panel">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">设备激活</p>
+
             <h2>添加陪伴设备</h2>
           </div>
           <QrCode aria-hidden="true" size={25} />
@@ -590,7 +590,7 @@ export const DevicesPage = () => {
       <section className="panel-card binding-panel">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">已绑定</p>
+
             <h2>当前家庭设备</h2>
           </div>
           <button

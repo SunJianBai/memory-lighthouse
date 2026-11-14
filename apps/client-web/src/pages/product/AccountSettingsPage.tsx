@@ -128,7 +128,7 @@ export const AccountSettingsPage = () => {
   return (
     <div className="settings-api-grid">
       <section className="panel-card account-card">
-        <div className="panel-heading"><div><p className="eyebrow">身份</p><h2>账号与邮箱</h2></div>{email?.verifiedAt ? <CheckCircle2 aria-hidden="true" size={25} /> : <ShieldAlert aria-hidden="true" size={25} />}</div>
+        <div className="panel-heading"><div><h2>账号与邮箱</h2></div>{email?.verifiedAt ? <CheckCircle2 aria-hidden="true" size={25} /> : <ShieldAlert aria-hidden="true" size={25} />}</div>
         <dl className="account-details">
           <div><dt>显示名称</dt><dd>{auth.user?.displayName}</dd></div>
           <div><dt>邮箱</dt><dd>{email?.value ?? "未绑定邮箱"}</dd></div>
@@ -193,7 +193,7 @@ export const AccountSettingsPage = () => {
       </section>
 
       <section className="panel-card sessions-card">
-        <div className="panel-heading"><div><p className="eyebrow">安全</p><h2>登录会话</h2></div><button className="icon-button" type="button" disabled={loading} onClick={() => void load()} aria-label="刷新登录会话"><RefreshCw aria-hidden="true" size={19} /></button></div>
+        <div className="panel-heading"><div><h2>登录会话</h2></div><button className="icon-button" type="button" disabled={loading} onClick={() => void load()} aria-label="刷新登录会话"><RefreshCw aria-hidden="true" size={19} /></button></div>
         {error && <div className="form-message error" role="alert">{error}</div>}
         <div className="session-list">
           {sessions.map((session) => {

@@ -887,7 +887,7 @@ const RoutinePageBody = () => {
           <section className="panel-card">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">日程</p>
+
                 <h2>日程安排</h2>
               </div>
               <span className="count-badge">

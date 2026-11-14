@@ -73,7 +73,7 @@ watch(
   <div class="page-stack">
     <header class="page-header">
       <div>
-        <p class="eyebrow">Platform metadata</p>
+
         <h1 id="page-title">{{ definition.title }}</h1>
         <p>{{ definition.description }}</p>
       </div>

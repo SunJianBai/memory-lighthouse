@@ -238,7 +238,7 @@ export const CareAuthorityPanel = ({
     return (
       <section className="panel-card authority-management-panel">
         <div className="panel-heading">
-          <div><p className="eyebrow">成员权限</p><h2>{recipientName} 的照护权限</h2></div>
+          <div><h2>{recipientName} 的照护权限</h2></div>
           <ShieldCheck aria-hidden="true" size={24} />
         </div>
         <p className="field-help">仅家庭所有者可以管理成员权限。</p>
@@ -249,7 +249,7 @@ export const CareAuthorityPanel = ({
   return (
     <section className="panel-card authority-management-panel">
       <div className="panel-heading">
-        <div><p className="eyebrow">成员权限</p><h2>{recipientName} 的照护权限</h2></div>
+        <div><h2>{recipientName} 的照护权限</h2></div>
         <UserCog aria-hidden="true" size={25} />
       </div>
       <p className="field-help">

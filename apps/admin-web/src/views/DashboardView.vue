@@ -77,7 +77,7 @@ onMounted(load)
   <div class="page-stack">
     <header class="page-header">
       <div>
-        <p class="eyebrow">Operations overview</p>
+
         <h1 id="page-title">运行概览</h1>
         <p>平台运行数据概览。</p>
       </div>

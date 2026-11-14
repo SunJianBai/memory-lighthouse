@@ -297,7 +297,7 @@ fun MiniCpmRoute(
 }
 
 @Composable
-private fun MiniCpmApp(
+internal fun MiniCpmApp(
     state: AppUiState,
     cameraPermissionGranted: Boolean,
     snackbarHostState: SnackbarHostState,
@@ -633,8 +633,8 @@ private fun ModeSelector(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(colors.surfaceContainer, RoundedCornerShape(18.dp))
-            .border(1.dp, colors.outlineVariant, RoundedCornerShape(18.dp))
+            .background(colors.surfaceContainer, MaterialTheme.shapes.large)
+            .border(1.dp, colors.outlineVariant, MaterialTheme.shapes.large)
             .padding(4.dp)
             .selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -650,7 +650,7 @@ private fun ModeSelector(
                 modifier = Modifier
                     .weight(1f)
                     .heightIn(min = 48.dp)
-                    .clip(RoundedCornerShape(14.dp))
+                    .clip(MaterialTheme.shapes.medium)
                     .background(if (active) colors.primaryContainer else Color.Transparent)
                     .selectable(
                         selected = active,
@@ -875,7 +875,7 @@ private fun ChatComposer(
     val colors = MaterialTheme.colorScheme
     Surface(
         color = colors.surfaceContainer,
-        shape = RoundedCornerShape(24.dp),
+        shape = MaterialTheme.shapes.large,
         border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
         modifier = Modifier
             .fillMaxWidth()
@@ -951,9 +951,9 @@ private fun AudioDuplexScreen(
         ) {
             val compact = maxHeight < 480.dp
             val orbSize = when {
-                maxHeight < 340.dp -> 104.dp
-                maxHeight < 480.dp -> 144.dp
-                else -> 200.dp
+                maxHeight < 340.dp -> 80.dp
+                maxHeight < 480.dp -> 112.dp
+                else -> 144.dp
             }
             Column(
                 modifier = Modifier
@@ -1007,37 +1007,11 @@ private fun AudioDuplexScreen(
 
 @Composable
 private fun SignalOrb(level: Float, active: Boolean, modifier: Modifier = Modifier) {
-    val transition = rememberInfiniteTransition(label = "signal-orb")
-    val breathing by transition.animateFloat(
-        initialValue = 0.92f,
-        targetValue = 1.06f,
-        animationSpec = infiniteRepeatable(tween(1_600), RepeatMode.Reverse),
-        label = "orb-breathing",
-    )
-    val strength = if (active) (0.25f + level * 0.75f) * breathing else 0.16f
+    val strength = if (active) 0.25f + level.coerceIn(0f, 1f) * 0.75f else 0.16f
     val signalColor = MaterialTheme.colorScheme.primary
 
     Canvas(modifier = modifier.semantics { contentDescription = "实时声音波形" }) {
         val center = Offset(size.width / 2f, size.height / 2f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(
-                    signalColor.copy(alpha = 0.5f * strength),
-                    signalColor.copy(alpha = 0.08f),
-                    Color.Transparent,
-                ),
-                center = center,
-                radius = size.minDimension / 2f,
-            ),
-            radius = size.minDimension / 2f,
-        )
-        repeat(3) { ring ->
-            drawCircle(
-                color = signalColor.copy(alpha = 0.18f - ring * 0.04f),
-                radius = size.minDimension * (0.25f + ring * 0.09f) * (1f + level * 0.08f),
-                style = Stroke(width = 1.4.dp.toPx()),
-            )
-        }
         val barCount = 21
         val maxHeight = size.height * 0.28f
         val barWidth = size.width * 0.012f
@@ -1067,7 +1041,7 @@ private fun TranscriptPreview(
     val colors = MaterialTheme.colorScheme
     Surface(
         color = if (overMedia) Color.Black.copy(alpha = 0.68f) else colors.surfaceContainerHigh,
-        shape = RoundedCornerShape(18.dp),
+        shape = MaterialTheme.shapes.large,
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
             if (overMedia) Color.White.copy(alpha = 0.34f) else colors.outlineVariant,
@@ -1246,9 +1220,9 @@ private fun VideoPreview(
     val colors = MaterialTheme.colorScheme
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(28.dp))
+            .clip(MaterialTheme.shapes.large)
             .background(colors.surfaceContainerHigh)
-            .border(1.dp, colors.outlineVariant, RoundedCornerShape(28.dp)),
+            .border(1.dp, colors.outlineVariant, MaterialTheme.shapes.large),
     ) {
         if (showCameraPreview) {
             NativeCameraPreview(
@@ -1322,7 +1296,7 @@ private fun VideoPreview(
                     .border(
                         1.dp,
                         Color.White.copy(alpha = 0.34f),
-                        RoundedCornerShape(16.dp),
+                        MaterialTheme.shapes.medium,
                     ),
             ) {
                 Icon(Icons.Rounded.Cameraswitch, contentDescription = "切换摄像头")
@@ -1384,7 +1358,7 @@ private fun CameraErrorBanner(message: String) {
     Surface(
         color = colors.errorContainer,
         contentColor = colors.onErrorContainer,
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.medium,
         border = androidx.compose.foundation.BorderStroke(1.dp, colors.error.copy(alpha = 0.55f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -1419,7 +1393,7 @@ private fun SessionErrorBanner(
     Surface(
         color = colors.errorContainer,
         contentColor = colors.onErrorContainer,
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.medium,
         border = androidx.compose.foundation.BorderStroke(1.dp, colors.error.copy(alpha = 0.55f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -1467,7 +1441,7 @@ private fun DuplexControls(
     val colors = MaterialTheme.colorScheme
     Surface(
         color = colors.surfaceContainer,
-        shape = RoundedCornerShape(24.dp),
+        shape = MaterialTheme.shapes.large,
         border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
         modifier = Modifier
             .fillMaxWidth()
@@ -1484,7 +1458,7 @@ private fun DuplexControls(
                         containerColor = colors.primary,
                         contentColor = colors.onPrimary,
                     ),
-                    shape = RoundedCornerShape(16.dp),
+                    shape = MaterialTheme.shapes.medium,
                 ) {
                     Icon(Icons.Rounded.PlayArrow, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
@@ -1740,7 +1714,7 @@ private fun SettingsSheet(
                             containerColor = colors.primary,
                             contentColor = colors.onPrimary,
                         ),
-                        shape = RoundedCornerShape(16.dp),
+                        shape = MaterialTheme.shapes.medium,
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 52.dp),

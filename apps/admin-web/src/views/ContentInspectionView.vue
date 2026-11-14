@@ -264,7 +264,7 @@ onBeforeUnmount(clearInspectionResult)
   <div class="page-stack inspection-page">
     <header class="page-header">
       <div>
-        <p class="eyebrow eyebrow--danger">Development only · high risk</p>
+
         <h1 id="page-title">开发期原文检查</h1>
         <p>申请、审批并执行原文检查。</p>
       </div>
@@ -467,7 +467,7 @@ onBeforeUnmount(clearInspectionResult)
             {{ inspectionResult.value.watermark.operatorUserId }} · {{ inspectionResult.value.watermark.grantId }} · {{ inspectionResult.value.watermark.requestId }}
           </div>
           <header>
-            <div><p class="eyebrow eyebrow--danger">Original content · audited</p><h3>{{ inspectionResult.kind === 'memory' ? inspectionResult.value.title : `话轮 #${inspectionResult.value.sequenceNo}` }}</h3></div>
+            <div><h3>{{ inspectionResult.kind === 'memory' ? inspectionResult.value.title : `话轮 #${inspectionResult.value.sequenceNo}` }}</h3></div>
             <StatusBadge :status="inspectionResult.kind === 'memory' ? inspectionResult.value.verificationStatus : inspectionResult.value.speaker" />
           </header>
           <pre>{{ inspectionResult.kind === 'memory' ? inspectionResult.value.content : inspectionResult.value.rawText }}</pre>
