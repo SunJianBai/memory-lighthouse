@@ -14,7 +14,7 @@ concurrency:
 jobs:
   prepare:
     name: Export original program images without production data
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/codex/release-program-relay'
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 25
@@ -39,8 +39,8 @@ jobs:
           set -euo pipefail
           # Fixed recovery set from current-app's root-owned attestations.
           # No database, environment file, volume or household content is exported.
-          revision=9f4888d29af093f73e0cede886e537b3b07c81de
-          release=git-9f4888d29af0
+          revision=f1a67a8b2dca905655270c050bf2f9152caef8ef
+          release=git-f1a67a8b2dca
           auth_dir="$(mktemp -d "$RUNNER_TEMP/rollback-auth.XXXXXX")"
           trap 'rm -rf -- "$auth_dir"' EXIT
           printf '%s' "$GH_TOKEN" | docker --config "$auth_dir" login ghcr.io \
@@ -49,26 +49,44 @@ jobs:
           while read -r component digest; do
             image="openbmb-$component:$release"
             pinned="ghcr.io/sunjianbai/memory-lighthouse-delivery@sha256:$digest"
+            if [[ "$component" == clamav ]]; then
+              pinned="clamav/clamav-debian@sha256:$digest"
+            fi
             docker --config "$auth_dir" pull "$pinned"
             [[ "$(docker image inspect --format '{{.Id}}' "$pinned")" == "sha256:$digest" ]]
-            [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$pinned")" == "$revision" ]]
+            case "$component" in
+              api|migrator|client-web|admin-web)
+                [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$pinned")" == "$revision" ]]
+                ;;
+            esac
             docker tag "$pinned" "$image"
             images+=("$image")
           done <<'IMAGES'
-          api 470f3b00158aef5ab8aa4bfddcaf3bc0da6585afd08d198124c1a955ff71cfc8
-          migrator 1b34d5f9280838b10cbd71c4b3711e7a07bbbe01f8b53484f840d7ad9f00b5e9
-          client-web 0e890ea351f56a74e17679de24260596ebbe57aa5e3002f30bf3a32f30a1d041
-          admin-web 082eedb19e55789748d253ec2e3684337f1fa47e0d6cd90eef1f51b3ca75caed
+          api 413b3933d0a94b7c32f202073f6515c0894c9031f0adc5fa2161b6d9104046cd
+          migrator 1c6a9485105bb8dd6a4626eda5149c53fee237b2354e62e9d331c36acbf79f8f
+          client-web 3228ba6e2963897cac4c5cd3913bb1387adae4fdf1253cc97f0bdc4ec4563ada
+          admin-web a46e73e2f92eace6949a956ddb374ebe493fbcd2327ae57c8d12a9130b5a594a
+          minio 3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb
+          minio-mc 9ba8cb7340dd57ee994f6e2a8e45bc0dde9d5369615b03c6021105e5b9ce4449
+          clamav 35a1a2ff78b94655d82a3a13baa0b4dfa170131d3b9aaa6edc80c6c04c9194f3
           IMAGES
           install -d -m 0700 "$RUNNER_TEMP/rollback-relay"
           docker save "${images[@]}" | gzip -1 > "$RUNNER_TEMP/rollback-relay/rollback-$release.tar.gz"
           cd "$RUNNER_TEMP/rollback-relay"
           sha256sum "rollback-$release.tar.gz" > SHA256SUMS
+          for component in api migrator client-web admin-web mysql redis minio minio-mc livekit clamav; do
+            transport_release="$release"
+            case "$component" in minio|minio-mc) transport_release=git-9f4888d29af0 ;; esac
+            ref="ghcr.io/sunjianbai/memory-lighthouse-delivery:$component-$transport_release"
+            digest="$(DOCKER_CONFIG="$auth_dir" docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' | jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))')"
+            printf 'openbmb-%s:%s %s %s\n' "$component" "$release" "$ref" "$digest" >> transport.txt
+          done
+          sha256sum transport.txt >> SHA256SUMS
 
       - name: Upload private short-lived relay artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: rollback-programs-git-9f4888d29af0
+          name: release-programs-git-f1a67a8b2dca
           path: ${{ runner.temp }}/rollback-relay/
           retention-days: 1
           compression-level: 0
