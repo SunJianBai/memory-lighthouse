@@ -129,6 +129,32 @@ test('storage publishing verifies the pulled platform manifest, not its unavaila
   }
 });
 
+test('public release health ignores unrelated root 404s but still rejects an unhealthy OpenBMB API', () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'openbmb-health-scope-'));
+  try {
+    writeFileSync(join(fixture, 'verify-clamav.sh'), '#!/usr/bin/env bash\nexit 0\n');
+    for (const path of ['infra/production/scripts/health-check.sh', 'infra/production/hybrid/bootstrap/openbmb-hybrid-health']) {
+      const script = join(fixture, 'health.sh');
+      writeFileSync(script, read(path));
+      for (const failApi of [false, true]) {
+        const result = spawnSync(bash, ['-c', `
+          curl() {
+            for arg in "$@"; do
+              [[ "$arg" != https://sun227454.online/ ]] || return 22
+              if [[ '${failApi}' == true && "$arg" == */openBMB/api/v1/health/ready ]]; then return 22; fi
+            done
+          }
+          sleep() { :; }
+          export -f curl sleep
+          bash '${shellPath(script)}' --public
+        `], { encoding: 'utf8', timeout: 15000 });
+        if (failApi) assert.notEqual(result.status, 0, `${path}: API failure must block release`);
+        else assert.equal(result.status, 0, `${path}: unrelated root must not block release\n${result.stderr}`);
+      }
+    }
+  } finally { rmSync(fixture, { recursive: true, force: true }); }
+});
+
 test('a newer main cannot interrupt already-activated Docker-to-hybrid completion', () => {
   const beforeActivation = full.slice(full.indexOf('Reject stale or unvalidated activation'), full.indexOf('Activate validated release'));
   assert.match(beforeActivation, /assert-current-main.sh/);

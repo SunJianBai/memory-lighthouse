@@ -33,7 +33,8 @@ if [[ "$mode" == --local ]]; then
   retry 'LiveKit signal' curl --fail --silent --show-error http://127.0.0.1:17880/ --output /dev/null
 elif [[ "$mode" == --public ]]; then
   retry 'ClamAV PING and INSTREAM (host loopback)' clamav_ready
-  retry 'CampusHub fallback' curl --fail --silent --show-error "https://$root_domain/" --output /dev/null
+  # Other applications at / have independent lifecycles. Keep this release gate
+  # scoped to OpenBMB; do not block its recovery on an unrelated site's status.
   retry 'OpenBMB client' curl --fail --silent --show-error "https://$root_domain/openBMB/" --output /dev/null
   retry 'OpenBMB admin' curl --fail --silent --show-error "https://$root_domain/openBMB/admin/" --output /dev/null
   retry 'OpenBMB API readiness' curl --fail --silent --show-error "https://$root_domain/openBMB/api/v1/health/ready" --output /dev/null

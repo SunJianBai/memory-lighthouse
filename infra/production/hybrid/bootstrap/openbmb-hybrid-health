@@ -84,7 +84,7 @@ case "$mode" in
     retry 'MinIO health' curl_quiet 'http://127.0.0.1:19000/minio/health/live'
     ;;
   --public)
-    retry 'CampusHub fallback' curl_quiet "https://$domain/"
+    # The root site is not part of the OpenBMB deployment or rollback boundary.
     retry 'OpenBMB client' curl_quiet "https://$domain/openBMB/"
     retry 'OpenBMB admin' curl_quiet "https://$domain/openBMB/admin/"
     retry 'OpenBMB API readiness' curl_quiet \
