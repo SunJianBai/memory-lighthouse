@@ -98,6 +98,37 @@ test('existing storage copies are pinned, verified, and never republished', () =
   assert.doesNotMatch(ci, /TX4H4G_SSH|docker push/);
 });
 
+test('storage publishing verifies the pulled platform manifest, not its unavailable parent index', () => {
+  // Production's original indexes contain these exact linux/amd64 children.
+  // GHCR stores those children, so pulling by digest yields the child identity.
+  const fixtures = [
+    ['minio', '3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb', 'a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e'],
+    ['minio-mc', '9ba8cb7340dd57ee994f6e2a8e45bc0dde9d5369615b03c6021105e5b9ce4449', '7e3efb09c22c0882fbf341b9d99f61f94ae6c4c20a06f2f1a2b20ea8993d8952'],
+  ];
+  const publish = full.slice(full.indexOf('name: Publish exact release transport images'), full.indexOf('name: Transfer exact release images'));
+  const storageGuard = publish.slice(publish.indexOf('if openbmb_existing_storage_image'), publish.indexOf('delivery_ref='));
+  for (const [component, platformDigest, parentIndex] of fixtures) {
+    for (const actual of [platformDigest, parentIndex, 'f'.repeat(64)]) {
+      const result = spawnSync(bash, ['-c', `
+        set -euo pipefail
+        source infra/production/scripts/release-image-set.sh
+        components=(${component})
+        images=(openbmb-${component}:git-000000000000)
+        transport_manifest=/dev/null
+        docker() { printf '%s\\n' 'sha256:${actual}'; }
+        for index in 0; do
+          ${storageGuard}
+        done
+      `], { cwd: root, encoding: 'utf8', timeout: 15000 });
+      if (actual === platformDigest) {
+        assert.equal(result.status, 0, `${component}: pinned platform must pass\n${result.stderr}`);
+      } else {
+        assert.notEqual(result.status, 0, `${component}: a different image identity must fail`);
+      }
+    }
+  }
+});
+
 test('a newer main cannot interrupt already-activated Docker-to-hybrid completion', () => {
   const beforeActivation = full.slice(full.indexOf('Reject stale or unvalidated activation'), full.indexOf('Activate validated release'));
   assert.match(beforeActivation, /assert-current-main.sh/);
