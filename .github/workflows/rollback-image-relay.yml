@@ -1,0 +1,75 @@
+name: Prepare pinned rollback image relay
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: openbmb-rollback-image-relay
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Export original program images without production data
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 25
+    steps:
+      - name: Enable stable OCI image identities on the disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          config=/etc/docker/daemon.json
+          current='{}'
+          if sudo test -f "$config"; then current="$(sudo cat "$config")"; fi
+          jq '.features = ((.features // {}) + {"containerd-snapshotter": true})' <<<"$current" |
+            sudo tee "$config" >/dev/null
+          sudo systemctl restart docker
+          docker info --format '{{json .DriverStatus}}' | grep -Fq io.containerd.snapshotter.v1
+
+      - name: Restore the attested rollback programs on the runner
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Fixed recovery set from current-app's root-owned attestations.
+          # No database, environment file, volume or household content is exported.
+          revision=9f4888d29af093f73e0cede886e537b3b07c81de
+          release=git-9f4888d29af0
+          auth_dir="$(mktemp -d "$RUNNER_TEMP/rollback-auth.XXXXXX")"
+          trap 'rm -rf -- "$auth_dir"' EXIT
+          printf '%s' "$GH_TOKEN" | docker --config "$auth_dir" login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin >/dev/null
+          images=()
+          while read -r component digest; do
+            image="openbmb-$component:$release"
+            pinned="ghcr.io/sunjianbai/memory-lighthouse-delivery@sha256:$digest"
+            docker --config "$auth_dir" pull "$pinned"
+            [[ "$(docker image inspect --format '{{.Id}}' "$pinned")" == "sha256:$digest" ]]
+            [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$pinned")" == "$revision" ]]
+            docker tag "$pinned" "$image"
+            images+=("$image")
+          done <<'IMAGES'
+          api 470f3b00158aef5ab8aa4bfddcaf3bc0da6585afd08d198124c1a955ff71cfc8
+          migrator 1b34d5f9280838b10cbd71c4b3711e7a07bbbe01f8b53484f840d7ad9f00b5e9
+          client-web 0e890ea351f56a74e17679de24260596ebbe57aa5e3002f30bf3a32f30a1d041
+          admin-web 082eedb19e55789748d253ec2e3684337f1fa47e0d6cd90eef1f51b3ca75caed
+          IMAGES
+          install -d -m 0700 "$RUNNER_TEMP/rollback-relay"
+          docker save "${images[@]}" | gzip -1 > "$RUNNER_TEMP/rollback-relay/rollback-$release.tar.gz"
+          cd "$RUNNER_TEMP/rollback-relay"
+          sha256sum "rollback-$release.tar.gz" > SHA256SUMS
+
+      - name: Upload private short-lived relay artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rollback-programs-git-9f4888d29af0
+          path: ${{ runner.temp }}/rollback-relay/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
